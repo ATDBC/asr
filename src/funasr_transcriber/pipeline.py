@@ -12,7 +12,13 @@ from .config import AppConfig
 from .diagnostics import Diagnostics, collect_runtime_info
 from .errors import TranscriptionError
 from .overlap import OverlapEnhancement
-from .schemas import AsrResult, SpeakerSegment, Transcript
+from .schemas import (
+    AsrResult,
+    AttributedToken,
+    RecognizedSentence,
+    SpeakerSegment,
+    Transcript,
+)
 from .turns import build_turns
 
 
@@ -43,17 +49,65 @@ class PipelineResult:
     asr_text: str
 
 
+@dataclass(frozen=True, slots=True)
+class LanguageSummary:
+    primary_language: str | None
+    duration_ms: dict[str, int]
+    duration_ratio: dict[str, float]
+
+
 def normalize_for_integrity(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text)
     return "".join(character for character in normalized if not character.isspace())
+
+
+def summarize_languages(
+    sentences: tuple[RecognizedSentence, ...],
+) -> LanguageSummary:
+    durations: dict[str, int] = {}
+    for sentence in sentences:
+        duration_ms = sentence.end_ms - sentence.start_ms
+        durations[sentence.language] = (
+            durations.get(sentence.language, 0) + duration_ms
+        )
+    ordered = dict(sorted(durations.items()))
+    total_ms = sum(ordered.values())
+    ratios = {
+        language: duration_ms / total_ms
+        for language, duration_ms in ordered.items()
+    } if total_ms else {}
+    primary = (
+        max(ordered, key=lambda language: ordered[language])
+        if ordered
+        else None
+    )
+    return LanguageSummary(primary, ordered, ratios)
+
+
+def attribute_primary(
+    asr_result: AsrResult,
+    speaker_segments: tuple[SpeakerSegment, ...],
+    config: AppConfig,
+) -> tuple[AttributedToken, ...]:
+    if asr_result.untimed_sentences:
+        raise TranscriptionError(
+            "FireRed ASR requires complete timestamps for all text"
+        )
+    return attribute_tokens(
+        tokens=asr_result.tokens,
+        speaker_segments=speaker_segments,
+        high_coverage_ratio=config.alignment.high_coverage_ratio,
+        medium_coverage_ratio=config.alignment.medium_coverage_ratio,
+        nearest_gap_ms=config.alignment.nearest_gap_ms,
+    )
 
 
 class TranscriptionPipeline:
     def __init__(
         self,
         config: AppConfig,
-        asr_engine: AsrEngine,
-        diarizer: DiarizationEngine,
+        asr_engine: AsrEngine | None = None,
+        diarizer: DiarizationEngine | None = None,
         local_redecoder: LocalRedecoder | None = None,
         overlap_enhancer: OverlapEnhancer | None = None,
     ):
@@ -63,11 +117,103 @@ class TranscriptionPipeline:
         self.local_redecoder = local_redecoder
         self.overlap_enhancer = overlap_enhancer
 
-    def run_normalized(self, path: Path) -> PipelineResult:
-        diagnostics = Diagnostics(
+    def new_diagnostics(self) -> Diagnostics:
+        return Diagnostics(
             runtime=collect_runtime_info(),
             config=asdict(self.config),
         )
+
+    def _record_asr_metadata(
+        self,
+        diagnostics: Diagnostics,
+        asr_result: AsrResult,
+    ) -> None:
+        summary = summarize_languages(asr_result.sentences)
+        diagnostics.asr = {
+            "duration_ms": asr_result.duration_ms,
+            "vad_segments_ms": [list(item) for item in asr_result.vad_segments_ms],
+            "languages": {
+                "primary": summary.primary_language,
+                "duration_ms": summary.duration_ms,
+                "duration_ratio": summary.duration_ratio,
+            },
+            "sentences": [
+                {
+                    "text": sentence.text,
+                    "start_ms": sentence.start_ms,
+                    "end_ms": sentence.end_ms,
+                    "language": sentence.language,
+                    "language_confidence": sentence.language_confidence,
+                    "asr_confidence": sentence.asr_confidence,
+                }
+                for sentence in asr_result.sentences
+            ],
+        }
+        if (
+            summary.primary_language is not None
+            and summary.primary_language != "zh mandarin"
+        ):
+            diagnostics.warn(
+                "primary language is not zh mandarin: "
+                f"{summary.primary_language}"
+            )
+        threshold = self.config.asr.lid_warning_confidence
+        for index, sentence in enumerate(asr_result.sentences, start=1):
+            if sentence.language_confidence < threshold:
+                diagnostics.warn(
+                    "low LID confidence for sentence "
+                    f"{index}: {sentence.language_confidence:.3f} < "
+                    f"{threshold:.3f}"
+                )
+
+    def finish(
+        self,
+        asr_result: AsrResult,
+        attributed_tokens: tuple[AttributedToken, ...],
+        speaker_segments: tuple[SpeakerSegment, ...],
+        diagnostics: Diagnostics,
+        overlap_enhancement: OverlapEnhancement | None = None,
+    ) -> PipelineResult:
+        self._record_asr_metadata(diagnostics, asr_result)
+        attributed = attributed_tokens
+        overlap_modified = False
+        if overlap_enhancement is not None:
+            attributed = overlap_enhancement.tokens
+            overlap_modified = overlap_enhancement.modified
+            for warning in overlap_enhancement.warnings:
+                diagnostics.warn(warning)
+        with diagnostics.stage("turns"):
+            turns = build_turns(
+                attributed,
+                merge_gap_ms=int(
+                    round(self.config.turns.merge_gap_seconds * 1000)
+                ),
+            )
+        transcript = Transcript(
+            language=self.config.general.language,
+            speaker_count=len(
+                {segment.speaker_id for segment in speaker_segments}
+            ),
+            turns=turns,
+            warnings=tuple(diagnostics.warnings),
+        )
+        if (
+            not overlap_modified
+            and normalize_for_integrity(asr_result.text)
+            != normalize_for_integrity(transcript.full_text)
+        ):
+            raise TranscriptionError(
+                "text integrity check failed between ASR and final turns"
+            )
+        diagnostics.speaker_count = transcript.speaker_count
+        return PipelineResult(transcript, diagnostics, asr_result.text)
+
+    def run_normalized(self, path: Path) -> PipelineResult:
+        if self.asr_engine is None or self.diarizer is None:
+            raise TranscriptionError(
+                "run_normalized requires ASR and diarization engines"
+            )
+        diagnostics = self.new_diagnostics()
         with diagnostics.stage("asr"):
             asr_result = self.asr_engine.transcribe(path)
         with diagnostics.stage("diarization"):
@@ -112,28 +258,15 @@ class TranscriptionPipeline:
             overlap_modified = enhanced.modified
             for warning in enhanced.warnings:
                 diagnostics.warn(warning)
-        with diagnostics.stage("turns"):
-            turns = build_turns(
-                tuple(attributed),
-                merge_gap_ms=int(
-                    round(self.config.turns.merge_gap_seconds * 1000)
-                ),
-            )
-        transcript = Transcript(
-            language=self.config.general.language,
-            speaker_count=len(
-                {segment.speaker_id for segment in speaker_segments}
-            ),
-            turns=turns,
-            warnings=tuple(diagnostics.warnings),
+        enhancement = OverlapEnhancement(
+            tokens=tuple(attributed),
+            warnings=(),
+            modified=overlap_modified,
         )
-        if (
-            not overlap_modified
-            and normalize_for_integrity(asr_result.text)
-            != normalize_for_integrity(transcript.full_text)
-        ):
-            raise TranscriptionError(
-                "text integrity check failed between ASR and final turns"
-            )
-        diagnostics.speaker_count = transcript.speaker_count
-        return PipelineResult(transcript, diagnostics, asr_result.text)
+        return self.finish(
+            asr_result,
+            tuple(attributed),
+            speaker_segments,
+            diagnostics,
+            overlap_enhancement=enhancement,
+        )

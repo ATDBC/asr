@@ -5,27 +5,33 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import logging
+import os
 import shutil
 import sys
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 import uuid
 
-from .alignment import LocalRedecoder
-from .asr import FunAsrEngine
-from .audio import FfmpegAudioSlicer, normalize_audio, probe_audio
+from .audio import normalize_audio, probe_audio
 from .config import load_config
 from .diagnostics import export_diagnostics
 from .doctor import run_doctor
-from .errors import OutputError, TranscriberError
+from .errors import EnvironmentError, OutputError, TranscriberError
 from .exporters import export_transcript, publish_output_directory
+from .firered_client import FireRedWorkerClient
+from .gpu import build_gpu_stage_record, query_gpu, require_gpu_capacity
 from .locking import TaskLock
 from .model_registry import (
-    build_asr_model,
     download_models,
     verify_models,
 )
-from .overlap import JsonOverlapWorkerClient, SubprocessOverlapEnhancer
-from .pipeline import TranscriptionPipeline
+from .overlap import (
+    JsonOverlapWorkerClient,
+    OverlapEnhancement,
+    OverlapPreparation,
+    SubprocessOverlapPreparer,
+    apply_prepared_overlap,
+)
+from .pipeline import TranscriptionPipeline, attribute_primary
 from .speaker_diarization import SpeakerDiarizer
 
 
@@ -37,6 +43,20 @@ def default_output_dir(input_path: Path) -> Path:
 def staging_output_dir(output_dir: Path, request_id: str) -> Path:
     target = Path(output_dir)
     return target.with_name(f".{target.name}.staging-{request_id}")
+
+
+def require_physical_gpu_zero(device: str) -> None:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    first_visible = (
+        visible.split(",", 1)[0].strip()
+        if visible is not None
+        else "0"
+    )
+    if device != "cuda:0" or first_visible != "0":
+        raise EnvironmentError(
+            "this deployment is restricted to physical GPU 0; "
+            f"device={device}, CUDA_VISIBLE_DEVICES={visible!r}"
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -71,6 +91,97 @@ def _doctor_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--skip-cuda", action="store_true")
     return parser
+
+
+def execute_model_phases(
+    normalized: Path,
+    config,
+    overlap_enabled: bool,
+    asr_client_factory: Callable[[str], Any],
+    diarizer_factory: Callable[[], Any],
+    overlap_preparer_factory: Callable[[Any], Any],
+    gpu_check: Callable[[str], Any],
+    gpu_after: Callable[[str, Any, Any, Any], None] | None = None,
+    result_consumer: Callable[[Any], None] | None = None,
+):
+    """Run ASR, speaker, and optional overlap ASR with no GPU co-residency."""
+
+    pipeline = TranscriptionPipeline(config)
+    diagnostics = pipeline.new_diagnostics()
+
+    primary_before = gpu_check("primary-asr")
+    primary_owner = None
+    with diagnostics.stage("asr"):
+        with asr_client_factory("primary-asr") as primary_owner:
+            asr_result = primary_owner.transcribe(Path(normalized))
+    if gpu_after is not None:
+        gpu_after("primary_asr", primary_before, primary_owner, diagnostics)
+
+    speaker_before = gpu_check("speaker")
+    speaker_owner = None
+    preparation = OverlapPreparation((), ())
+    with diagnostics.stage("diarization"):
+        with diarizer_factory() as speaker_owner:
+            speaker_segments = speaker_owner.diarize(Path(normalized))
+            if not speaker_segments:
+                from .errors import TranscriptionError
+
+                raise TranscriptionError(
+                    "speaker diarization returned no segments"
+                )
+            if overlap_enabled:
+                with diagnostics.stage("overlap_preparation"):
+                    preparation = overlap_preparer_factory(
+                        speaker_owner
+                    ).prepare(Path(normalized), speaker_segments)
+    if gpu_after is not None:
+        gpu_after("speaker", speaker_before, speaker_owner, diagnostics)
+
+    with diagnostics.stage("alignment"):
+        attributed = attribute_primary(asr_result, speaker_segments, config)
+
+    enhancement: OverlapEnhancement | None = None
+    if overlap_enabled:
+        if any(window.tracks for window in preparation.windows):
+            overlap_before = gpu_check("overlap-asr")
+            overlap_owner = None
+            with diagnostics.stage("overlap_asr"):
+                with asr_client_factory("overlap-asr") as overlap_owner:
+                    enhancement = apply_prepared_overlap(
+                        preparation,
+                        attributed,
+                        overlap_owner,
+                        min_score=config.overlap.speaker_match_min_score,
+                        min_margin=config.overlap.speaker_match_min_margin,
+                    )
+            if gpu_after is not None:
+                gpu_after(
+                    "overlap_asr",
+                    overlap_before,
+                    overlap_owner,
+                    diagnostics,
+                )
+        else:
+            warnings = preparation.warnings + tuple(
+                "overlap window "
+                f"{window.id} kept original: track_count_not_two"
+                for window in preparation.windows
+            )
+            enhancement = OverlapEnhancement(
+                attributed,
+                warnings,
+                False,
+            )
+    result = pipeline.finish(
+        asr_result,
+        attributed,
+        speaker_segments,
+        diagnostics,
+        overlap_enhancement=enhancement,
+    )
+    if result_consumer is not None:
+        result_consumer(result)
+    return result
 
 
 def _run_transcribe(args: argparse.Namespace) -> int:
@@ -114,30 +225,26 @@ def _run_transcribe(args: argparse.Namespace) -> int:
                 max_seconds=config.general.max_audio_seconds,
             )
 
-            progress("[2/7] loading ASR and diarization models")
-            asr_engine = FunAsrEngine(
-                build_asr_model(
-                    config.paths.model_dir,
-                    config.general.device,
+            require_physical_gpu_zero(config.general.device)
+
+            def asr_client_factory(stage: str):
+                return FireRedWorkerClient(
+                    worker_python=config.asr.worker_python,
+                    model_root=config.paths.model_dir,
+                    device="cuda:0",
+                    timeout_seconds=config.asr.timeout_seconds,
+                    stderr_log_path=job_dir / f"{stage}-worker.log",
                 )
-            )
-            diarizer = SpeakerDiarizer.from_config(config)
-            local_redecoder = LocalRedecoder(
-                asr_engine,
-                FfmpegAudioSlicer(),
-                job_dir / "redecode",
-            )
-            overlap_enhancer = None
-            if config.overlap.enabled and not args.disable_overlap:
+
+            def overlap_preparer_factory(diarizer):
                 worker = JsonOverlapWorkerClient(
                     worker_python=config.overlap.worker_python,
                     worker_script=Path(__file__).with_name("overlap_worker.py"),
                     work_dir=job_dir / "overlap-requests",
                     timeout_seconds=config.overlap.timeout_seconds,
                 )
-                overlap_enhancer = SubprocessOverlapEnhancer(
+                return SubprocessOverlapPreparer(
                     worker=worker,
-                    asr_engine=asr_engine,
                     diarizer=diarizer,
                     min_score=config.overlap.speaker_match_min_score,
                     min_margin=config.overlap.speaker_match_min_margin,
@@ -148,37 +255,63 @@ def _run_transcribe(args: argparse.Namespace) -> int:
                     output_dir=job_dir / "overlap-output",
                     cache_dir=config.paths.model_dir / "huggingface",
                 )
-            pipeline = TranscriptionPipeline(
-                config,
-                asr_engine,
-                diarizer,
-                local_redecoder=local_redecoder,
-                overlap_enhancer=overlap_enhancer,
-            )
-            progress("[3/7] transcribing and diarizing")
-            result = pipeline.run_normalized(normalized)
-            progress("[7/7] exporting transcript")
-            export_transcript(
-                result.transcript,
-                staging_dir,
-                overwrite=False,
-                input_info=input_info,
-            )
-            export_diagnostics(
-                result.diagnostics,
-                staging_dir,
-                overwrite=False,
-            )
-            handler.flush()
-            shutil.copy2(log_path, staging_dir / "transcribe.log")
-            try:
-                publish_output_directory(
-                    staging_dir,
-                    output_dir,
-                    overwrite=args.overwrite,
+
+            def gpu_check(stage: str):
+                progress(f"GPU 0 admission check: {stage}")
+                return require_gpu_capacity("cuda:0")
+
+            def gpu_after(stage, before, owner, diagnostics):
+                after = query_gpu("cuda:0")
+                response = getattr(owner, "last_response", {}) or {}
+                metrics = response.get("metrics") or {}
+                diagnostics.gpu_stages[stage] = build_gpu_stage_record(
+                    before,
+                    after,
+                    peak_gpu_bytes=metrics.get("peak_gpu_bytes"),
+                    load_seconds=metrics.get("load_seconds"),
+                    inference_seconds=metrics.get("inference_seconds"),
                 )
-            except OSError as exc:
-                raise OutputError(f"unable to publish output: {exc}") from exc
+
+            def export_result(result):
+                progress("[7/7] exporting transcript")
+                export_transcript(
+                    result.transcript,
+                    staging_dir,
+                    overwrite=False,
+                    input_info=input_info,
+                )
+                export_diagnostics(
+                    result.diagnostics,
+                    staging_dir,
+                    overwrite=False,
+                )
+                handler.flush()
+                shutil.copy2(log_path, staging_dir / "transcribe.log")
+                try:
+                    publish_output_directory(
+                        staging_dir,
+                        output_dir,
+                        overwrite=args.overwrite,
+                    )
+                except OSError as exc:
+                    raise OutputError(
+                        f"unable to publish output: {exc}"
+                    ) from exc
+
+            progress("[2/7] running serial GPU model phases")
+            execute_model_phases(
+                normalized,
+                config,
+                overlap_enabled=(
+                    config.overlap.enabled and not args.disable_overlap
+                ),
+                asr_client_factory=asr_client_factory,
+                diarizer_factory=lambda: SpeakerDiarizer.from_config(config),
+                overlap_preparer_factory=overlap_preparer_factory,
+                gpu_check=gpu_check,
+                gpu_after=gpu_after,
+                result_consumer=export_result,
+            )
     finally:
         logger.removeHandler(handler)
         handler.close()
@@ -227,15 +360,11 @@ def _run_models(action: str, args: argparse.Namespace) -> int:
 
 def _run_doctor(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    def smoke_test() -> None:
-        build_asr_model(config.paths.model_dir, config.general.device)
-        SpeakerDiarizer.from_config(config)
-
     checks = list(
         run_doctor(
             config,
             check_cuda=not args.skip_cuda,
-            smoke_test=smoke_test,
+            smoke_test=None,
         )
     )
     if config.overlap.enabled:

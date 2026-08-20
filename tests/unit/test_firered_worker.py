@@ -95,6 +95,40 @@ def test_worker_loads_once_and_acknowledges_shutdown(tmp_path: Path):
     assert responses[-1] == {"id": "stop", "ok": True, "shutdown": True}
 
 
+def test_worker_reports_load_cumulative_inference_and_peak_metrics(
+    tmp_path: Path,
+):
+    wav = (tmp_path / "normalized.wav").resolve()
+    wav.write_bytes(b"fake")
+    system = FakeSystem(_official(wav))
+    target = StringIO()
+    times = iter((1.0, 3.5, 10.0, 12.0, 20.0, 23.0))
+
+    serve(
+        StringIO(
+            _request("one", "transcribe", wav)
+            + _request("two", "transcribe", wav)
+        ),
+        target,
+        lambda: system,
+        _valid_info,
+        clock=lambda: next(times),
+        peak_sampler=lambda: 456,
+    )
+
+    responses = [json.loads(line) for line in target.getvalue().splitlines()]
+    assert responses[0]["metrics"] == {
+        "load_seconds": 2.5,
+        "inference_seconds": 2.0,
+        "peak_gpu_bytes": 456,
+    }
+    assert responses[1]["metrics"] == {
+        "load_seconds": 2.5,
+        "inference_seconds": 5.0,
+        "peak_gpu_bytes": 456,
+    }
+
+
 def test_verify_runs_the_full_system(tmp_path: Path):
     wav = (tmp_path / "doctor.wav").resolve()
     wav.write_bytes(b"fake")

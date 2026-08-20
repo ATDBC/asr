@@ -1,8 +1,15 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from funasr_transcriber.cli import default_output_dir, main, staging_output_dir
+from funasr_transcriber import cli
+from funasr_transcriber.cli import (
+    default_output_dir,
+    main,
+    require_physical_gpu_zero,
+    staging_output_dir,
+)
 from funasr_transcriber.errors import (
     EnvironmentError,
     InputAudioError,
@@ -24,6 +31,31 @@ def test_staging_output_is_hidden_sibling_of_final_directory():
     assert staging_output_dir(target, "abc") == Path(
         "/data/results/.call.staging-abc"
     )
+
+
+@pytest.mark.parametrize("visible", [None, "0", "0,1"])
+def test_physical_gpu_zero_accepts_compatible_visibility(monkeypatch, visible):
+    if visible is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+
+    require_physical_gpu_zero("cuda:0")
+
+
+@pytest.mark.parametrize("visible", ["", "1", "1,0", "GPU-abcd"])
+def test_physical_gpu_zero_rejects_cuda_remapping(monkeypatch, visible):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+
+    with pytest.raises(EnvironmentError, match="physical GPU 0"):
+        require_physical_gpu_zero("cuda:0")
+
+
+def test_physical_gpu_zero_rejects_other_logical_device(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    with pytest.raises(EnvironmentError, match="physical GPU 0"):
+        require_physical_gpu_zero("cuda:1")
 
 
 @pytest.mark.parametrize(
@@ -102,3 +134,22 @@ def test_models_verify_dispatches_to_model_runner():
 
 def test_doctor_dispatches_to_doctor_runner():
     assert main(["doctor"], doctor_runner=lambda args: 0) == 0
+
+
+def test_doctor_route_does_not_use_removed_legacy_asr_smoke(
+    monkeypatch,
+    capsys,
+):
+    config = SimpleNamespace(overlap=SimpleNamespace(enabled=False))
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+
+    def fake_run_doctor(received, check_cuda, smoke_test):
+        assert received is config
+        assert check_cuda is False
+        assert smoke_test is None
+        return ("doctor: ok",)
+
+    monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
+
+    assert cli._run_doctor(SimpleNamespace(config=None, skip_cuda=True)) == 0
+    assert capsys.readouterr().out == "doctor: ok\n"

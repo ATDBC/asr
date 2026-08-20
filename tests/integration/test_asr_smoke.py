@@ -3,23 +3,37 @@ from pathlib import Path
 
 import pytest
 
-from funasr_transcriber.asr import FunAsrEngine
-from funasr_transcriber.model_registry import build_asr_model
+from funasr_transcriber.firered_client import FireRedWorkerClient
 
 
 @pytest.mark.skipif(
     os.getenv("FUNASR_TRANSCRIBER_RUN_MODEL_TESTS") != "1",
     reason="model integration tests are disabled",
 )
-def test_real_asr_returns_monotonic_tokens():
+def test_real_asr_returns_monotonic_tokens(tmp_path: Path):
     fixture = Path(__file__).parents[1] / "fixtures" / "short_mandarin.wav"
     if not fixture.is_file():
         pytest.skip("short_mandarin.wav fixture is not installed")
     model_dir = Path(os.environ["FUNASR_TRANSCRIBER_MODEL_DIR"])
-    result = FunAsrEngine(build_asr_model(model_dir, "cuda:0")).transcribe(fixture)
+    worker_python = Path(
+        os.environ.get(
+            "FUNASR_TRANSCRIBER_ASR_WORKER_PYTHON",
+            Path(__file__).parents[2] / ".venv-asr" / "bin" / "python",
+        )
+    )
+    with FireRedWorkerClient(
+        worker_python=worker_python,
+        model_root=model_dir,
+        device="cuda:0",
+        timeout_seconds=1800,
+        stderr_log_path=tmp_path / "firered-worker.log",
+    ) as client:
+        result = client.transcribe(fixture.resolve())
 
     assert result.text
     assert result.tokens
+    assert result.sentences
+    assert result.vad_segments_ms
     assert all(
         current.end_ms <= following.start_ms
         for current, following in zip(result.tokens, result.tokens[1:])

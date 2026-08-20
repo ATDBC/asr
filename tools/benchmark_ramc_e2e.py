@@ -12,18 +12,19 @@ import statistics
 import tempfile
 import wave
 
-from funasr_transcriber.alignment import LocalRedecoder
-from funasr_transcriber.asr import FunAsrEngine
-from funasr_transcriber.audio import FfmpegAudioSlicer
+from funasr_transcriber.cli import (
+    execute_model_phases,
+    require_physical_gpu_zero,
+)
 from funasr_transcriber.config import load_config
+from funasr_transcriber.firered_client import FireRedWorkerClient
+from funasr_transcriber.gpu import require_gpu_capacity
 from funasr_transcriber.metrics import (
     cer,
     cpcer,
     evaluate_speaker_tracks,
     speaker_count_metrics,
 )
-from funasr_transcriber.model_registry import build_asr_model
-from funasr_transcriber.pipeline import TranscriptionPipeline
 from funasr_transcriber.pipeline import normalize_for_integrity
 from funasr_transcriber.ramc_corpus import strip_control_markers
 from funasr_transcriber.schemas import AlignmentConfidence
@@ -103,25 +104,10 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    asr = FunAsrEngine(
-        build_asr_model(config.paths.model_dir, config.general.device)
-    )
-    diarizer = SpeakerDiarizer.from_config(config)
+    require_physical_gpu_zero(config.general.device)
     per_recording = []
     with tempfile.TemporaryDirectory(prefix="ramc-e2e-") as temporary:
         temporary_path = Path(temporary)
-        redecoder = LocalRedecoder(
-            asr,
-            FfmpegAudioSlicer(),
-            temporary_path / "redecode",
-        )
-        pipeline = TranscriptionPipeline(
-            config,
-            asr,
-            diarizer,
-            local_redecoder=redecoder,
-            overlap_enhancer=None,
-        )
         for wav_name in partition_names(args.test_tsv):
             if len(per_recording) >= args.count:
                 break
@@ -139,7 +125,23 @@ def main() -> int:
             else:
                 clip = temporary_path / f"{source.stem}.wav"
                 clip_wav(source, clip)
-            result = pipeline.run_normalized(clip)
+            result = execute_model_phases(
+                clip.resolve(),
+                config,
+                overlap_enabled=False,
+                asr_client_factory=lambda stage: FireRedWorkerClient(
+                    worker_python=config.asr.worker_python,
+                    model_root=config.paths.model_dir,
+                    device="cuda:0",
+                    timeout_seconds=config.asr.timeout_seconds,
+                    stderr_log_path=(
+                        temporary_path / f"{source.stem}-{stage}.log"
+                    ),
+                ),
+                diarizer_factory=lambda: SpeakerDiarizer.from_config(config),
+                overlap_preparer_factory=lambda diarizer: None,
+                gpu_check=lambda stage: require_gpu_capacity("cuda:0"),
+            )
             hypothesis = [
                 {
                     "start": turn.start_ms / 1000,

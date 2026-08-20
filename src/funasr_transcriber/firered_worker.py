@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 import sys
+import time
 from typing import Any, Callable, IO, Protocol
 
 from .firered_contract import normalize_official_result
@@ -102,15 +103,34 @@ def _error_response(
     }
 
 
+def _no_peak_sample() -> int | None:
+    return None
+
+
+def _peak_gpu_bytes() -> int | None:
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    return int(torch.cuda.max_memory_allocated())
+
+
 def serve(
     input_stream: IO[str],
     protocol_output: IO[str],
     system_factory: Callable[[], FireRedSystem],
     audio_info: Callable[[Path], AudioInfo] = read_audio_info,
+    clock: Callable[[], float] = time.perf_counter,
+    peak_sampler: Callable[[], int | None] = _no_peak_sample,
 ) -> None:
     """Load FireRed once, then serve requests until shutdown or EOF."""
 
+    load_started = clock()
     system = system_factory()
+    load_seconds = clock() - load_started
+    inference_seconds = 0.0
     seen_ids: set[str] = set()
     for line in input_stream:
         if not line.strip():
@@ -136,8 +156,15 @@ def serve(
             if action not in {"transcribe", "verify"}:
                 raise ValueError(f"unsupported worker action: {action}")
             path = _validate_audio(request.get("audio_path"), audio_info)
+            inference_started = clock()
             raw = system.process(str(path), uttid=identifier)
+            inference_seconds += clock() - inference_started
             response = normalize_official_result(identifier, raw)
+            response["metrics"] = {
+                "load_seconds": load_seconds,
+                "inference_seconds": inference_seconds,
+                "peak_gpu_bytes": peak_sampler(),
+            }
             if action == "verify":
                 response["verified"] = True
             _write_response(protocol_output, response)
@@ -230,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdin,
         protocol_output,
         lambda: build_firered_system(args.model_root, args.device),
+        peak_sampler=_peak_gpu_bytes,
     )
     return 0
 

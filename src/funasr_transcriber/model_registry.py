@@ -13,10 +13,7 @@ from .errors import ModelError
 
 
 MODEL_DIRS = {
-    "asr": "speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
     "vad": "speech_fsmn_vad_zh-cn-16k-common-pytorch",
-    "punc": "punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-    "spk": "speech_campplus_sv_zh-cn_16k-common",
 }
 
 THREED_SPEAKER_COMMIT = "065629c313eaf1a01c65c640c46d77e61e9607b4"
@@ -40,14 +37,6 @@ SPEAKER_VAD_DIR = MODEL_DIRS["vad"]
 DIARIZATION_EMBEDDING_DIR = (
     "speech_campplus_sv_zh_en_16k-common_advanced"
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ModelPaths:
-    asr: Path
-    vad: Path
-    punc: Path
-    spk: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,26 +82,6 @@ def resolve_firered_paths(
             raise ModelError(
                 "missing required models: " + ", ".join(missing)
             )
-    return paths
-
-
-def resolve_model_paths(model_dir: Path, require_existing: bool = True) -> ModelPaths:
-    root = (
-        Path(model_dir).expanduser().resolve() / "modelscope" / "iic"
-    )
-    paths = ModelPaths(**{key: root / value for key, value in MODEL_DIRS.items()})
-    if require_existing:
-        missing = [
-            f"{name}: {path}"
-            for name, path in (
-                ("asr", paths.asr),
-                ("vad", paths.vad),
-                ("punc", paths.punc),
-            )
-            if not path.is_dir()
-        ]
-        if missing:
-            raise ModelError("missing required models: " + "; ".join(missing))
     return paths
 
 
@@ -347,28 +316,3 @@ def download_models(model_dir: Path) -> ModelVerification:
             + ", ".join(result.missing)
         )
     return result
-
-
-def build_asr_model(model_dir: Path, device: str) -> Any:
-    try:
-        import torch
-        from funasr import AutoModel
-    except ImportError as exc:
-        raise ModelError(f"unable to import FunASR runtime: {exc}") from exc
-
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        raise ModelError(f"CUDA device requested but unavailable: {device}")
-    paths = resolve_model_paths(model_dir)
-    try:
-        return AutoModel(
-            model=str(paths.asr),
-            vad_model=str(paths.vad),
-            punc_model=str(paths.punc),
-            disable_update=True,
-            disable_pbar=True,
-            disable_log=True,
-            device=device,
-            ngpu=1 if device.startswith("cuda") else 0,
-        )
-    except Exception as exc:
-        raise ModelError(f"unable to load FunASR models: {exc}") from exc

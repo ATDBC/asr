@@ -817,7 +817,8 @@ Expected: no whitespace errors and no accidental models, virtual environments, l
 - [ ] **Step 1: Add failing dependency compatibility assertions**
 
 Extend `test_overlap_dependencies_use_torch_2_compatible_pyannote` to require
-`torch==2.8.0` and `torchaudio==2.8.0` in `requirements-overlap.txt`. Add
+`torch==2.8.0`, `torchaudio==2.8.0`, and `torchvision==0.23.0` in
+`requirements-overlap.txt`. Add
 `test_install_script_pins_overlap_torch_runtime` to require the same versions in
 the overlap install command while retaining 2.11 for the ASR environment.
 
@@ -837,8 +838,8 @@ Expected: FAIL because both files still select `torch/torchaudio==2.11.0`.
 
 Change the first two lines of `requirements-overlap.txt` and the overlap install
 command in `scripts/install_linux.sh` to `torch==2.8.0` and
-`torchaudio==2.8.0`. Keep the ASR environment pins unchanged. Document the
-split in `README.md`.
+`torchaudio==2.8.0`, and pin `torchvision==0.23.0` in the overlap requirements.
+Keep the ASR environment pins unchanged. Document the split in `README.md`.
 
 - [ ] **Step 4: Verify GREEN and rebuild the isolated environment**
 
@@ -863,3 +864,58 @@ no broken requirements.
 With `HF_TOKEN` present, run model download/verification and the overlap-enabled
 doctor on physical GPU 0. If the token is absent, report that external gate
 without treating overlap as verified.
+
+## Task 17: Add reproducible ModelScope overlap assets
+
+**Files:**
+- Modify: `src/funasr_transcriber/model_registry.py`
+- Modify: `src/funasr_transcriber/cli.py`
+- Modify: `src/funasr_transcriber/overlap_worker.py`
+- Modify: `src/funasr_transcriber/overlap.py`
+- Modify: `tests/unit/test_model_registry.py`
+- Modify: `tests/unit/test_overlap_detection.py`
+- Modify: `tests/integration/test_overlap_worker.py`
+- Modify: `README.md`
+
+- [ ] **Step 1: Add RED tests for local overlap acquisition**
+
+Require `acquire_overlap_assets` to download the three pyannote repositories and
+MossFormer checkpoint into fixed directories, reject incomplete existing assets,
+and return verified paths.
+
+- [ ] **Step 2: Add RED tests for local pipeline resolution**
+
+Create minimal local pipeline, segmentation, embedding, and ClearVoice fixtures.
+Assert that the worker rewrites the pyannote pipeline parameters to absolute local
+checkpoint paths without reading `HF_TOKEN`, and rejects a missing ClearVoice file.
+
+- [ ] **Step 3: Add a RED GPU visibility test**
+
+Patch `subprocess.run` in `JsonOverlapWorkerClient` and assert that the child
+environment contains `CUDA_VISIBLE_DEVICES=0` while retaining unrelated parent
+environment variables.
+
+- [ ] **Step 4: Implement atomic ModelScope acquisition**
+
+Add verified overlap path types and a four-repository acquisition loop to
+`model_registry.py`. Call it before the overlap worker's `download` action in the
+CLI; verification remains offline and fails on incomplete local files.
+
+- [ ] **Step 5: Implement local pipeline and checkpoint validation**
+
+When all local assets exist, generate a temporary pyannote config whose
+segmentation and embedding entries are local checkpoint mappings. Preserve the
+token-required Hugging Face behavior only when local assets are absent. Validate
+the ClearVoice pointer and target checkpoint before reporting success.
+
+- [ ] **Step 6: Enforce physical GPU 0 in the child process**
+
+Pass a copy of the current environment with `CUDA_VISIBLE_DEVICES=0` to every
+overlap worker subprocess. Do not query, signal, stop, or otherwise manage other
+GPU processes.
+
+- [ ] **Step 7: Run focused and full verification**
+
+Run the focused registry/worker/client tests, load the real local models on GPU 0,
+then run the complete test suite and overlap-enabled doctor. Record `HF_TOKEN` as
+optional when the complete ModelScope assets are present.

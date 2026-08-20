@@ -229,11 +229,22 @@ standalone_transcriber/
 必须校验实际 HEAD，不能静默使用更新版本。`.venv-asr` 按该提交的包声明安装，
 与主环境和 overlap 环境的 PyTorch 依赖完全隔离。
 
-overlap 环境固定使用 `torch==2.8.0` 和 `torchaudio==2.8.0`（CUDA 12.8
-wheel），配合 `pyannote.audio==3.3.2`。不得将 overlap 环境无条件升级到
+overlap 环境固定使用 `torch==2.8.0`、`torchaudio==2.8.0` 和配套的
+`torchvision==0.23.0`（CUDA 12.8 wheel），配合 `pyannote.audio==3.3.2`。
+不得将 overlap 环境无条件升级到
 torchaudio 2.9 及以上：这些版本移除了 pyannote 3.3.2 仍使用的
 `AudioMetaData`、`info` 和音频 backend API。安装测试必须同时检查版本约束和
 真实 `pyannote.audio` 导入，避免仅由 `pip check` 无法发现的运行时 API 冲突。
+
+overlap 模型默认从 ModelScope 镜像获取：`pyannote/speaker-diarization-3.1`、
+`pyannote/segmentation-3.0`、`pyannote/wespeaker-voxceleb-resnet34-LM` 和
+`alibabasglab/MossFormer2_SS_16K`。主环境将它们原子下载到
+`models/huggingface/` 下的固定目录；worker 用绝对本地 checkpoint 生成临时
+pyannote pipeline 配置，不再访问 Hugging Face，也不要求 token。本地资产不完整
+时才使用原有 Hugging Face 路线并要求 `HF_TOKEN`。ClearVoice 初始化后必须检查
+`last_best_checkpoint` 指向的权重存在，不能把上游吞掉下载异常后的空模型当成功。
+所有 overlap worker 子进程都设置 `CUDA_VISIBLE_DEVICES=0`，使 ClearVoice 的
+逻辑 `cuda:0` 始终映射到物理 GPU 0。
 
 默认使用官方推荐的 ModelScope 模型：
 

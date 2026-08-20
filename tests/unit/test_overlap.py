@@ -3,8 +3,9 @@ from pathlib import Path
 import numpy as np
 
 from funasr_transcriber.overlap import (
-    SubprocessOverlapEnhancer,
+    SubprocessOverlapPreparer,
     accept_separated_window,
+    apply_prepared_overlap,
 )
 from funasr_transcriber.schemas import (
     AlignmentConfidence,
@@ -139,7 +140,7 @@ def test_rejects_track_whose_timed_tokens_do_not_cover_full_text():
     assert decision.reason == "incomplete_timed_text"
 
 
-def test_enhancer_replaces_window_only_after_two_tracks_pass(tmp_path: Path):
+def test_overlap_preparation_does_not_run_asr(tmp_path: Path):
     first_track = tmp_path / "track-1.wav"
     second_track = tmp_path / "track-2.wav"
     first_track.write_bytes(b"one")
@@ -169,11 +170,66 @@ def test_enhancer_replaces_window_only_after_two_tracks_pass(tmp_path: Path):
                 ],
             }
 
-    class Asr:
-        def transcribe(self, path):
+    class Diarizer:
+        def speaker_centroids(self, path, segments):
+            return {
+                1: np.array([1.0, 0.0], dtype="float32"),
+                2: np.array([0.0, 1.0], dtype="float32"),
+            }
+
+        def embedding_for_audio(self, path):
             if Path(path) == first_track:
-                return AsrResult("甲。", (TimedToken("甲。", 0, 800),))
-            return AsrResult("乙。", (TimedToken("乙。", 0, 700),))
+                return np.array([1.0, 0.0], dtype="float32")
+            return np.array([0.0, 1.0], dtype="float32")
+
+    segments = (
+        SpeakerSegment(1, 0, 1500),
+        SpeakerSegment(2, 1500, 2500),
+    )
+    preparer = SubprocessOverlapPreparer(
+        worker=Worker(),
+        diarizer=Diarizer(),
+        min_score=0.60,
+        min_margin=0.08,
+        min_rms=0.001,
+    )
+
+    preparation = preparer.prepare(tmp_path / "source.wav", segments)
+
+    assert len(preparation.windows) == 1
+    assert [track.speaker_id for track in preparation.windows[0].tracks] == [1, 2]
+    assert preparation.warnings == ()
+
+
+def test_apply_replaces_window_only_after_two_tracks_pass(tmp_path: Path):
+    first_track = tmp_path / "track-1.wav"
+    second_track = tmp_path / "track-2.wav"
+    first_track.write_bytes(b"one")
+    second_track.write_bytes(b"two")
+
+    class Worker:
+        def call(self, action, payload):
+            if action == "detect":
+                return {
+                    "ok": True,
+                    "windows": [
+                        {"id": "w1", "start_ms": 1000, "end_ms": 2000}
+                    ],
+                }
+            return {
+                "ok": True,
+                "windows": [
+                    {
+                        "id": "w1",
+                        "start_ms": 1000,
+                        "end_ms": 2000,
+                        "tracks": [
+                            {"path": str(first_track), "rms": 0.1},
+                            {"path": str(second_track), "rms": 0.1},
+                        ],
+                    }
+                ],
+            }
 
     class Diarizer:
         def speaker_centroids(self, path, segments):
@@ -187,6 +243,27 @@ def test_enhancer_replaces_window_only_after_two_tracks_pass(tmp_path: Path):
                 return np.array([1.0, 0.0], dtype="float32")
             return np.array([0.0, 1.0], dtype="float32")
 
+    class Asr:
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, path):
+            self.calls.append(Path(path))
+            if Path(path) == first_track:
+                return AsrResult("甲。", (TimedToken("甲。", 0, 800),))
+            return AsrResult("乙。", (TimedToken("乙。", 0, 700),))
+
+    segments = (
+        SpeakerSegment(1, 0, 1500),
+        SpeakerSegment(2, 1500, 2500),
+    )
+    preparation = SubprocessOverlapPreparer(
+        worker=Worker(),
+        diarizer=Diarizer(),
+        min_score=0.60,
+        min_margin=0.08,
+        min_rms=0.001,
+    ).prepare(tmp_path / "source.wav", segments)
     base = (
         AttributedToken(
             "原始。",
@@ -196,22 +273,66 @@ def test_enhancer_replaces_window_only_after_two_tracks_pass(tmp_path: Path):
             AlignmentConfidence.HIGH,
         ),
     )
-    segments = (
-        SpeakerSegment(1, 0, 1500),
-        SpeakerSegment(2, 1500, 2500),
-    )
-    enhancer = SubprocessOverlapEnhancer(
-        worker=Worker(),
-        asr_engine=Asr(),
-        diarizer=Diarizer(),
+    asr = Asr()
+
+    result = apply_prepared_overlap(
+        preparation,
+        base,
+        asr,
         min_score=0.60,
         min_margin=0.08,
-        min_rms=0.001,
     )
 
-    result = enhancer.enhance(tmp_path / "source.wav", base, segments)
-
     assert result.modified is True
+    assert asr.calls == [first_track, second_track]
     assert [item.speaker_id for item in result.tokens] == [1, 2]
     assert all(item.overlap for item in result.tokens)
     assert "".join(item.text for item in result.tokens) == "甲。乙。"
+
+
+def test_apply_degrades_only_failed_overlap_window(tmp_path: Path):
+    from funasr_transcriber.overlap import (
+        OverlapPreparation,
+        PreparedTrack,
+        PreparedWindow,
+    )
+
+    base = (
+        AttributedToken(
+            "原始。",
+            1000,
+            2000,
+            1,
+            AlignmentConfidence.HIGH,
+        ),
+    )
+    preparation = OverlapPreparation(
+        windows=(
+            PreparedWindow(
+                "w1",
+                1000,
+                2000,
+                (
+                    PreparedTrack(tmp_path / "one.wav", 1, 0.9, 0.2, 0.1),
+                    PreparedTrack(tmp_path / "two.wav", 2, 0.9, 0.2, 0.1),
+                ),
+            ),
+        ),
+        warnings=(),
+    )
+
+    class BrokenAsr:
+        def transcribe(self, path):
+            raise RuntimeError("track failed")
+
+    result = apply_prepared_overlap(
+        preparation,
+        base,
+        BrokenAsr(),
+        min_score=0.6,
+        min_margin=0.08,
+    )
+
+    assert result.tokens == base
+    assert result.modified is False
+    assert "track_count_not_two" in result.warnings[0]

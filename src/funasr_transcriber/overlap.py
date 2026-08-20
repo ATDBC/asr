@@ -163,11 +163,33 @@ class TrackDiarizer(Protocol):
         """Return one normalized embedding for a separated track."""
 
 
-class SubprocessOverlapEnhancer:
+@dataclass(frozen=True, slots=True)
+class PreparedTrack:
+    path: Path
+    speaker_id: int
+    score: float
+    margin: float
+    rms: float
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedWindow:
+    id: str
+    start_ms: int
+    end_ms: int
+    tracks: tuple[PreparedTrack, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OverlapPreparation:
+    windows: tuple[PreparedWindow, ...]
+    warnings: tuple[str, ...]
+
+
+class SubprocessOverlapPreparer:
     def __init__(
         self,
         worker: WorkerClient,
-        asr_engine: TrackAsrEngine,
         diarizer: TrackDiarizer,
         min_score: float,
         min_margin: float,
@@ -179,7 +201,6 @@ class SubprocessOverlapEnhancer:
         cache_dir: Path | None = None,
     ):
         self.worker = worker
-        self.asr_engine = asr_engine
         self.diarizer = diarizer
         self.min_score = min_score
         self.min_margin = min_margin
@@ -219,12 +240,11 @@ class SubprocessOverlapEnhancer:
         second_score = scores[1][1] if len(scores) > 1 else -1.0
         return best_speaker, best_score, best_score - second_score
 
-    def enhance(
+    def prepare(
         self,
         audio_path: Path,
-        base_tokens: tuple[AttributedToken, ...],
         speaker_segments: tuple[SpeakerSegment, ...],
-    ) -> OverlapEnhancement:
+    ) -> OverlapPreparation:
         try:
             detected = self.worker.call(
                 "detect",
@@ -241,14 +261,13 @@ class SubprocessOverlapEnhancer:
                 },
             )
         except Exception as exc:
-            return OverlapEnhancement(
-                base_tokens,
+            return OverlapPreparation(
+                (),
                 (f"overlap detection unavailable: {exc}",),
-                False,
             )
         windows = detected.get("windows") or []
         if not windows:
-            return OverlapEnhancement(base_tokens, (), False)
+            return OverlapPreparation((), ())
         try:
             separated = self.worker.call(
                 "separate",
@@ -269,26 +288,23 @@ class SubprocessOverlapEnhancer:
                 speaker_segments,
             )
         except Exception as exc:
-            return OverlapEnhancement(
-                base_tokens,
+            return OverlapPreparation(
+                (),
                 (f"overlap separation unavailable: {exc}",),
-                False,
             )
 
-        output = list(base_tokens)
         warnings: list[str] = []
-        modified = False
+        prepared_windows: list[PreparedWindow] = []
         for window in separated.get("windows") or []:
             start_ms = int(window["start_ms"])
             end_ms = int(window["end_ms"])
-            assessments: list[dict[str, Any]] = []
-            candidate_tokens: list[AttributedToken] = []
+            prepared_tracks: list[PreparedTrack] = []
             for track in window.get("tracks") or []:
                 track_path = Path(track["path"])
-                if float(track.get("rms", 0.0)) < self.min_rms:
+                rms = float(track.get("rms", 0.0))
+                if rms < self.min_rms:
                     continue
                 try:
-                    asr_result = self.asr_engine.transcribe(track_path)
                     embedding = self.diarizer.embedding_for_audio(track_path)
                     speaker, score, margin = self._match_speaker(
                         embedding,
@@ -296,65 +312,163 @@ class SubprocessOverlapEnhancer:
                     )
                 except Exception:
                     continue
-                assessments.append(
-                    {
-                        "speaker_id": speaker,
-                        "score": score,
-                        "margin": margin,
-                        "text": asr_result.text,
-                        "timed_token_count": len(asr_result.tokens),
-                        "timed_text_complete": (
-                            not asr_result.untimed_sentences
-                            and _normalized_track_text(
-                                "".join(token.text for token in asr_result.tokens)
-                            )
-                            == _normalized_track_text(asr_result.text)
-                        ),
-                    }
-                )
-                for token in asr_result.tokens:
-                    global_start = min(end_ms, start_ms + token.start_ms)
-                    global_end = min(end_ms, start_ms + token.end_ms)
-                    if speaker is None or global_end <= global_start:
-                        continue
-                    candidate_tokens.append(
-                        AttributedToken(
-                            text=token.text,
-                            start_ms=global_start,
-                            end_ms=global_end,
-                            speaker_id=speaker,
-                            confidence=AlignmentConfidence.HIGH,
-                            source="separated",
-                            overlap=True,
-                        )
+                if speaker is None:
+                    continue
+                prepared_tracks.append(
+                    PreparedTrack(
+                        path=track_path,
+                        speaker_id=speaker,
+                        score=score,
+                        margin=margin,
+                        rms=rms,
                     )
-            decision = accept_separated_window(
-                assessments,
-                self.min_score,
-                self.min_margin,
-            )
-            if not decision.accepted:
-                warnings.append(
-                    f"overlap window {window.get('id')} kept original: "
-                    f"{decision.reason}"
                 )
-                continue
-            output = [
-                token
-                for token in output
-                if not (
-                    start_ms
-                    <= (token.start_ms + token.end_ms) / 2
-                    < end_ms
+            prepared_windows.append(
+                PreparedWindow(
+                    id=str(window.get("id") or ""),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    tracks=tuple(prepared_tracks),
                 )
-            ]
-            output.extend(candidate_tokens)
-            modified = True
-        output.sort(
-            key=lambda token: (
-                token.start_ms,
-                token.speaker_id,
-                token.end_ms,
             )
+        return OverlapPreparation(
+            windows=tuple(prepared_windows),
+            warnings=tuple(warnings),
         )
-        return OverlapEnhancement(tuple(output), tuple(warnings), modified)
+
+
+def apply_prepared_overlap(
+    preparation: OverlapPreparation,
+    base_tokens: tuple[AttributedToken, ...],
+    asr_engine: TrackAsrEngine,
+    min_score: float,
+    min_margin: float,
+) -> OverlapEnhancement:
+    output = list(base_tokens)
+    warnings = list(preparation.warnings)
+    modified = False
+    for window in preparation.windows:
+        assessments: list[dict[str, Any]] = []
+        candidate_tokens: list[AttributedToken] = []
+        for track in window.tracks:
+            try:
+                asr_result = asr_engine.transcribe(track.path)
+            except Exception:
+                continue
+            assessments.append(
+                {
+                    "speaker_id": track.speaker_id,
+                    "score": track.score,
+                    "margin": track.margin,
+                    "text": asr_result.text,
+                    "timed_token_count": len(asr_result.tokens),
+                    "timed_text_complete": (
+                        not asr_result.untimed_sentences
+                        and _normalized_track_text(
+                            "".join(token.text for token in asr_result.tokens)
+                        )
+                        == _normalized_track_text(asr_result.text)
+                    ),
+                }
+            )
+            for token in asr_result.tokens:
+                global_start = min(
+                    window.end_ms,
+                    window.start_ms + token.start_ms,
+                )
+                global_end = min(
+                    window.end_ms,
+                    window.start_ms + token.end_ms,
+                )
+                if global_end <= global_start:
+                    continue
+                candidate_tokens.append(
+                    AttributedToken(
+                        text=token.text,
+                        start_ms=global_start,
+                        end_ms=global_end,
+                        speaker_id=track.speaker_id,
+                        confidence=AlignmentConfidence.HIGH,
+                        source="separated",
+                        overlap=True,
+                    )
+                )
+        decision = accept_separated_window(
+            assessments,
+            min_score,
+            min_margin,
+        )
+        if not decision.accepted:
+            warnings.append(
+                f"overlap window {window.id} kept original: "
+                f"{decision.reason}"
+            )
+            continue
+        output = [
+            token
+            for token in output
+            if not (
+                window.start_ms
+                <= (token.start_ms + token.end_ms) / 2
+                < window.end_ms
+            )
+        ]
+        output.extend(candidate_tokens)
+        modified = True
+    output.sort(
+        key=lambda token: (
+            token.start_ms,
+            token.speaker_id,
+            token.end_ms,
+        )
+    )
+    return OverlapEnhancement(tuple(output), tuple(warnings), modified)
+
+
+class SubprocessOverlapEnhancer:
+    """Compatibility facade until the CLI adopts explicit two-phase lifetime."""
+
+    def __init__(
+        self,
+        worker: WorkerClient,
+        asr_engine: TrackAsrEngine,
+        diarizer: TrackDiarizer,
+        min_score: float,
+        min_margin: float,
+        min_rms: float,
+        detector_model: str = "pyannote/speaker-diarization-3.1",
+        hf_token_env: str = "HF_TOKEN",
+        device: str = "cuda:0",
+        output_dir: Path | None = None,
+        cache_dir: Path | None = None,
+    ):
+        self.asr_engine = asr_engine
+        self.min_score = min_score
+        self.min_margin = min_margin
+        self.preparer = SubprocessOverlapPreparer(
+            worker=worker,
+            diarizer=diarizer,
+            min_score=min_score,
+            min_margin=min_margin,
+            min_rms=min_rms,
+            detector_model=detector_model,
+            hf_token_env=hf_token_env,
+            device=device,
+            output_dir=output_dir,
+            cache_dir=cache_dir,
+        )
+
+    def enhance(
+        self,
+        audio_path: Path,
+        base_tokens: tuple[AttributedToken, ...],
+        speaker_segments: tuple[SpeakerSegment, ...],
+    ) -> OverlapEnhancement:
+        preparation = self.preparer.prepare(audio_path, speaker_segments)
+        return apply_prepared_overlap(
+            preparation,
+            base_tokens,
+            self.asr_engine,
+            self.min_score,
+            self.min_margin,
+        )

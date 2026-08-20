@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import gc
 from pathlib import Path
 import sys
 from typing import Any, Callable
@@ -423,3 +424,30 @@ class SpeakerDiarizer:
             raise TranscriptionError(f"empty separated track: {wav_path}")
         embedding = self._extract_embeddings([(0.0, duration)], wav)[0]
         return embedding / (np.linalg.norm(embedding) + 1e-8)
+
+    def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        for name in (
+            "embedding_model",
+            "vad_model",
+            "feature_extractor",
+            "cluster",
+        ):
+            if hasattr(self, name):
+                setattr(self, name, None)
+        gc.collect()
+        torch = getattr(self, "torch", None)
+        device = getattr(self, "device", None)
+        if (
+            torch is not None
+            and getattr(device, "type", None) == "cuda"
+        ):
+            torch.cuda.empty_cache()
+
+    def __enter__(self) -> "SpeakerDiarizer":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()

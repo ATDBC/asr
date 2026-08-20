@@ -1,6 +1,7 @@
 import numpy as np
 
 from funasr_transcriber.speaker_diarization import (
+    SpeakerDiarizer,
     merge_oversegmented_clusters,
     relabel_by_first_appearance,
     seeded_cluster,
@@ -60,3 +61,33 @@ def test_smoothing_collapses_short_aba_flicker():
     )
 
     assert result == [(0.0, 4.0, 1)]
+
+
+def test_close_releases_owned_cuda_models_and_is_idempotent():
+    calls = []
+
+    class Cuda:
+        @staticmethod
+        def empty_cache():
+            calls.append("empty_cache")
+
+    class Torch:
+        cuda = Cuda()
+
+    class Device:
+        type = "cuda"
+
+    diarizer = object.__new__(SpeakerDiarizer)
+    diarizer.torch = Torch()
+    diarizer.device = Device()
+    diarizer.embedding_model = object()
+    diarizer.vad_model = object()
+    diarizer.feature_extractor = object()
+    diarizer.cluster = object()
+
+    diarizer.close()
+    diarizer.close()
+
+    assert diarizer.embedding_model is None
+    assert diarizer.vad_model is None
+    assert calls == ["empty_cache"]

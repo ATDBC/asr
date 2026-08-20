@@ -24,7 +24,9 @@ def test_install_script_is_isolated_and_fail_fast():
     ).read_text(encoding="utf-8")
 
     assert "set -euo pipefail" in script
-    assert "python3.11 -m venv" in script
+    assert 'PYTHON_BIN="$(printenv PYTHON_BIN || true)"' in script
+    assert 'PYTHON_BIN="$(command -v python3.11 || true)"' in script
+    assert '"$PYTHON_BIN" -m venv "$CORE_VENV"' in script
     assert ".venv-asr" in script
     assert ".venv-overlap" in script
     assert '-m pip install -e "$PROJECT_ROOT[dev]"' in script
@@ -50,7 +52,8 @@ def test_core_dependencies_do_not_install_legacy_funasr():
     dependencies = project["project"]["dependencies"]
 
     assert all(not item.startswith("funasr") for item in dependencies)
-    assert "modelscope==1.36.3" in dependencies
+    assert "modelscope[framework]==1.36.3" in dependencies
+    assert "modelscope==1.36.3" not in dependencies
 
 
 def test_asr_environment_installs_pinned_source_and_project_metadata():
@@ -62,7 +65,9 @@ def test_asr_environment_installs_pinned_source_and_project_metadata():
         'FIRERED_COMMIT="4e7d9aaf4482a47cec1724807026b9b151926eb5"'
         in script
     )
-    assert 'python3.11 -m venv "$ASR_VENV"' in script
+    assert 'FIRERED_REPOSITORY="$(printenv FIRERED_REPOSITORY || true)"' in script
+    assert 'FIRERED_REPOSITORY="https://github.com/FireRedTeam/FireRedASR2S.git"' in script
+    assert '"$PYTHON_BIN" -m venv "$ASR_VENV"' in script
     assert 'git -C "$FIRERED_SOURCE" rev-parse HEAD' in script
     assert '"$ASR_PYTHON" -m pip install -e "$FIRERED_SOURCE"' in script
     assert '-r "$PROJECT_ROOT/requirements-asr.txt"' in script
@@ -87,7 +92,7 @@ def test_install_script_verifies_cuda_in_all_three_environments():
         )
 
 
-def test_asr_requirements_only_supply_acquisition_clients():
+def test_asr_requirements_supply_missing_upstream_runtime_dependency():
     requirements = (
         Path(__file__).parents[2] / "requirements-asr.txt"
     ).read_text(encoding="utf-8").splitlines()
@@ -95,6 +100,7 @@ def test_asr_requirements_only_supply_acquisition_clients():
     assert requirements == [
         "modelscope==1.36.3",
         "huggingface-hub==1.4.1",
+        "kaldi-native-fbank==1.15",
     ]
 
 

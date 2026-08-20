@@ -6,7 +6,7 @@
 - [ ] FireRedVAD / FireRedLID / FireRedASR2-AED / FireRedPunc assets verified
 - [ ] funasr-transcribe models download completed
 - [ ] funasr-transcribe models verify passed
-- [ ] GPU 0 reports at least 23 GiB total and 20 GiB free before every model phase
+- [ ] GPU 0 reports at least 23 GiB total and 12 GiB free before every model phase
 - [ ] funasr-transcribe doctor full model smoke passed without `--skip-cuda`
 - [ ] GPU release evidence is present for FireRed, Speaker, and overlap doctor phases
 - [ ] Unit and integration tests passed

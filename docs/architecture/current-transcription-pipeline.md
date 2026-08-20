@@ -10,7 +10,7 @@
   │
   ├─ FFmpeg → 16 kHz / 单声道 / PCM_16
   │
-  ├─ GPU 0 准入：≥23 GiB total，≥20 GiB free
+  ├─ GPU 0 准入：≥23 GiB total，≥12 GiB free
   │    └─ .venv-asr / FireRedWorkerClient（主音频）
   │         ├─ FireRedVAD
   │         ├─ FireRedLID
@@ -73,9 +73,12 @@ overlap 分为两个生命周期阶段：
 
 - 生产固定物理 GPU 0（`cuda:0`），拒绝其他设备或不兼容的可见设备重映射。
 - `nvidia-smi` 查询只读；程序从不终止、暂停、重启或迁移其他项目进程。
-- 每个主要阶段要求 GPU 总显存至少 23 GiB、空闲显存至少 20 GiB。
+- 每个主要阶段要求 GPU 总显存至少 23 GiB、空闲显存至少 12 GiB。FireRed
+  四模块在 18.39 秒连续语音段上的 `nvidia-smi` 净增峰值实测为 9.04 GiB，
+  12 GiB 门槛保留约 3 GiB 运行余量。
 - diagnostics 记录准入前/退出后空闲 MiB、worker 峰值显存、加载/推理耗时和
-  `released` 判断。
+  `released` 判断。Speaker 关闭后允许最多 512 MiB 的 CUDA context 与采样
+  误差；本机实测模型释放后残留 261 MiB，进程退出后恢复到原基线。
 - 显存不足或监控不可用属于环境错误；不会为了继续执行而降低门槛。
 
 ## LID 与文本完整性

@@ -434,7 +434,7 @@ git commit -m "feat: manage pinned FireRed source and models"
 
 - [ ] **Step 1: Write RED GPU tests**
 
-Feed representative `nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader,nounits` output. Assert a 24,576 MiB card passes total memory, 20,480 MiB free passes admission, 20,479 MiB fails, invalid `cuda:N` fails, and command/parse failure is fatal. Test release sampling and diagnostics JSON fields.
+Feed representative `nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv,noheader,nounits` output. Assert a 24,576 MiB card passes total memory, 12,288 MiB free passes admission, 12,287 MiB fails, invalid `cuda:N` fails, and command/parse failure is fatal. Test release sampling and diagnostics JSON fields. The free-memory threshold was revised after real inference measured a 9,256 MiB process delta on a near-maximum speech segment.
 
 - [ ] **Step 2: Verify RED**
 
@@ -444,7 +444,7 @@ Expected: FAIL because `gpu.py` and GPU diagnostics are absent.
 
 - [ ] **Step 3: Implement exact thresholds and stage records**
 
-Expose `query_gpu(device, runner=subprocess.run) -> GpuSample` and `require_gpu_capacity(device, minimum_total_mib=23 * 1024, minimum_free_mib=20 * 1024)`. Add `Diagnostics.gpu_stages: dict[str, dict[str, object]]`, recording before/after free MiB, worker-reported peak bytes, load seconds, inference seconds, and `released` (`after_free_mib >= before_free_mib - 256`). Failure to query is an environment error, never a warning.
+Expose `query_gpu(device, runner=subprocess.run) -> GpuSample` and `require_gpu_capacity(device, minimum_total_mib=23 * 1024, minimum_free_mib=12 * 1024)`. Add `Diagnostics.gpu_stages: dict[str, dict[str, object]]`, recording before/after free MiB, worker-reported peak bytes, load seconds, inference seconds, and `released` (`after_free_mib >= before_free_mib - 512`). The release tolerance was revised after a real Speaker close left 261 MiB of CUDA context overhead while releasing all model memory. Failure to query is an environment error, never a warning.
 
 - [ ] **Step 4: Run tests and commit**
 
@@ -607,7 +607,7 @@ git commit -m "feat: orchestrate isolated FireRed GPU phases"
 
 - [ ] **Step 1: Write RED doctor tests**
 
-Assert doctor rejects missing `.venv-asr/bin/python`, wrong FireRed source commit, any missing module, total GPU below 23 GiB, free GPU below 20 GiB, and unavailable monitoring. With injected fakes, assert it sends `verify` with `<model_root>/fireredasr2s/source/assets/hello_zh.wav`, checks the full normalized response, closes the worker, samples released memory, then separately verifies speaker and overlap environments.
+Assert doctor rejects missing `.venv-asr/bin/python`, wrong FireRed source commit, any missing module, total GPU below 23 GiB, free GPU below 12 GiB, and unavailable monitoring. With injected fakes, assert it sends `verify` with `<model_root>/fireredasr2s/source/assets/hello_zh.wav`, checks the full normalized response, closes the worker, samples released memory, then separately verifies speaker and overlap environments.
 
 - [ ] **Step 2: Verify RED**
 
@@ -696,7 +696,7 @@ The ASR smoke must create `FireRedWorkerClient`, transcribe `short_mandarin.wav`
 
 - [ ] **Step 2: Update operator documentation**
 
-Document `.venv-asr`, pinned source/model layout, ModelScope default and explicit Hugging Face fallback, 23/20 GiB checks, no FunASR fallback, at-most-two FireRed loads, and GPU contention remediation. Replace stale statements that `.venv` contains the ASR model.
+Document `.venv-asr`, pinned source/model layout, ModelScope default and explicit Hugging Face fallback, 23/12 GiB checks, no FunASR fallback, at-most-two FireRed loads, and GPU contention remediation. Replace stale statements that `.venv` contains the ASR model.
 
 - [ ] **Step 3: Run doc/static checks and commit**
 
@@ -751,7 +751,7 @@ Expected: verifier reports all counts/checksums valid. Confirm `git status --sho
 
 - [ ] **Step 5: Run the full Linux/NVIDIA gate**
 
-On a GPU with at least 20 GiB free:
+On a GPU with at least 12 GiB free:
 
 ```bash
 artifacts/release_validation_corpus/run_validation_linux.sh --project-root "$PWD" --config /etc/funasr-transcriber.toml

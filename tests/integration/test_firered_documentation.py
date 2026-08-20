@@ -15,7 +15,8 @@ def test_readme_documents_isolated_firered_operation():
         "FireRedASR2-AED",
         "FireRedPunc",
         "23 GiB",
-        "20 GiB",
+        "12 GiB",
+        "9.04 GiB",
         "ModelScope",
         "Hugging Face",
         "cuda:0",
@@ -48,7 +49,7 @@ def test_release_checklist_requires_firered_and_gpu_evidence():
         "FireRedVAD / FireRedLID / FireRedASR2-AED / FireRedPunc",
         "GPU 0",
         "23 GiB total",
-        "20 GiB free",
+        "12 GiB free",
         "GPU release evidence",
     ):
         assert required in checklist

@@ -20,7 +20,7 @@ class Result:
 
 GPU_OUTPUT = "\n".join(
     (
-        "0, NVIDIA GeForce RTX 3090, 24576, 20480, 580.142",
+        "0, NVIDIA GeForce RTX 3090, 24576, 12288, 580.142",
         "1, NVIDIA GeForce RTX 3090, 24576, 12000, 580.142",
     )
 )
@@ -41,7 +41,7 @@ def test_query_gpu_selects_explicit_physical_device_zero():
         index=0,
         name="NVIDIA GeForce RTX 3090",
         total_mib=24576,
-        free_mib=20480,
+        free_mib=12288,
         driver_version="580.142",
     )
 
@@ -49,14 +49,14 @@ def test_query_gpu_selects_explicit_physical_device_zero():
 def test_capacity_accepts_exact_total_and_free_thresholds():
     sample = require_gpu_capacity("cuda:0", runner=_runner())
 
-    assert sample.free_mib == 20 * 1024
+    assert sample.free_mib == 12 * 1024
 
 
 @pytest.mark.parametrize(
     ("output", "message"),
     (
         ("0, Small GPU, 23551, 22000, 580.142", "total memory"),
-        ("0, RTX 3090, 24576, 20479, 580.142", "free memory"),
+        ("0, RTX 3090, 24576, 12287, 580.142", "free memory"),
     ),
 )
 def test_capacity_rejects_insufficient_memory(output: str, message: str):
@@ -82,7 +82,7 @@ def test_query_rejects_unparseable_or_missing_device():
 
 def test_gpu_stage_record_marks_release_with_small_sampling_tolerance():
     before = GpuSample(0, "RTX 3090", 24576, 22000, "580.142")
-    after = GpuSample(0, "RTX 3090", 24576, 21744, "580.142")
+    after = GpuSample(0, "RTX 3090", 24576, 21488, "580.142")
 
     record = build_gpu_stage_record(
         before,
@@ -95,9 +95,18 @@ def test_gpu_stage_record_marks_release_with_small_sampling_tolerance():
     assert record == {
         "device_index": 0,
         "before_free_mib": 22000,
-        "after_free_mib": 21744,
+        "after_free_mib": 21488,
         "peak_gpu_bytes": 123456,
         "load_seconds": 1.25,
         "inference_seconds": 2.5,
         "released": True,
     }
+
+
+def test_gpu_stage_record_rejects_more_than_cuda_context_tolerance():
+    before = GpuSample(0, "RTX 3090", 24576, 22000, "580.142")
+    after = GpuSample(0, "RTX 3090", 24576, 21487, "580.142")
+
+    record = build_gpu_stage_record(before, after, None, None, None)
+
+    assert record["released"] is False

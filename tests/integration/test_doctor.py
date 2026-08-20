@@ -124,7 +124,7 @@ def test_doctor_rejects_invalid_firered_assets(
     "failure",
     [
         EnvironmentError("GPU 0 total memory is below 23 GiB"),
-        EnvironmentError("GPU 0 free memory is below 20 GiB"),
+        EnvironmentError("GPU 0 free memory is below 12 GiB"),
         EnvironmentError("nvidia-smi GPU monitoring failed"),
     ],
 )

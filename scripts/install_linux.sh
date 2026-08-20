@@ -7,7 +7,10 @@ CORE_VENV="$PROJECT_ROOT/.venv"
 ASR_VENV="$PROJECT_ROOT/.venv-asr"
 OVERLAP_VENV="$PROJECT_ROOT/.venv-overlap"
 FIRERED_COMMIT="4e7d9aaf4482a47cec1724807026b9b151926eb5"
-FIRERED_REPOSITORY="https://github.com/FireRedTeam/FireRedASR2S.git"
+FIRERED_REPOSITORY="$(printenv FIRERED_REPOSITORY || true)"
+if [ -z "$FIRERED_REPOSITORY" ]; then
+    FIRERED_REPOSITORY="https://github.com/FireRedTeam/FireRedASR2S.git"
+fi
 MODEL_ROOT="$(printenv FUNASR_TRANSCRIBER_MODEL_ROOT || true)"
 if [ -z "$MODEL_ROOT" ]; then
     MODEL_ROOT="$PROJECT_ROOT/models"
@@ -19,16 +22,27 @@ if [ -z "$TORCH_INDEX_URL" ]; then
     TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 fi
 
-for command in python3.11 ffmpeg ffprobe nvidia-smi git; do
+PYTHON_BIN="$(printenv PYTHON_BIN || true)"
+if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN="$(command -v python3.11 || true)"
+fi
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+    echo "Python 3.11 is missing; set PYTHON_BIN to its executable" >&2
+    exit 4
+fi
+"$PYTHON_BIN" -c \
+    "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
+
+for command in ffmpeg ffprobe nvidia-smi git; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "Missing required command: $command" >&2
         exit 4
     fi
 done
 
-python3.11 -m venv "$CORE_VENV"
-python3.11 -m venv "$ASR_VENV"
-python3.11 -m venv "$OVERLAP_VENV"
+"$PYTHON_BIN" -m venv "$CORE_VENV"
+"$PYTHON_BIN" -m venv "$ASR_VENV"
+"$PYTHON_BIN" -m venv "$OVERLAP_VENV"
 
 CORE_PYTHON="$CORE_VENV/bin/python"
 ASR_PYTHON="$ASR_VENV/bin/python"

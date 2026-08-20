@@ -9,6 +9,9 @@ from typing import Any, Callable
 from .errors import EnvironmentError as TranscriberEnvironmentError
 
 
+GPU_RELEASE_TOLERANCE_MIB = 512
+
+
 @dataclass(frozen=True, slots=True)
 class GpuSample:
     index: int
@@ -86,7 +89,7 @@ def require_gpu_capacity(
     device: str,
     runner: Callable[..., Any] = subprocess.run,
     minimum_total_mib: int = 23 * 1024,
-    minimum_free_mib: int = 20 * 1024,
+    minimum_free_mib: int = 12 * 1024,
 ) -> GpuSample:
     sample = query_gpu(device, runner=runner)
     if sample.total_mib < minimum_total_mib:
@@ -118,5 +121,8 @@ def build_gpu_stage_record(
         "peak_gpu_bytes": peak_gpu_bytes,
         "load_seconds": load_seconds,
         "inference_seconds": inference_seconds,
-        "released": after.free_mib >= before.free_mib - 256,
+        "released": (
+            after.free_mib
+            >= before.free_mib - GPU_RELEASE_TOLERANCE_MIB
+        ),
     }

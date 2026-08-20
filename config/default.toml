@@ -8,6 +8,11 @@ random_seed = 0
 model_dir = "/opt/funasr-transcriber/models"
 work_dir = "/var/tmp/funasr-transcriber"
 
+[asr]
+worker_python = "/opt/funasr-transcriber/.venv-asr/bin/python"
+timeout_seconds = 1800
+lid_warning_confidence = 0.80
+
 [diarization]
 speaker_count = "auto"
 min_speakers = 1

@@ -22,11 +22,37 @@ class TimedToken:
     text: str
     start_ms: int
     end_ms: int
+    confidence: float | None = None
 
     def __post_init__(self) -> None:
         if not self.text:
             raise ValueError("text must not be empty")
         _validate_range(self.start_ms, self.end_ms)
+        if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must stay within 0..1")
+
+
+@dataclass(frozen=True, slots=True)
+class RecognizedSentence:
+    text: str
+    start_ms: int
+    end_ms: int
+    language: str
+    language_confidence: float
+    asr_confidence: float
+
+    def __post_init__(self) -> None:
+        if not self.text:
+            raise ValueError("text must not be empty")
+        if not self.language:
+            raise ValueError("language must not be empty")
+        _validate_range(self.start_ms, self.end_ms)
+        for name, value in (
+            ("language_confidence", self.language_confidence),
+            ("asr_confidence", self.asr_confidence),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must stay within 0..1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +123,25 @@ class AsrResult:
     text: str
     tokens: tuple[TimedToken, ...]
     untimed_sentences: tuple[SentenceSpan, ...] = ()
+    sentences: tuple[RecognizedSentence, ...] = ()
+    vad_segments_ms: tuple[tuple[int, int], ...] = ()
+    duration_ms: int = 0
+
+    def __post_init__(self) -> None:
+        if self.duration_ms < 0:
+            raise ValueError("duration_ms must be non-negative")
+        for start_ms, end_ms in self.vad_segments_ms:
+            _validate_range(start_ms, end_ms)
+        if not self.duration_ms:
+            return
+        ranges = [
+            *(item.end_ms for item in self.tokens),
+            *(item.end_ms for item in self.untimed_sentences),
+            *(item.end_ms for item in self.sentences),
+            *(end_ms for _, end_ms in self.vad_segments_ms),
+        ]
+        if any(end_ms > self.duration_ms for end_ms in ranges):
+            raise ValueError("timing must not exceed duration_ms")
 
 
 @dataclass(frozen=True, slots=True)

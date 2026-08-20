@@ -70,3 +70,29 @@ def test_default_overlap_detector_uses_pyannote_3_pipeline():
     config = load_config()
 
     assert config.overlap.detector_model == "pyannote/speaker-diarization-3.1"
+
+
+def test_default_asr_worker_configuration():
+    config = load_config()
+
+    assert config.asr.worker_python == Path(
+        "/opt/funasr-transcriber/.venv-asr/bin/python"
+    )
+    assert config.asr.timeout_seconds == 1800
+    assert config.asr.lid_warning_confidence == 0.80
+
+
+@pytest.mark.parametrize(
+    "setting",
+    (
+        "timeout_seconds = 0",
+        "lid_warning_confidence = -0.1",
+        "lid_warning_confidence = 1.1",
+    ),
+)
+def test_asr_config_rejects_invalid_limits(tmp_path: Path, setting: str):
+    path = tmp_path / "config.toml"
+    path.write_text(f"[asr]\n{setting}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ASR"):
+        load_config(path)

@@ -23,6 +23,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "model_dir": "/opt/funasr-transcriber/models",
         "work_dir": "/var/tmp/funasr-transcriber",
     },
+    "asr": {
+        "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
+        "timeout_seconds": 1800,
+        "lid_warning_confidence": 0.80,
+    },
     "diarization": {
         "speaker_count": "auto",
         "min_speakers": 1,
@@ -71,6 +76,13 @@ class PathConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AsrConfig:
+    worker_python: Path
+    timeout_seconds: int
+    lid_warning_confidence: float
+
+
+@dataclass(frozen=True, slots=True)
 class DiarizationConfig:
     speaker_count: int | None
     min_speakers: int
@@ -116,6 +128,7 @@ class OverlapConfig:
 class AppConfig:
     general: GeneralConfig
     paths: PathConfig
+    asr: AsrConfig
     diarization: DiarizationConfig
     vad: VadConfig
     alignment: AlignmentConfig
@@ -193,6 +206,15 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             model_dir=Path(values["paths"]["model_dir"]).expanduser(),
             work_dir=Path(values["paths"]["work_dir"]).expanduser(),
         ),
+        asr=AsrConfig(
+            worker_python=Path(
+                values["asr"]["worker_python"]
+            ).expanduser(),
+            timeout_seconds=int(values["asr"]["timeout_seconds"]),
+            lid_warning_confidence=float(
+                values["asr"]["lid_warning_confidence"]
+            ),
+        ),
         diarization=DiarizationConfig(
             speaker_count=speaker_count,
             min_speakers=int(values["diarization"]["min_speakers"]),
@@ -236,6 +258,10 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
 def validate(config: AppConfig) -> AppConfig:
     if config.general.max_audio_seconds != 7200:
         raise ValueError("max_audio_seconds must be 7200 in version 1")
+    if config.asr.timeout_seconds <= 0:
+        raise ValueError("ASR timeout_seconds must be positive")
+    if not 0.0 <= config.asr.lid_warning_confidence <= 1.0:
+        raise ValueError("ASR lid_warning_confidence must stay within 0..1")
     diarization = config.diarization
     if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
         raise ValueError("min_speakers/max_speakers must stay within 1..10")

@@ -805,3 +805,61 @@ Expected: PASS; doctor names all four FireRed modules, speaker/overlap verificat
 Run: `git diff --check && git status --short`
 
 Expected: no whitespace errors and no accidental models, virtual environments, logs, or validation corpus files staged.
+
+## Task 16: Calibrate the overlap PyTorch runtime
+
+**Files:**
+- Modify: `requirements-overlap.txt`
+- Modify: `scripts/install_linux.sh`
+- Modify: `tests/integration/test_install_script.py`
+- Modify: `README.md`
+
+- [ ] **Step 1: Add failing dependency compatibility assertions**
+
+Extend `test_overlap_dependencies_use_torch_2_compatible_pyannote` to require
+`torch==2.8.0` and `torchaudio==2.8.0` in `requirements-overlap.txt`. Add
+`test_install_script_pins_overlap_torch_runtime` to require the same versions in
+the overlap install command while retaining 2.11 for the ASR environment.
+
+- [ ] **Step 2: Verify RED against the installed 2.11 pins**
+
+Run:
+
+```bash
+.venv/bin/python -m pytest \
+  tests/integration/test_install_script.py::test_overlap_dependencies_use_torch_2_compatible_pyannote \
+  tests/integration/test_install_script.py::test_install_script_pins_overlap_torch_runtime -q
+```
+
+Expected: FAIL because both files still select `torch/torchaudio==2.11.0`.
+
+- [ ] **Step 3: Pin only the overlap runtime to PyTorch 2.8**
+
+Change the first two lines of `requirements-overlap.txt` and the overlap install
+command in `scripts/install_linux.sh` to `torch==2.8.0` and
+`torchaudio==2.8.0`. Keep the ASR environment pins unchanged. Document the
+split in `README.md`.
+
+- [ ] **Step 4: Verify GREEN and rebuild the isolated environment**
+
+Run the focused tests from Step 2, then install the two CUDA 12.8 wheels and
+reapply `requirements-overlap.txt` in `.venv-overlap`.
+
+- [ ] **Step 5: Verify runtime imports and package consistency**
+
+Run:
+
+```bash
+.venv-overlap/bin/python -c \
+  "import torch, torchaudio, pyannote.audio, clearvoice; print(torch.__version__, torchaudio.__version__)"
+.venv-overlap/bin/python -m pip check
+```
+
+Expected: imports succeed, versions begin with `2.8.0`, and `pip check` reports
+no broken requirements.
+
+- [ ] **Step 6: Continue the overlap model gate**
+
+With `HF_TOKEN` present, run model download/verification and the overlap-enabled
+doctor on physical GPU 0. If the token is absent, report that external gate
+without treating overlap as verified.

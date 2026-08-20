@@ -229,6 +229,12 @@ standalone_transcriber/
 必须校验实际 HEAD，不能静默使用更新版本。`.venv-asr` 按该提交的包声明安装，
 与主环境和 overlap 环境的 PyTorch 依赖完全隔离。
 
+overlap 环境固定使用 `torch==2.8.0` 和 `torchaudio==2.8.0`（CUDA 12.8
+wheel），配合 `pyannote.audio==3.3.2`。不得将 overlap 环境无条件升级到
+torchaudio 2.9 及以上：这些版本移除了 pyannote 3.3.2 仍使用的
+`AudioMetaData`、`info` 和音频 backend API。安装测试必须同时检查版本约束和
+真实 `pyannote.audio` 导入，避免仅由 `pip check` 无法发现的运行时 API 冲突。
+
 默认使用官方推荐的 ModelScope 模型：
 
 - `xukaituo/FireRedVAD`

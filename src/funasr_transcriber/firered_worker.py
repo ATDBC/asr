@@ -1,0 +1,238 @@
+"""FireRedASR2S JSON Lines worker, executed only inside `.venv-asr`."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import json
+import logging
+from pathlib import Path
+import sys
+from typing import Any, Callable, IO, Protocol
+
+from .firered_contract import normalize_official_result
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class AudioInfo:
+    sample_rate: int
+    channels: int
+    subtype: str
+
+
+class FireRedSystem(Protocol):
+    def process(self, path: str, uttid: str) -> dict[str, object]:
+        """Run the complete VAD, LID, AED, and punctuation path."""
+
+
+class GuardedVad:
+    """Reject unsafe VAD segments before the official system reaches AED."""
+
+    def __init__(self, vad: object):
+        self._vad = vad
+
+    def detect(self, path: str):
+        result, probabilities = self._vad.detect(path)
+        for start_s, end_s in result.get("timestamps", []):
+            if float(end_s) - float(start_s) > 60.0:
+                raise ValueError(
+                    "FireRedVAD segment exceeds the 60 second AED limit: "
+                    f"{start_s}..{end_s}"
+                )
+        return result, probabilities
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._vad, name)
+
+
+def read_audio_info(path: Path) -> AudioInfo:
+    import soundfile as sf
+
+    info = sf.info(str(path))
+    return AudioInfo(
+        sample_rate=int(info.samplerate),
+        channels=int(info.channels),
+        subtype=str(info.subtype),
+    )
+
+
+def _validate_audio(
+    raw_path: object,
+    audio_info: Callable[[Path], AudioInfo],
+) -> Path:
+    path = Path(str(raw_path or ""))
+    if not path.is_absolute():
+        raise ValueError("audio_path must be absolute")
+    if path.suffix.lower() != ".wav":
+        raise ValueError("audio_path must be a WAV file")
+    if not path.is_file():
+        raise ValueError(f"audio_path does not exist: {path}")
+    info = audio_info(path)
+    if (
+        info.sample_rate != 16000
+        or info.channels != 1
+        or info.subtype != "PCM_16"
+    ):
+        raise ValueError("audio must be normalized to 16 kHz mono PCM_16")
+    return path
+
+
+def _write_response(output: IO[str], response: dict[str, object]) -> None:
+    output.write(
+        json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        + "\n"
+    )
+    output.flush()
+
+
+def _error_response(
+    identifier: str | None,
+    error: Exception,
+) -> dict[str, object]:
+    return {
+        "id": identifier,
+        "ok": False,
+        "error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+    }
+
+
+def serve(
+    input_stream: IO[str],
+    protocol_output: IO[str],
+    system_factory: Callable[[], FireRedSystem],
+    audio_info: Callable[[Path], AudioInfo] = read_audio_info,
+) -> None:
+    """Load FireRed once, then serve requests until shutdown or EOF."""
+
+    system = system_factory()
+    seen_ids: set[str] = set()
+    for line in input_stream:
+        if not line.strip():
+            continue
+        identifier: str | None = None
+        try:
+            request = json.loads(line)
+            if not isinstance(request, dict):
+                raise ValueError("request must be a JSON object")
+            identifier = str(request.get("id") or "")
+            if not identifier:
+                raise ValueError("request id must not be empty")
+            if identifier in seen_ids:
+                raise ValueError(f"duplicate request id: {identifier}")
+            seen_ids.add(identifier)
+            action = str(request.get("action") or "")
+            if action == "shutdown":
+                _write_response(
+                    protocol_output,
+                    {"id": identifier, "ok": True, "shutdown": True},
+                )
+                return
+            if action not in {"transcribe", "verify"}:
+                raise ValueError(f"unsupported worker action: {action}")
+            path = _validate_audio(request.get("audio_path"), audio_info)
+            raw = system.process(str(path), uttid=identifier)
+            response = normalize_official_result(identifier, raw)
+            if action == "verify":
+                response["verified"] = True
+            _write_response(protocol_output, response)
+        except Exception as exc:
+            LOGGER.exception("FireRed worker request failed")
+            _write_response(
+                protocol_output,
+                _error_response(identifier or None, exc),
+            )
+
+
+def build_firered_system(model_root: Path, device: str) -> FireRedSystem:
+    """Construct the pinned official four-module system in the ASR process."""
+
+    import torch
+    from fireredasr2s import FireRedAsr2System, FireRedAsr2SystemConfig
+    from fireredasr2s.fireredasr2 import FireRedAsr2Config
+    from fireredasr2s.fireredlid import FireRedLidConfig
+    from fireredasr2s.fireredpunc import FireRedPuncConfig
+    from fireredasr2s.fireredvad import FireRedVadConfig
+
+    if not device.startswith("cuda:"):
+        raise ValueError("FireRed worker requires an explicit CUDA device")
+    try:
+        device_index = int(device.split(":", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"invalid CUDA device: {device}") from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable in the FireRed environment")
+    torch.cuda.set_device(device_index)
+
+    root = Path(model_root).expanduser().resolve() / "fireredasr2s"
+    config = FireRedAsr2SystemConfig(
+        vad_model_dir=str(root / "FireRedVAD" / "VAD"),
+        lid_model_dir=str(root / "FireRedLID"),
+        asr_type="aed",
+        asr_model_dir=str(root / "FireRedASR2-AED"),
+        punc_model_dir=str(root / "FireRedPunc"),
+        vad_config=FireRedVadConfig(
+            use_gpu=False,
+            smooth_window_size=5,
+            speech_threshold=0.4,
+            min_speech_frame=20,
+            max_speech_frame=2000,
+            min_silence_frame=20,
+            merge_silence_frame=0,
+            extend_speech_frame=0,
+            chunk_max_frame=30000,
+        ),
+        lid_config=FireRedLidConfig(use_gpu=True, use_half=False),
+        asr_config=FireRedAsr2Config(
+            use_gpu=True,
+            use_half=False,
+            beam_size=3,
+            nbest=1,
+            decode_max_len=0,
+            softmax_smoothing=1.25,
+            aed_length_penalty=0.6,
+            eos_penalty=1.0,
+            return_timestamp=True,
+        ),
+        punc_config=FireRedPuncConfig(use_gpu=True),
+        asr_batch_size=1,
+        punc_batch_size=1,
+        enable_vad=True,
+        enable_lid=True,
+        enable_punc=True,
+    )
+    system = FireRedAsr2System(config)
+    system.vad = GuardedVad(system.vad)
+    return system
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-root", type=Path, required=True)
+    parser.add_argument("--device", default="cuda:0")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    protocol_output = sys.stdout
+    sys.stdout = sys.stderr
+    args = _parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    serve(
+        sys.stdin,
+        protocol_output,
+        lambda: build_firered_system(args.model_root, args.device),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

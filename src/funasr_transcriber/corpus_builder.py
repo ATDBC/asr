@@ -14,6 +14,11 @@ import wave
 
 from .corpus_verifier import verify_corpus, write_checksums
 from .exporters import publish_output_directory
+from .release_validation import (
+    EVIDENCE_FIELDS,
+    FIRERED_MODULES,
+    STRESS_DURATIONS,
+)
 from .ramc_corpus import (
     CHINESE_CHARACTER,
     CORE_END_MS,
@@ -600,6 +605,14 @@ def _build_validation_corpus_contents(
                 probe_wav(path).duration_ms for path in output.rglob("*.wav")
             ),
             "checksum_file": "checksums.sha256",
+            "release_evidence": {
+                "schema_version": "1.0",
+                "required": list(EVIDENCE_FIELDS),
+                "firered_modules": list(FIRERED_MODULES),
+                "stress_durations_minutes": [
+                    int(value) for value in STRESS_DURATIONS
+                ],
+            },
             "core_test_tsv": "ramc_core/test.tsv",
             "core_items": core_items,
             "core_distribution": {

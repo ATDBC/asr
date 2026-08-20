@@ -12,6 +12,11 @@ from typing import Mapping
 import wave
 
 from .ramc_corpus import parse_transcript, strip_control_markers
+from .release_validation import (
+    EVIDENCE_FIELDS,
+    FIRERED_MODULES,
+    STRESS_DURATIONS,
+)
 
 
 CHECKSUM_FILE = "checksums.sha256"
@@ -498,6 +503,32 @@ def verify_corpus(
             errors.append("manifest seed names mismatch")
         if manifest.get("builder_version") != "1.0":
             errors.append("manifest builder version missing")
+        if strict_release:
+            expected_evidence = {
+                "schema_version": "1.0",
+                "required": list(EVIDENCE_FIELDS),
+                "firered_modules": list(FIRERED_MODULES),
+                "stress_durations_minutes": [
+                    int(value) for value in STRESS_DURATIONS
+                ],
+            }
+            if manifest.get("release_evidence") != expected_evidence:
+                errors.append("release evidence contract missing or invalid")
+            runner_path = directory / "run_validation_linux.sh"
+            runner_text = (
+                runner_path.read_text(encoding="utf-8")
+                if runner_path.is_file()
+                else ""
+            )
+            if not all(
+                marker in runner_text
+                for marker in (
+                    "release_evidence",
+                    "FIRERED_MODULES",
+                    ".venv-asr/bin/python",
+                )
+            ):
+                errors.append("runner lacks FireRed evidence gates")
         if manifest.get("checksum_file") != CHECKSUM_FILE:
             errors.append("manifest checksum filename mismatch")
         if manifest.get("total_audio_duration_ms") != sum(durations.values()):

@@ -196,4 +196,16 @@ def test_build_validation_corpus_writes_complete_relative_layout(
         "speaker_change_negative": 1,
         "seeds": 3,
     }
+    assert manifest["release_evidence"] == {
+        "schema_version": "1.0",
+        "required": [
+            "firered_modules",
+            "lid_coverage",
+            "timestamp_integrity",
+            "gpu_stages",
+            "deterministic_hashes",
+        ],
+        "firered_modules": ["vad", "lid", "aed", "punc"],
+        "stress_durations_minutes": [30, 60, 120],
+    }
     assert "G:\\" not in (output / "manifest.json").read_text("utf-8")

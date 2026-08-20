@@ -116,6 +116,27 @@ def main() -> int:
                     f"{minutes} minute run failed: {run['returncode']}"
                 )
             hashes.append(sha256(output / "transcript.json"))
+            transcript = json.loads(
+                (output / "transcript.json").read_text(encoding="utf-8")
+            )
+            diagnostics = json.loads(
+                (output / "diagnostics.json").read_text(encoding="utf-8")
+            )
+            sentences = (diagnostics.get("asr") or {}).get("sentences") or []
+            turns = transcript.get("turns") or []
+            run["lid_sentences"] = len(sentences)
+            run["lid_covered"] = sum(
+                bool(item.get("language"))
+                and item.get("language_confidence") is not None
+                for item in sentences
+            )
+            run["timestamp_checked"] = len(turns)
+            run["timestamp_valid"] = sum(
+                0 <= int(item.get("start_ms", -1))
+                < int(item.get("end_ms", -1))
+                for item in turns
+            )
+            run["gpu_stages"] = diagnostics.get("gpu_stages") or {}
             leftovers = list(output.parent.glob(f".{output.name}.staging-*"))
             run["temporary_cleanup_ok"] = not leftovers
             runs.append(run)
@@ -127,8 +148,52 @@ def main() -> int:
                 "deterministic": hashes[0] == hashes[1],
             }
         )
+    all_runs = [
+        (item["minutes"], index, run)
+        for item in results
+        for index, run in enumerate(item["runs"], start=1)
+    ]
+    lid_sentences = sum(run["lid_sentences"] for _, _, run in all_runs)
+    lid_covered = sum(run["lid_covered"] for _, _, run in all_runs)
+    timestamp_checked = sum(
+        run["timestamp_checked"] for _, _, run in all_runs
+    )
+    timestamp_valid = sum(run["timestamp_valid"] for _, _, run in all_runs)
+    gpu_stages = {
+        f"{minutes}m-run{index}:{stage}": record
+        for minutes, index, run in all_runs
+        for stage, record in run["gpu_stages"].items()
+    }
+    release_evidence = {
+        "lid_coverage": {
+            "sentences": lid_sentences,
+            "covered": lid_covered,
+            "ratio": lid_covered / lid_sentences if lid_sentences else 0.0,
+        },
+        "timestamp_integrity": {
+            "checked": timestamp_checked,
+            "valid": timestamp_valid,
+            "passed": (
+                timestamp_checked > 0 and timestamp_valid == timestamp_checked
+            ),
+        },
+        "gpu_stages": gpu_stages,
+        "deterministic_hashes": {
+            str(item["minutes"]): item["result_hashes"] for item in results
+        },
+    }
+    evidence_passed = (
+        release_evidence["lid_coverage"]["ratio"] == 1.0
+        and release_evidence["timestamp_integrity"]["passed"]
+        and bool(gpu_stages)
+        and all(
+            record.get("released") is True
+            for record in gpu_stages.values()
+        )
+    )
     payload = {
         "results": results,
+        "release_evidence": release_evidence,
         "passed": all(
             item["deterministic"]
             and all(
@@ -138,7 +203,7 @@ def main() -> int:
                 for run in item["runs"]
             )
             for item in results
-        ),
+        ) and evidence_passed,
     }
     (args.output_dir / "stress-summary.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -18,7 +19,11 @@ from funasr_transcriber.cli import (
 )
 from funasr_transcriber.config import load_config
 from funasr_transcriber.firered_client import FireRedWorkerClient
-from funasr_transcriber.gpu import require_gpu_capacity
+from funasr_transcriber.gpu import (
+    build_gpu_stage_record,
+    query_gpu,
+    require_gpu_capacity,
+)
 from funasr_transcriber.metrics import (
     cer,
     cpcer,
@@ -93,6 +98,18 @@ def clip_wav(source: Path, destination: Path) -> None:
         output_stream.writeframes(frames)
 
 
+def record_gpu_stage(stage, before, owner, diagnostics) -> None:
+    response = getattr(owner, "last_response", {}) or {}
+    metrics = response.get("metrics") or {}
+    diagnostics.gpu_stages[stage] = build_gpu_stage_record(
+        before,
+        query_gpu("cuda:0"),
+        peak_gpu_bytes=metrics.get("peak_gpu_bytes"),
+        load_seconds=metrics.get("load_seconds"),
+        inference_seconds=metrics.get("inference_seconds"),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
@@ -141,6 +158,7 @@ def main() -> int:
                 diarizer_factory=lambda: SpeakerDiarizer.from_config(config),
                 overlap_preparer_factory=lambda diarizer: None,
                 gpu_check=lambda stage: require_gpu_capacity("cuda:0"),
+                gpu_after=record_gpu_stage,
             )
             hypothesis = [
                 {
@@ -158,6 +176,32 @@ def main() -> int:
                 if turn.confidence is AlignmentConfidence.LOW:
                     low_chars += len(turn.text)
             tracks = evaluate_speaker_tracks(reference, hypothesis)
+            sentences = result.diagnostics.asr.get("sentences") or []
+            lid_covered = sum(
+                bool(item.get("language"))
+                and item.get("language_confidence") is not None
+                for item in sentences
+            )
+            valid_timestamps = sum(
+                0 <= turn.start_ms < turn.end_ms
+                for turn in result.transcript.turns
+            )
+            transcript_digest = hashlib.sha256(
+                json.dumps(
+                    [
+                        {
+                            "speaker_id": turn.speaker_id,
+                            "start_ms": turn.start_ms,
+                            "end_ms": turn.end_ms,
+                            "text": turn.text,
+                        }
+                        for turn in result.transcript.turns
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
             per_recording.append(
                 {
                     "name": source.stem,
@@ -174,6 +218,12 @@ def main() -> int:
                         normalize_for_integrity(result.asr_text)
                         == normalize_for_integrity(result.transcript.full_text)
                     ),
+                    "lid_sentences": len(sentences),
+                    "lid_covered": lid_covered,
+                    "timestamp_checked": len(result.transcript.turns),
+                    "timestamp_valid": valid_timestamps,
+                    "gpu_stages": result.diagnostics.gpu_stages,
+                    "result_sha256": transcript_digest,
                 }
             )
 
@@ -208,10 +258,50 @@ def main() -> int:
         "low_confidence": summary["low_confidence_ratio"] <= 0.05,
         "text_retention": summary["text_retention_rate"] == 1.0,
     }
+    lid_sentences = sum(item["lid_sentences"] for item in per_recording)
+    lid_covered = sum(item["lid_covered"] for item in per_recording)
+    timestamp_checked = sum(
+        item["timestamp_checked"] for item in per_recording
+    )
+    timestamp_valid = sum(item["timestamp_valid"] for item in per_recording)
+    gpu_stages = {
+        f"{item['name']}:{stage}": record
+        for item in per_recording
+        for stage, record in item["gpu_stages"].items()
+    }
+    release_evidence = {
+        "lid_coverage": {
+            "sentences": lid_sentences,
+            "covered": lid_covered,
+            "ratio": lid_covered / lid_sentences if lid_sentences else 0.0,
+        },
+        "timestamp_integrity": {
+            "checked": timestamp_checked,
+            "valid": timestamp_valid,
+            "passed": (
+                timestamp_checked > 0 and timestamp_valid == timestamp_checked
+            ),
+        },
+        "gpu_stages": gpu_stages,
+        "result_hashes": {
+            item["name"]: item["result_sha256"] for item in per_recording
+        },
+    }
+    gates.update(
+        {
+            "lid_coverage": release_evidence["lid_coverage"]["ratio"] == 1.0,
+            "timestamp_integrity": release_evidence["timestamp_integrity"][
+                "passed"
+            ],
+            "gpu_evidence": bool(gpu_stages)
+            and all(item.get("released") is True for item in gpu_stages.values()),
+        }
+    )
     payload = {
         "summary": summary,
         "gates": gates,
         "passed": all(gates.values()),
+        "release_evidence": release_evidence,
         "recording_results": per_recording,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

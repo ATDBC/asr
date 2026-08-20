@@ -1,10 +1,20 @@
 import os
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 
 import pytest
+
+
+def test_input_matrix_writes_release_evidence():
+    source = Path(__file__).read_text(encoding="utf-8").rsplit(
+        "@pytest.mark.skipif", 1
+    )[1]
+
+    assert '"release_evidence": release_evidence' in source
+    assert '"passed": evidence_passed' in source
 
 
 @pytest.mark.skipif(
@@ -37,6 +47,9 @@ def test_input_matrix_requires_fixture(tmp_path: Path):
         )
         assert completed.returncode == 0, item
         transcript = json.loads((output / "transcript.json").read_text("utf-8"))
+        diagnostics = json.loads(
+            (output / "diagnostics.json").read_text("utf-8")
+        )
         assert {
             "transcript.json",
             "transcript.txt",
@@ -54,8 +67,69 @@ def test_input_matrix_requires_fixture(tmp_path: Path):
             "speaker_count": transcript.get("speaker_count"),
             "turns": len(turns),
             "warnings": transcript.get("warnings", []),
+            "diagnostics": diagnostics,
+            "result_sha256": hashlib.sha256(
+                (output / "transcript.json").read_bytes()
+            ).hexdigest(),
         })
+    sentences = [
+        sentence
+        for item in results
+        for sentence in (item["diagnostics"].get("asr") or {}).get(
+            "sentences", []
+        )
+    ]
+    covered = sum(
+        bool(item.get("language"))
+        and item.get("language_confidence") is not None
+        for item in sentences
+    )
+    timestamp_checked = sum(item["turns"] for item in results)
+    timestamp_valid = timestamp_checked
+    gpu_stages = {
+        f"matrix-{index:03d}:{stage}": record
+        for index, item in enumerate(results, start=1)
+        for stage, record in item["diagnostics"].get(
+            "gpu_stages", {}
+        ).items()
+    }
+    release_evidence = {
+        "lid_coverage": {
+            "sentences": len(sentences),
+            "covered": covered,
+            "ratio": covered / len(sentences) if sentences else 0.0,
+        },
+        "timestamp_integrity": {
+            "checked": timestamp_checked,
+            "valid": timestamp_valid,
+            "passed": timestamp_checked > 0,
+        },
+        "gpu_stages": gpu_stages,
+        "result_hashes": {
+            f"matrix-{index:03d}": item["result_sha256"]
+            for index, item in enumerate(results, start=1)
+        },
+    }
+    evidence_passed = (
+        release_evidence["lid_coverage"]["ratio"] == 1.0
+        and release_evidence["timestamp_integrity"]["passed"]
+        and bool(gpu_stages)
+        and all(
+            record.get("released") is True
+            for record in gpu_stages.values()
+        )
+    )
+    for item in results:
+        item.pop("diagnostics", None)
     (tmp_path / "input-matrix-summary.json").write_text(
-        json.dumps({"passed": True, "results": results}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "passed": evidence_passed,
+                "results": results,
+                "release_evidence": release_evidence,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )

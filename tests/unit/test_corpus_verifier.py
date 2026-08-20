@@ -4,9 +4,19 @@ from pathlib import Path
 import wave
 
 from funasr_transcriber.corpus_verifier import (
+    RELEASE_COUNTS,
     verify_corpus,
     write_checksums,
 )
+
+
+def test_release_verifier_requires_firered_evidence_contract(tmp_path: Path):
+    write_minimal_corpus(tmp_path)
+
+    result = verify_corpus(tmp_path, expected_counts=RELEASE_COUNTS)
+
+    assert any("release evidence contract" in error for error in result.errors)
+    assert any("runner lacks FireRed evidence gates" in error for error in result.errors)
 
 
 def write_valid_wav(path: Path, duration_ms: int = 1_000):

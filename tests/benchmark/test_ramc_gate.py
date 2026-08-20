@@ -7,6 +7,21 @@ import sys
 import pytest
 
 
+def test_ramc_tool_emits_firered_release_evidence():
+    source = (
+        Path(__file__).parents[2] / "tools" / "benchmark_ramc_e2e.py"
+    ).read_text(encoding="utf-8")
+
+    for field in (
+        '"release_evidence"',
+        '"lid_coverage"',
+        '"timestamp_integrity"',
+        '"gpu_stages"',
+        '"result_hashes"',
+    ):
+        assert field in source
+
+
 @pytest.mark.skipif(
     os.getenv("FUNASR_TRANSCRIBER_RUN_BENCHMARKS") != "1",
     reason="release benchmarks are disabled",
@@ -32,4 +47,10 @@ def test_ramc_release_gate_is_run_explicitly(tmp_path: Path):
     completed = subprocess.run(command, check=False)
 
     assert completed.returncode == 0
-    assert json.loads(output.read_text(encoding="utf-8"))["passed"] is True
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["passed"] is True
+    evidence = payload["release_evidence"]
+    assert evidence["lid_coverage"]["ratio"] == 1.0
+    assert evidence["timestamp_integrity"]["passed"] is True
+    assert evidence["gpu_stages"]
+    assert len(evidence["result_hashes"]) == 20

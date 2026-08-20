@@ -22,6 +22,8 @@ class Diagnostics:
     speaker_count: int | None = None
     runtime: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
+    asr: dict[str, Any] = field(default_factory=dict)
+    gpu_stages: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
@@ -104,6 +106,8 @@ def export_diagnostics(
         "warnings": list(diagnostics.warnings),
         "runtime": diagnostics.runtime,
         "config": sanitize_mapping(diagnostics.config),
+        "asr": diagnostics.asr,
+        "gpu_stages": diagnostics.gpu_stages,
     }
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as stream:

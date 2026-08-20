@@ -1,0 +1,14 @@
+.venv/
+.venv-asr/
+.venv-overlap/
+.worktrees/
+.tools/
+models/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+htmlcov/
+artifacts/release_validation_corpus/
+validation_results/

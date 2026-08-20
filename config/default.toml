@@ -1,0 +1,41 @@
+[general]
+language = "zh"
+device = "cuda:0"
+max_audio_seconds = 7200
+random_seed = 0
+
+[paths]
+model_dir = "/opt/funasr-transcriber/models"
+work_dir = "/var/tmp/funasr-transcriber"
+
+[diarization]
+speaker_count = "auto"
+min_speakers = 1
+max_speakers = 10
+chunk_seconds = 1.0
+chunk_step_seconds = 0.5
+merge_cosine = 0.23
+
+[vad]
+speech_noise_thres = 0.45
+sil_to_speech_time_thres = 120
+speech_to_sil_time_thres = 180
+max_end_silence_time = 1000
+
+[alignment]
+high_coverage_ratio = 0.70
+medium_coverage_ratio = 0.50
+nearest_gap_ms = 300
+
+[turns]
+merge_gap_seconds = 1.0
+
+[overlap]
+enabled = true
+detector_model = "pyannote/speaker-diarization-3.1"
+hf_token_env = "HF_TOKEN"
+worker_python = "/opt/funasr-transcriber/.venv-overlap/bin/python"
+timeout_seconds = 1200
+speaker_match_min_score = 0.05
+speaker_match_min_margin = 0.03
+track_min_rms = 0.0005

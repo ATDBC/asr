@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Deterministic offline Mandarin transcription with speaker diarization"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-  "funasr==1.2.7",
   "modelscope==1.36.3",
   "numpy==2.4.3",
   "scipy==1.17.1",
@@ -28,4 +27,3 @@ funasr-transcribe = "funasr_transcriber.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

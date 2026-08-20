@@ -1,0 +1,2 @@
+modelscope==1.36.3
+huggingface-hub==1.4.1

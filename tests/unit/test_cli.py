@@ -136,11 +136,14 @@ def test_doctor_dispatches_to_doctor_runner():
     assert main(["doctor"], doctor_runner=lambda args: 0) == 0
 
 
-def test_doctor_route_does_not_use_removed_legacy_asr_smoke(
+def test_doctor_route_delegates_complete_model_sequence_once(
     monkeypatch,
     capsys,
 ):
-    config = SimpleNamespace(overlap=SimpleNamespace(enabled=False))
+    config = SimpleNamespace(
+        general=SimpleNamespace(device="cuda:0"),
+        overlap=SimpleNamespace(enabled=True),
+    )
     monkeypatch.setattr(cli, "load_config", lambda path: config)
 
     def fake_run_doctor(received, check_cuda, smoke_test):
@@ -150,6 +153,35 @@ def test_doctor_route_does_not_use_removed_legacy_asr_smoke(
         return ("doctor: ok",)
 
     monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
+    monkeypatch.setattr(
+        cli,
+        "JsonOverlapWorkerClient",
+        lambda *args, **kwargs: pytest.fail(
+            "CLI must not repeat overlap verification"
+        ),
+    )
 
     assert cli._run_doctor(SimpleNamespace(config=None, skip_cuda=True)) == 0
     assert capsys.readouterr().out == "doctor: ok\n"
+
+
+def test_doctor_enforces_physical_gpu_zero_before_full_smoke(monkeypatch):
+    config = SimpleNamespace(
+        general=SimpleNamespace(device="cuda:0"),
+        overlap=SimpleNamespace(enabled=False),
+    )
+    events = []
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(
+        cli,
+        "require_physical_gpu_zero",
+        lambda device: events.append(f"physical:{device}"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_doctor",
+        lambda received, check_cuda, smoke_test: events.append("doctor") or (),
+    )
+
+    assert cli._run_doctor(SimpleNamespace(config=None, skip_cuda=False)) == 0
+    assert events == ["physical:cuda:0", "doctor"]

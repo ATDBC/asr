@@ -360,6 +360,8 @@ def _run_models(action: str, args: argparse.Namespace) -> int:
 
 def _run_doctor(args: argparse.Namespace) -> int:
     config = load_config(args.config)
+    if not args.skip_cuda:
+        require_physical_gpu_zero(config.general.device)
     checks = list(
         run_doctor(
             config,
@@ -367,31 +369,6 @@ def _run_doctor(args: argparse.Namespace) -> int:
             smoke_test=None,
         )
     )
-    if config.overlap.enabled:
-        worker = JsonOverlapWorkerClient(
-            worker_python=config.overlap.worker_python,
-            worker_script=Path(__file__).with_name("overlap_worker.py"),
-            work_dir=config.paths.work_dir / "doctor-worker",
-            timeout_seconds=config.overlap.timeout_seconds,
-        )
-        try:
-            worker.call(
-                "verify",
-                {
-                    "model_id": config.overlap.detector_model,
-                    "hf_token_env": config.overlap.hf_token_env,
-                    "device": config.general.device,
-                    "model": "MossFormer2_SS_16K",
-                    "cache_dir": str(
-                        (config.paths.model_dir / "huggingface").resolve()
-                    ),
-                },
-            )
-        except Exception as exc:
-            from .errors import ModelError
-
-            raise ModelError(f"overlap model verification failed: {exc}") from exc
-        checks.append("overlap_models: verified")
     for check in checks:
         print(check)
     return 0

@@ -21,6 +21,7 @@ from .firered_client import FireRedWorkerClient
 from .gpu import build_gpu_stage_record, query_gpu, require_gpu_capacity
 from .locking import TaskLock
 from .model_registry import (
+    acquire_overlap_assets,
     download_models,
     verify_models,
 )
@@ -325,6 +326,8 @@ def _run_models(action: str, args: argparse.Namespace) -> int:
     config = load_config(args.config)
     if action == "download":
         download_models(config.paths.model_dir)
+        if config.overlap.enabled:
+            acquire_overlap_assets(config.paths.model_dir)
     else:
         result = verify_models(config.paths.model_dir)
         if not result.ok:

@@ -55,6 +55,12 @@ source .venv/bin/activate
 - `.venv-asr`：固定源码提交的 FireRedASR2S worker。
 - `.venv-overlap`：pyannote OSD 与 ClearVoice。
 
+主环境使用 PyTorch 2.11；overlap 环境固定使用 PyTorch/torchaudio 2.8 和
+配套的 torchvision 0.23，兼容 `pyannote.audio==3.3.2` 所需的旧 torchaudio
+音频 API。两个环境均从配置的 CUDA 12.8 wheel 源安装，依赖不会交叉导入。
+overlap 环境只安装 worker 所需依赖，不安装主项目 editable 包，以避免主项目的
+NumPy/音频依赖覆盖 overlap 的兼容性锁定。
+
 FireRedASR2S 固定到提交
 `4e7d9aaf4482a47cec1724807026b9b151926eb5`。安装器验证已有源码的 HEAD；
 目录不完整或提交不符时直接失败，不覆盖已有内容。不使用系统 site-packages，
@@ -105,18 +111,27 @@ models/fireredasr2s/
 └── FireRedPunc/
 ~~~
 
+overlap 模型也默认从 ModelScope 获取，保存在 `models/huggingface/`：
+
+~~~text
+pyannote/speaker-diarization-3.1/
+pyannote/segmentation-3.0/
+pyannote/wespeaker-voxceleb-resnet34-LM/
+checkpoints/MossFormer2_SS_16K/
+~~~
+
 默认下载和验证：
 
 ~~~bash
-export HF_TOKEN=hf_xxx
 funasr-transcribe models download --config /etc/funasr-transcriber.toml
 funasr-transcribe models verify --config /etc/funasr-transcriber.toml
 funasr-transcribe doctor --config /etc/funasr-transcriber.toml
 ~~~
 
-pyannote 重叠检测需要先在 Hugging Face 接受 `segmentation-3.0` 与
-`speaker-diarization-3.1` 的访问条件。`HF_TOKEN` 只从环境读取，不写入配置、
-日志或 diagnostics。
+使用上述完整 ModelScope 镜像时，pyannote 重叠检测不需要 Hugging Face token。
+只有本地 overlap 资产不完整、显式切换到 Hugging Face fallback 时，才需要先接受
+`segmentation-3.0` 与 `speaker-diarization-3.1` 的访问条件。`HF_TOKEN` 只从环境
+读取，不写入配置、日志或 diagnostics。
 
 仅当 ModelScope 无法获取 FireRed 四模型时，才显式使用 Hugging Face fallback：
 

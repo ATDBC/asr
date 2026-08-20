@@ -7,7 +7,9 @@ from funasr_transcriber.model_registry import (
     DIARIZATION_EMBEDDING_DIR,
     FIRERED_COMMIT,
     SPEAKER_VAD_DIR,
+    acquire_overlap_assets,
     resolve_firered_paths,
+    resolve_overlap_paths,
     verify_models,
 )
 
@@ -84,3 +86,54 @@ def test_resolve_firered_models_raises_with_named_missing_models(
 ):
     with pytest.raises(ModelError, match="firered_vad"):
         resolve_firered_paths(tmp_path, require_existing=True)
+
+
+def _write_overlap_snapshot(model_id: str, local_dir: str) -> None:
+    target = Path(local_dir)
+    target.mkdir(parents=True)
+    if model_id == "pyannote/speaker-diarization-3.1":
+        (target / "config.yaml").write_text(
+            "pipeline:\n  params: {}\n", encoding="utf-8"
+        )
+    elif model_id in {
+        "pyannote/segmentation-3.0",
+        "pyannote/wespeaker-voxceleb-resnet34-LM",
+    }:
+        (target / "pytorch_model.bin").write_bytes(b"model")
+    elif model_id == "alibabasglab/MossFormer2_SS_16K":
+        (target / "last_best_checkpoint").write_text(
+            "last_best_checkpoint.pt\n", encoding="utf-8"
+        )
+        (target / "last_best_checkpoint.pt").write_bytes(b"model")
+
+
+def test_acquire_overlap_assets_uses_modelscope_mirrors(tmp_path: Path):
+    calls = []
+
+    def download(model_id, local_dir):
+        calls.append(model_id)
+        _write_overlap_snapshot(model_id, local_dir)
+
+    paths = acquire_overlap_assets(tmp_path, snapshot_download=download)
+
+    assert calls == [
+        "pyannote/speaker-diarization-3.1",
+        "pyannote/segmentation-3.0",
+        "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "alibabasglab/MossFormer2_SS_16K",
+    ]
+    assert paths.pipeline_config.is_file()
+    assert paths.segmentation_checkpoint.is_file()
+    assert paths.embedding_checkpoint.is_file()
+    assert paths.clearvoice_checkpoint.is_file()
+    assert resolve_overlap_paths(tmp_path) == paths
+
+
+def test_acquire_overlap_assets_rejects_incomplete_existing_directory(
+    tmp_path: Path,
+):
+    paths = resolve_overlap_paths(tmp_path, require_existing=False)
+    paths.pipeline.mkdir(parents=True)
+
+    with pytest.raises(ModelError, match="incomplete overlap asset"):
+        acquire_overlap_assets(tmp_path, snapshot_download=lambda *args: None)

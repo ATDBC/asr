@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Any, Protocol
@@ -105,6 +106,7 @@ class JsonOverlapWorkerClient:
             completed = subprocess.run(
                 command,
                 cwd=str(self.work_dir),
+                env={**os.environ, "CUDA_VISIBLE_DEVICES": "0"},
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

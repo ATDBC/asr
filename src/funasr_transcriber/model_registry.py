@@ -33,6 +33,28 @@ FIRERED_MODELS = {
         "FireRedPunc",
     ),
 }
+OVERLAP_MODELS = (
+    (
+        "pyannote/speaker-diarization-3.1",
+        "pyannote/speaker-diarization-3.1",
+        "config.yaml",
+    ),
+    (
+        "pyannote/segmentation-3.0",
+        "pyannote/segmentation-3.0",
+        "pytorch_model.bin",
+    ),
+    (
+        "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "pytorch_model.bin",
+    ),
+    (
+        "alibabasglab/MossFormer2_SS_16K",
+        "checkpoints/MossFormer2_SS_16K",
+        "last_best_checkpoint",
+    ),
+)
 SPEAKER_VAD_DIR = MODEL_DIRS["vad"]
 DIARIZATION_EMBEDDING_DIR = (
     "speech_campplus_sv_zh_en_16k-common_advanced"
@@ -52,6 +74,16 @@ class FireRedPaths:
     lid: Path
     aed: Path
     punc: Path
+
+
+@dataclass(frozen=True, slots=True)
+class OverlapPaths:
+    pipeline: Path
+    pipeline_config: Path
+    segmentation_checkpoint: Path
+    embedding_checkpoint: Path
+    clearvoice: Path
+    clearvoice_checkpoint: Path
 
 
 def resolve_firered_paths(
@@ -83,6 +115,105 @@ def resolve_firered_paths(
                 "missing required models: " + ", ".join(missing)
             )
     return paths
+
+
+def _clearvoice_checkpoint(directory: Path) -> Path:
+    pointer = directory / "last_best_checkpoint"
+    name = "last_best_checkpoint.pt"
+    if pointer.is_file():
+        name = pointer.read_text(encoding="utf-8").strip()
+        if not name or Path(name).name != name:
+            raise ModelError(
+                f"invalid ClearVoice checkpoint pointer: {pointer}"
+            )
+    return directory / name
+
+
+def resolve_overlap_paths(
+    model_dir: Path,
+    require_existing: bool = True,
+) -> OverlapPaths:
+    root = Path(model_dir).expanduser().resolve() / "huggingface"
+    pipeline = root / "pyannote" / "speaker-diarization-3.1"
+    segmentation = (
+        root / "pyannote" / "segmentation-3.0" / "pytorch_model.bin"
+    )
+    embedding = (
+        root
+        / "pyannote"
+        / "wespeaker-voxceleb-resnet34-LM"
+        / "pytorch_model.bin"
+    )
+    clearvoice = root / "checkpoints" / "MossFormer2_SS_16K"
+    paths = OverlapPaths(
+        pipeline=pipeline,
+        pipeline_config=pipeline / "config.yaml",
+        segmentation_checkpoint=segmentation,
+        embedding_checkpoint=embedding,
+        clearvoice=clearvoice,
+        clearvoice_checkpoint=_clearvoice_checkpoint(clearvoice),
+    )
+    if require_existing:
+        missing = [
+            name
+            for name, path in (
+                ("pipeline", paths.pipeline_config),
+                ("segmentation", paths.segmentation_checkpoint),
+                ("embedding", paths.embedding_checkpoint),
+                ("clearvoice_pointer", clearvoice / "last_best_checkpoint"),
+                ("clearvoice_checkpoint", paths.clearvoice_checkpoint),
+            )
+            if not path.is_file()
+        ]
+        if missing:
+            raise ModelError(
+                "missing overlap assets: " + ", ".join(missing)
+            )
+    return paths
+
+
+def acquire_overlap_assets(
+    model_dir: Path,
+    snapshot_download: Callable[..., Any] | None = None,
+) -> OverlapPaths:
+    if snapshot_download is None:
+        try:
+            from modelscope import snapshot_download as modelscope_download
+        except ImportError as exc:
+            raise ModelError(f"unable to import ModelScope: {exc}") from exc
+        snapshot_download = modelscope_download
+
+    root = Path(model_dir).expanduser().resolve() / "huggingface"
+    for model_id, relative, marker in OVERLAP_MODELS:
+        target = root / relative
+        if target.exists():
+            marker_path = target / marker
+            valid = marker_path.is_file()
+            if marker == "last_best_checkpoint" and valid:
+                valid = _clearvoice_checkpoint(target).is_file()
+            if not valid:
+                raise ModelError(f"incomplete overlap asset: {target}")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.parent / (
+            f".{target.name}.download-{uuid.uuid4().hex}"
+        )
+        try:
+            snapshot_download(model_id, local_dir=str(temporary))
+            marker_path = temporary / marker
+            valid = marker_path.is_file()
+            if marker == "last_best_checkpoint" and valid:
+                valid = _clearvoice_checkpoint(temporary).is_file()
+            if not valid:
+                raise ModelError(
+                    f"downloaded overlap asset is incomplete: {model_id}"
+                )
+            temporary.replace(target)
+        except Exception:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            raise
+    return resolve_overlap_paths(model_dir)
 
 
 def _directory_has_files(path: Path) -> bool:

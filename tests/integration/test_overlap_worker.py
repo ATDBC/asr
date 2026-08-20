@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -65,3 +67,32 @@ def test_worker_client_reports_timeout(tmp_path: Path):
 
     with pytest.raises(OverlapWorkerError, match="timed out"):
         client.call("detect", {"audio_path": "sample.wav"})
+
+
+def test_worker_client_restricts_child_to_physical_gpu_zero(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+
+    def run(command, **kwargs):
+        captured.update(kwargs["env"])
+        request = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+        Path(request["result_path"]).write_text(
+            json.dumps({"ok": True}), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("OVERLAP_TEST_MARKER", "retained")
+    monkeypatch.setattr("funasr_transcriber.overlap.subprocess.run", run)
+    client = JsonOverlapWorkerClient(
+        worker_python=Path(sys.executable),
+        worker_script=tmp_path / "worker.py",
+        work_dir=tmp_path / "requests",
+        timeout_seconds=2,
+    )
+
+    client.call("verify", {})
+
+    assert captured["CUDA_VISIBLE_DEVICES"] == "0"
+    assert captured["OVERLAP_TEST_MARKER"] == "retained"

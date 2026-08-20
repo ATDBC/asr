@@ -36,7 +36,7 @@ def test_install_script_is_isolated_and_fail_fast():
     )
     assert (
         '"$OVERLAP_PYTHON" -m pip install --no-deps -e "$PROJECT_ROOT"'
-        in script
+        not in script
     )
     assert "TORCH_INDEX_URL" in script
     assert "funasr-transcribe doctor" in script
@@ -109,6 +109,11 @@ def test_overlap_dependencies_use_torch_2_compatible_pyannote():
         Path(__file__).parents[2] / "requirements-overlap.txt"
     ).read_text(encoding="utf-8")
 
+    assert "torch==2.8.0" in requirements
+    assert "torchaudio==2.8.0" in requirements
+    assert "torchvision==0.23.0" in requirements
+    assert "torch==2.11.0" not in requirements
+    assert "torchaudio==2.11.0" not in requirements
     assert "pyannote.audio==3.3.2" in requirements
     assert "pyannote.audio==2.1.1" not in requirements
     assert "librosa==0.10.2.post1" in requirements
@@ -117,3 +122,29 @@ def test_overlap_dependencies_use_torch_2_compatible_pyannote():
     assert "pyannote.database==5.1.0" in requirements
     assert "pyannote.metrics==3.2.1" in requirements
     assert "pyannote.pipeline==3.0.1" in requirements
+
+
+def test_install_script_pins_overlap_torch_runtime():
+    script = (
+        Path(__file__).parents[2] / "scripts" / "install_linux.sh"
+    ).read_text(encoding="utf-8")
+
+    overlap_install = script.split(
+        '"$OVERLAP_PYTHON" -m pip install \\\n'
+        '    --index-url "$TORCH_INDEX_URL" \\\n',
+        maxsplit=1,
+    )[1].split("\n", maxsplit=1)[0]
+    assert overlap_install == '    "torch==2.8.0" "torchaudio==2.8.0"'
+    assert '"torch==2.11.0" "torchaudio==2.11.0"' in script
+
+
+def test_install_script_smoke_imports_overlap_runtime():
+    script = (
+        Path(__file__).parents[2] / "scripts" / "install_linux.sh"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'import torch, torchaudio, torchvision, pyannote.audio, clearvoice; '
+        "assert torch.cuda.is_available(), 'overlap CUDA is unavailable'"
+        in script
+    )

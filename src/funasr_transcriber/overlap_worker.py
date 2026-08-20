@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import traceback
 from typing import Any
 
@@ -13,32 +14,109 @@ from typing import Any
 TARGET_SAMPLE_RATE = 16000
 
 
-def _configure_cache(request: dict[str, Any]) -> None:
+def _configure_cache(request: dict[str, Any]) -> Path:
+    # pyannote 3.x Lightning checkpoints contain trusted metadata that
+    # PyTorch 2.6+ excludes from its new weights-only default loader.
+    os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
     if not request.get("cache_dir"):
-        return
+        return Path.cwd().resolve()
     cache_dir = Path(request["cache_dir"]).expanduser().resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(cache_dir)
     os.chdir(cache_dir)
+    return cache_dir
 
 
-def _load_detector(request: dict[str, Any]):
-    _configure_cache(request)
-    import torch
-    from pyannote.audio import Pipeline
-
-    token_name = str(request.get("hf_token_env") or "HF_TOKEN")
-    token = os.getenv(token_name)
-    if not token:
-        raise RuntimeError(f"required Hugging Face token is not set: {token_name}")
+def _local_detector_config(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
     model_id = str(
         request.get("model_id") or "pyannote/speaker-diarization-3.1"
     )
-    pipeline = Pipeline.from_pretrained(model_id, use_auth_token=token)
+    if model_id != "pyannote/speaker-diarization-3.1":
+        return None
+    cache_dir = Path(request.get("cache_dir") or Path.cwd()).resolve()
+    pipeline = (
+        cache_dir / "pyannote" / "speaker-diarization-3.1" / "config.yaml"
+    )
+    segmentation = (
+        cache_dir / "pyannote" / "segmentation-3.0" / "pytorch_model.bin"
+    )
+    embedding = (
+        cache_dir
+        / "pyannote"
+        / "wespeaker-voxceleb-resnet34-LM"
+        / "pytorch_model.bin"
+    )
+    if not all(path.is_file() for path in (pipeline, segmentation, embedding)):
+        return None
+    import yaml
+
+    config = yaml.safe_load(pipeline.read_text(encoding="utf-8"))
+    params = config["pipeline"]["params"]
+    params["segmentation"] = {
+        "checkpoint": str(segmentation),
+        "strict": False,
+    }
+    params["embedding"] = {
+        "checkpoint": str(embedding),
+        "strict": False,
+    }
+    return config
+
+
+def _load_detector(request: dict[str, Any]):
+    cache_dir = _configure_cache(request)
+    import torch
+    from pyannote.audio import Pipeline
+    import yaml
+
+    model_id = str(
+        request.get("model_id") or "pyannote/speaker-diarization-3.1"
+    )
+    local_config = _local_detector_config(request)
+    if local_config is not None:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".yaml",
+            dir=cache_dir,
+            encoding="utf-8",
+        ) as temporary:
+            yaml.safe_dump(local_config, temporary, sort_keys=False)
+            temporary.flush()
+            pipeline = Pipeline.from_pretrained(
+                temporary.name,
+                use_auth_token=None,
+            )
+    else:
+        token_name = str(request.get("hf_token_env") or "HF_TOKEN")
+        token = os.getenv(token_name)
+        if not token:
+            raise RuntimeError(
+                f"required Hugging Face token is not set: {token_name}"
+            )
+        pipeline = Pipeline.from_pretrained(model_id, use_auth_token=token)
+    if pipeline is None:
+        raise RuntimeError(f"unable to load overlap detector: {model_id}")
     device = str(request.get("device") or "cuda:0")
     if device.startswith("cuda"):
         pipeline.to(torch.device(device))
     return pipeline, model_id
+
+
+def _require_clearvoice_checkpoint(
+    cache_dir: Path,
+    model_name: str,
+) -> Path:
+    directory = Path(cache_dir) / "checkpoints" / model_name
+    pointer = directory / "last_best_checkpoint"
+    if not pointer.is_file():
+        raise RuntimeError(f"ClearVoice checkpoint is missing: {pointer}")
+    name = pointer.read_text(encoding="utf-8").strip()
+    target = directory / name
+    if not name or Path(name).name != name or not target.is_file():
+        raise RuntimeError(f"ClearVoice checkpoint is missing: {target}")
+    return target
 
 
 def _detect(request: dict[str, Any]) -> dict[str, Any]:
@@ -123,13 +201,14 @@ def _rms(data) -> float:
 
 
 def _separate(request: dict[str, Any]) -> dict[str, Any]:
-    _configure_cache(request)
+    cache_dir = _configure_cache(request)
     from clearvoice import ClearVoice
 
     audio_path = Path(request["audio_path"]).resolve()
     output_dir = Path(request["output_dir"]).resolve()
     model_name = str(request.get("model") or "MossFormer2_SS_16K")
     model = ClearVoice(task="speech_separation", model_names=[model_name])
+    _require_clearvoice_checkpoint(cache_dir, model_name)
     response_windows = []
     for window in request.get("windows", []):
         window_id = str(window["id"])
@@ -160,11 +239,13 @@ def _separate(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _download(request: dict[str, Any]) -> dict[str, Any]:
+    cache_dir = _configure_cache(request)
     _load_detector(request)
     from clearvoice import ClearVoice
 
     model_name = str(request.get("model") or "MossFormer2_SS_16K")
     ClearVoice(task="speech_separation", model_names=[model_name])
+    _require_clearvoice_checkpoint(cache_dir, model_name)
     return {"ok": True, "model": model_name}
 
 

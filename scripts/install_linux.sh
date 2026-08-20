@@ -101,18 +101,17 @@ fi
     "pip==25.2" "setuptools==80.9.0" "wheel==0.45.1"
 "$OVERLAP_PYTHON" -m pip install \
     --index-url "$TORCH_INDEX_URL" \
-    "torch==2.11.0" "torchaudio==2.11.0"
+    "torch==2.8.0" "torchaudio==2.8.0"
 "$OVERLAP_PYTHON" -m pip install \
     --extra-index-url "$TORCH_INDEX_URL" \
     -r "$PROJECT_ROOT/requirements-overlap.txt"
-"$OVERLAP_PYTHON" -m pip install --no-deps -e "$PROJECT_ROOT"
 
 "$CORE_PYTHON" -c \
     "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'"
 "$ASR_PYTHON" -c \
     "import torch; assert torch.cuda.is_available(), 'ASR CUDA is unavailable'"
 "$OVERLAP_PYTHON" -c \
-    "import torch; assert torch.cuda.is_available(), 'overlap CUDA is unavailable'"
+    "import torch, torchaudio, torchvision, pyannote.audio, clearvoice; assert torch.cuda.is_available(), 'overlap CUDA is unavailable'"
 
 echo "Installation complete."
 echo "Activate with: source $CORE_VENV/bin/activate"

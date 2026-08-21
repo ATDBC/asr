@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+import queue
+import threading
 from typing import Any, Callable
 
+from .service_protocol import ServiceBusyError, ServiceRequest
 from .schemas import AsrResult, SpeakerSegment
 
 
@@ -151,3 +154,104 @@ def run_normal_branches(
         speaker_segments=speaker_segments,
         speaker_metrics=speaker_metrics,
     )
+
+
+@dataclass(slots=True)
+class _QueuedJob:
+    request: ServiceRequest
+    future: Future[dict[str, object]]
+
+
+class DaemonService:
+    """Serialize accepted service jobs and drain them on shutdown.
+
+    Network handlers only submit work to this object.  The single consumer is
+    deliberately the only caller of ``run_job`` so model ownership remains
+    confined to one daemon thread.
+    """
+
+    def __init__(
+        self,
+        queue_limit: int,
+        run_job: Callable[[ServiceRequest], dict[str, object]],
+    ):
+        if queue_limit <= 0:
+            raise ValueError("service queue_limit must be positive")
+        self._queue: queue.Queue[_QueuedJob] = queue.Queue(maxsize=queue_limit)
+        self._run_job = run_job
+        self._futures: dict[str, Future[dict[str, object]]] = {}
+        self._lock = threading.Lock()
+        self._draining = False
+        self._started = False
+        self._stopped = threading.Event()
+        self._consumer: threading.Thread | None = None
+        self.completed_ids: list[str] = []
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped.is_set()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            if self._draining:
+                self._stopped.set()
+                return
+            self._started = True
+            self._consumer = threading.Thread(
+                target=self._consume,
+                name="funasr-transcriber-service",
+                daemon=True,
+            )
+            self._consumer.start()
+
+    def submit(self, request: ServiceRequest) -> Future[dict[str, object]]:
+        with self._lock:
+            existing = self._futures.get(request.identifier)
+            if existing is not None:
+                return existing
+            if self._draining:
+                raise ServiceBusyError("service is draining and accepts no new jobs")
+            if not self._started:
+                raise RuntimeError("service has not started")
+            future: Future[dict[str, object]] = Future()
+            try:
+                self._queue.put_nowait(_QueuedJob(request, future))
+            except queue.Full as exc:
+                raise ServiceBusyError("service queue is full") from exc
+            self._futures[request.identifier] = future
+            return future
+
+    def request_stop(self) -> None:
+        """Reject new jobs, then let the sole consumer finish accepted work."""
+
+        with self._lock:
+            self._draining = True
+            if not self._started:
+                self._stopped.set()
+
+    def wait_stopped(self, timeout: float | None = None) -> bool:
+        return self._stopped.wait(timeout)
+
+    def _consume(self) -> None:
+        try:
+            while True:
+                try:
+                    queued = self._queue.get(timeout=0.05)
+                except queue.Empty:
+                    with self._lock:
+                        if self._draining:
+                            return
+                    continue
+                try:
+                    result = self._run_job(queued.request)
+                except BaseException as exc:
+                    queued.future.set_exception(exc)
+                else:
+                    self.completed_ids.append(queued.request.identifier)
+                    queued.future.set_result(result)
+                finally:
+                    self._queue.task_done()
+        finally:
+            self._stopped.set()

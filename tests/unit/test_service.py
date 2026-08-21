@@ -12,7 +12,12 @@ from funasr_transcriber.schemas import (
     SpeakerSegment,
     TimedToken,
 )
-from funasr_transcriber.service import HotModelHost, run_normal_branches
+from funasr_transcriber.service import (
+    DaemonService,
+    HotModelHost,
+    run_normal_branches,
+)
+from funasr_transcriber.service_protocol import ServiceBusyError, ServiceRequest
 
 
 def _result() -> AsrResult:
@@ -139,3 +144,50 @@ def test_normal_branch_waits_for_the_other_owner_before_raising(tmp_path: Path):
         run_normal_branches(tmp_path / "normalized.wav", FailingAsr(), diarizer)
 
     assert diarizer.finished is True
+
+
+def _request(identifier: str) -> ServiceRequest:
+    return ServiceRequest(identifier=identifier, action="submit")
+
+
+def test_daemon_processes_submissions_in_fifo_order():
+    completed: list[str] = []
+    daemon = DaemonService(
+        queue_limit=2,
+        run_job=lambda request: completed.append(request.identifier)
+        or {"output_dir": request.identifier},
+    )
+    daemon.start()
+    try:
+        first = daemon.submit(_request("first"))
+        second = daemon.submit(_request("second"))
+
+        assert first.result(timeout=1) == {"output_dir": "first"}
+        assert second.result(timeout=1) == {"output_dir": "second"}
+        assert completed == ["first", "second"]
+    finally:
+        daemon.request_stop()
+        assert daemon.wait_stopped(timeout=1)
+
+
+def test_stop_drains_accepted_jobs_and_rejects_new_submissions():
+    release = threading.Event()
+    started = threading.Event()
+
+    def run_job(request):
+        started.set()
+        release.wait(timeout=1)
+        return {"output_dir": request.identifier}
+
+    daemon = DaemonService(queue_limit=2, run_job=run_job)
+    daemon.start()
+    accepted = daemon.submit(_request("accepted"))
+    assert started.wait(timeout=1)
+    daemon.request_stop()
+
+    with pytest.raises(ServiceBusyError, match="draining"):
+        daemon.submit(_request("new"))
+
+    release.set()
+    assert accepted.result(timeout=1) == {"output_dir": "accepted"}
+    assert daemon.wait_stopped(timeout=1)

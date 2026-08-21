@@ -1,5 +1,11 @@
 # FireRedASR2S ASR 路线迁移设计
 
+> **执行状态更新（2026-08-21）**：本文件中的 FireRed 模型、隔离环境和
+> 稳定响应契约仍然有效；第 8 节的“每个任务关闭模型”的 GPU 生命周期已由
+> [常驻并行转录服务设计](2026-08-21-persistent-parallel-service-design.md)
+> 取代。正式 CLI、RAMC 验收和压力验收均通过同一个常驻服务运行；只有显式
+> `service stop` 或启用 overlap 的受控卸载路径才会释放热模型。
+
 ## 1. 背景与目标
 
 独立命令行转录程序当前使用 FunASR 的 FSMN-VAD、Paraformer 和标点模型完成

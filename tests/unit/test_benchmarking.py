@@ -15,6 +15,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 reference_for = _MODULE.reference_for
+transcribe_with_service = _MODULE.transcribe_with_service
 
 
 def test_ramc_benchmark_has_explicit_text_retention_gate():
@@ -22,6 +23,57 @@ def test_ramc_benchmark_has_explicit_text_retention_gate():
 
     assert '"text_retention_rate"' in source
     assert '"text_retention": summary["text_retention_rate"] == 1.0' in source
+
+
+def test_ramc_benchmark_submits_each_recording_to_the_persistent_service():
+    source = _BENCHMARK_PATH.read_text(encoding="utf-8")
+
+    assert "submit_to_service" in source
+    assert "execute_model_phases" not in source
+    assert "FireRedWorkerClient" not in source
+    assert "SpeakerDiarizer" not in source
+
+
+def test_ramc_service_transcription_disables_overlap_and_collects_profile(
+    monkeypatch,
+    tmp_path: Path,
+):
+    audio = tmp_path / "input.wav"
+    audio.write_bytes(b"audio")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "transcript.json").write_text(
+        '{"turns": [], "speaker_count": 0, "full_text": ""}',
+        encoding="utf-8",
+    )
+    (output_dir / "diagnostics.json").write_text(
+        '{"asr": {}, "resource_profile": {"enabled": true}}',
+        encoding="utf-8",
+    )
+    config = object()
+    config_path = tmp_path / "config.toml"
+
+    def fake_submit(args, received_config):
+        assert received_config is config
+        assert args.input_audio == audio
+        assert args.output_dir == output_dir
+        assert args.disable_overlap is True
+        assert args.enable_overlap is False
+        assert args.profile_resources is True
+        assert args.config == config_path
+        return {"result": {"output_dir": str(output_dir)}}
+
+    monkeypatch.setattr(_MODULE, "submit_to_service", fake_submit)
+
+    transcript, diagnostics = transcribe_with_service(
+        audio,
+        output_dir,
+        config,
+        config_path,
+    )
+
+    assert transcript["speaker_count"] == 0
+    assert diagnostics["resource_profile"] == {"enabled": True}
 
 
 def test_overlap_manifest_is_deterministic_and_cross_speaker():

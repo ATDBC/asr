@@ -17,6 +17,7 @@ from .locking import _pid_is_alive
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 1024 * 1024
+_MAX_FILESYSTEM_SOCKET_BYTES = 100
 
 
 class ServiceProtocolError(TranscriptionError):
@@ -45,6 +46,21 @@ class ServicePaths:
             lock=directory / "startup.lock",
             log=directory / "service.log",
         )
+
+    @property
+    def uses_abstract_socket(self) -> bool:
+        """Use Linux's abstract namespace when the filesystem path is too long."""
+
+        return len(os.fsencode(str(self.socket))) > _MAX_FILESYSTEM_SOCKET_BYTES
+
+    @property
+    def socket_address(self) -> str:
+        """Return the bind/connect address without changing work-directory files."""
+
+        if not self.uses_abstract_socket:
+            return str(self.socket)
+        digest = hashlib.sha256(os.fsencode(str(self.socket))).hexdigest()[:32]
+        return f"\0funasr-transcriber-{os.getuid()}-{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +234,8 @@ class ServiceStateStore:
     def remove_stale(self) -> None:
         """Remove only this service's known state and socket paths."""
 
-        self.paths.socket.unlink(missing_ok=True)
+        if not self.paths.uses_abstract_socket:
+            self.paths.socket.unlink(missing_ok=True)
         self.paths.state.unlink(missing_ok=True)
 
 
@@ -235,7 +252,7 @@ class ServiceClient:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(self.timeout_seconds)
         try:
-            client.connect(str(self.paths.socket))
+            client.connect(self.paths.socket_address)
             stream = client.makefile("rwb")
             try:
                 stream.write(encode_message(payload))

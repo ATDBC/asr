@@ -31,12 +31,72 @@ LATEST_SUMMARY_TEXT="$RESULTS_ROOT/summary.txt"
 CURRENT_STAGE="startup"
 SERVICE_STARTED=0
 mkdir -p "$RESULTS"
+SERVICE_GPU_BEFORE="$RESULTS/service-gpu-before.json"
+SERVICE_RELEASE_SUMMARY="$RESULTS/service-release-summary.json"
 
 finish() {
     local status="$1"
     if [ "$SERVICE_STARTED" -eq 1 ]; then
-        "$TRANSCRIBE_BIN" service stop --config "$CONFIG" \
-            > "$RESULTS/service-stop.json" 2>&1 || true
+        "$CORE_PYTHON" - "$CONFIG" "$TRANSCRIBE_BIN" \
+            "$SERVICE_GPU_BEFORE" "$SERVICE_RELEASE_SUMMARY" \
+            "$RESULTS/service-stop.json" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from funasr_transcriber.config import load_config
+from funasr_transcriber.gpu import GpuSample, build_gpu_stage_record, query_gpu
+from funasr_transcriber.service_protocol import ServicePaths
+
+config_path = Path(sys.argv[1])
+transcribe_bin = sys.argv[2]
+before_path = Path(sys.argv[3])
+summary_path = Path(sys.argv[4])
+stop_path = Path(sys.argv[5])
+payload = {"gpu_stages": {}, "stop": {"returncode": None}}
+try:
+    before_payload = json.loads(before_path.read_text(encoding="utf-8"))
+    before = GpuSample(**before_payload)
+    completed = subprocess.run(
+        [transcribe_bin, "service", "stop", "--config", str(config_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    stop_path.write_text(
+        completed.stdout + completed.stderr,
+        encoding="utf-8",
+    )
+    payload["stop"] = {"returncode": completed.returncode}
+    config = load_config(config_path)
+    paths = ServicePaths.from_work_dir(config.paths.work_dir)
+    deadline = time.monotonic() + 60.0
+    while paths.state.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if completed.returncode == 0 and not paths.state.exists():
+        after = query_gpu("cuda:0")
+        payload["gpu_stages"] = {
+            "service_shutdown": build_gpu_stage_record(
+                before,
+                after,
+                peak_gpu_bytes=None,
+                load_seconds=None,
+                inference_seconds=None,
+            )
+        }
+    elif paths.state.exists():
+        payload["error"] = "service state remained after stop timeout"
+except Exception as exc:
+    payload["error"] = str(exc)
+summary_path.write_text(
+    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
     fi
     "$CORE_PYTHON" - "$SUMMARY" "$SUMMARY_TEXT" "$LATEST_SUMMARY" \
         "$LATEST_SUMMARY_TEXT" "$status" "$CURRENT_STAGE" "$SKIP_STRESS" <<'PY'
@@ -81,6 +141,14 @@ stress = next(
     ),
     {},
 )
+service_release = next(
+    (
+        value
+        for key, value in stage_results.items()
+        if key.endswith("service-release-summary.json") and isinstance(value, dict)
+    ),
+    {},
+)
 deterministic_hashes = {
     str(item.get("minutes")): item.get("result_hashes")
     for item in stress.get("results", [])
@@ -92,7 +160,7 @@ release_evidence = {
     },
     "lid_coverage": doctor_evidence.get("lid_coverage"),
     "timestamp_integrity": doctor_evidence.get("timestamp_integrity"),
-    "gpu_stages": doctor_evidence.get("gpu_stages"),
+    "gpu_stages": service_release.get("gpu_stages"),
     "deterministic_hashes": deterministic_hashes,
 }
 payload = build_release_summary(
@@ -153,6 +221,19 @@ CURRENT_STAGE="models"
 
 CURRENT_STAGE="doctor"
 "$TRANSCRIBE_BIN" doctor --config "$CONFIG" | tee "$RESULTS/doctor-checks.txt"
+"$CORE_PYTHON" - "$SERVICE_GPU_BEFORE" <<'PY'
+import json
+from dataclasses import asdict
+from pathlib import Path
+import sys
+
+from funasr_transcriber.gpu import query_gpu
+
+Path(sys.argv[1]).write_text(
+    json.dumps(asdict(query_gpu("cuda:0")), ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
 SERVICE_STARTED=1
 "$TRANSCRIBE_BIN" "$CORPUS_ROOT/seeds/doctor_smoke.wav" \
     --config "$CONFIG" \
@@ -204,17 +285,12 @@ release_evidence = {
         "valid": valid_ranges,
         "passed": bool(ranges) and valid_ranges == len(ranges),
     },
-    "gpu_stages": diagnostics.get("gpu_stages") or {},
 }
 payload = {
     "passed": bool(turns) and all(release_evidence["firered_modules"].values())
     and release_evidence["lid_coverage"]["ratio"] == 1.0
     and release_evidence["timestamp_integrity"]["passed"]
-    and bool(release_evidence["gpu_stages"])
-    and all(
-        item.get("released") is True
-        for item in release_evidence["gpu_stages"].values()
-    ),
+    and profile.get("enabled") is True,
     "speaker_count": transcript.get("speaker_count"),
     "warnings": transcript.get("warnings", []),
     "transcript_sha256": hashlib.sha256(

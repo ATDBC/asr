@@ -35,6 +35,12 @@ def test_staging_output_is_hidden_sibling_of_final_directory():
     )
 
 
+def test_cli_has_no_single_invocation_model_orchestrator():
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+
+    assert "def execute_model_phases" not in source
+
+
 @pytest.mark.parametrize("visible", [None, "0", "0,1"])
 def test_physical_gpu_zero_accepts_compatible_visibility(monkeypatch, visible):
     if visible is None:

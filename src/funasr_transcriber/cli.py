@@ -5,24 +5,17 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import json
-import logging
 import os
-import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 import uuid
 
-from .audio import normalize_audio, probe_audio
 from .config import load_config
-from .diagnostics import export_diagnostics
 from .doctor import run_doctor
 from .errors import EnvironmentError, OutputError, TranscriberError
-from .exporters import export_transcript, publish_output_directory
-from .firered_client import FireRedWorkerClient
-from .gpu import build_gpu_stage_record, query_gpu, require_gpu_capacity
-from .locking import ServiceStartupLock, TaskLock
+from .locking import ServiceStartupLock
 from .model_registry import (
     acquire_overlap_assets,
     download_models,
@@ -30,13 +23,7 @@ from .model_registry import (
 )
 from .overlap import (
     JsonOverlapWorkerClient,
-    OverlapEnhancement,
-    OverlapPreparation,
-    SubprocessOverlapPreparer,
-    apply_prepared_overlap,
 )
-from .pipeline import TranscriptionPipeline, attribute_primary
-from .speaker_diarization import SpeakerDiarizer
 from .service_protocol import (
     ServiceClient,
     ServicePaths,
@@ -198,97 +185,6 @@ def _service_parser() -> argparse.ArgumentParser:
     parser.add_argument("action", choices=("status", "stop"))
     parser.add_argument("--config", type=Path)
     return parser
-
-
-def execute_model_phases(
-    normalized: Path,
-    config,
-    overlap_enabled: bool,
-    asr_client_factory: Callable[[str], Any],
-    diarizer_factory: Callable[[], Any],
-    overlap_preparer_factory: Callable[[Any], Any],
-    gpu_check: Callable[[str], Any],
-    gpu_after: Callable[[str, Any, Any, Any], None] | None = None,
-    result_consumer: Callable[[Any], None] | None = None,
-):
-    """Run ASR, speaker, and optional overlap ASR with no GPU co-residency."""
-
-    pipeline = TranscriptionPipeline(config)
-    diagnostics = pipeline.new_diagnostics()
-
-    primary_before = gpu_check("primary-asr")
-    primary_owner = None
-    with diagnostics.stage("asr"):
-        with asr_client_factory("primary-asr") as primary_owner:
-            asr_result = primary_owner.transcribe(Path(normalized))
-    if gpu_after is not None:
-        gpu_after("primary_asr", primary_before, primary_owner, diagnostics)
-
-    speaker_before = gpu_check("speaker")
-    speaker_owner = None
-    preparation = OverlapPreparation((), ())
-    with diagnostics.stage("diarization"):
-        with diarizer_factory() as speaker_owner:
-            speaker_segments = speaker_owner.diarize(Path(normalized))
-            if not speaker_segments:
-                from .errors import TranscriptionError
-
-                raise TranscriptionError(
-                    "speaker diarization returned no segments"
-                )
-            if overlap_enabled:
-                with diagnostics.stage("overlap_preparation"):
-                    preparation = overlap_preparer_factory(
-                        speaker_owner
-                    ).prepare(Path(normalized), speaker_segments)
-    if gpu_after is not None:
-        gpu_after("speaker", speaker_before, speaker_owner, diagnostics)
-
-    with diagnostics.stage("alignment"):
-        attributed = attribute_primary(asr_result, speaker_segments, config)
-
-    enhancement: OverlapEnhancement | None = None
-    if overlap_enabled:
-        if any(window.tracks for window in preparation.windows):
-            overlap_before = gpu_check("overlap-asr")
-            overlap_owner = None
-            with diagnostics.stage("overlap_asr"):
-                with asr_client_factory("overlap-asr") as overlap_owner:
-                    enhancement = apply_prepared_overlap(
-                        preparation,
-                        attributed,
-                        overlap_owner,
-                        min_score=config.overlap.speaker_match_min_score,
-                        min_margin=config.overlap.speaker_match_min_margin,
-                    )
-            if gpu_after is not None:
-                gpu_after(
-                    "overlap_asr",
-                    overlap_before,
-                    overlap_owner,
-                    diagnostics,
-                )
-        else:
-            warnings = preparation.warnings + tuple(
-                "overlap window "
-                f"{window.id} kept original: track_count_not_two"
-                for window in preparation.windows
-            )
-            enhancement = OverlapEnhancement(
-                attributed,
-                warnings,
-                False,
-            )
-    result = pipeline.finish(
-        asr_result,
-        attributed,
-        speaker_segments,
-        diagnostics,
-        overlap_enhancement=enhancement,
-    )
-    if result_consumer is not None:
-        result_consumer(result)
-    return result
 
 
 def _run_transcribe(args: argparse.Namespace) -> int:

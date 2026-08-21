@@ -95,6 +95,25 @@ def test_verify_corpus_detects_checksum_corruption(tmp_path: Path):
     assert any("SOURCE_NOTICE.txt" in error for error in result.errors)
 
 
+def test_verify_corpus_ignores_runtime_results_and_service_work(tmp_path: Path):
+    write_minimal_corpus(tmp_path)
+    write_valid_wav(tmp_path / "validation_results" / "generated.wav")
+    (tmp_path / "validation_results" / "summary.json").write_text(
+        '{"HF_TOKEN": "runtime-only"}\n', encoding="utf-8"
+    )
+    (tmp_path / ".service-work" / "service" / "service.log").parent.mkdir(
+        parents=True
+    )
+    (tmp_path / ".service-work" / "service" / "service.log").write_text(
+        "TOKEN=runtime-only\n", encoding="utf-8"
+    )
+
+    result = verify_corpus(tmp_path, expected_counts=None)
+
+    assert result.ok is True
+    assert result.errors == ()
+
+
 def test_verify_corpus_rejects_absolute_source_path(tmp_path: Path):
     write_minimal_corpus(tmp_path)
     manifest_path = tmp_path / "manifest.json"

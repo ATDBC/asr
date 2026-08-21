@@ -405,13 +405,13 @@ class ServiceSocketServer:
             if self._closed:
                 raise RuntimeError("service socket server is closed")
             self.paths.directory.mkdir(parents=True, exist_ok=True)
-            if self.paths.socket.exists():
+            if not self.paths.uses_abstract_socket and self.paths.socket.exists():
                 raise ServiceProtocolError(
                     f"service socket already exists: {self.paths.socket}"
                 )
             self.daemon.start()
             server = _ThreadingUnixStreamServer(
-                str(self.paths.socket),
+                self.paths.socket_address,
                 _ServiceRequestHandler,
             )
             server.service_host = self  # type: ignore[attr-defined]
@@ -452,7 +452,7 @@ class ServiceSocketServer:
             server.server_close()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1)
-        if self._remove_socket_on_close:
+        if self._remove_socket_on_close and not self.paths.uses_abstract_socket:
             self.paths.socket.unlink(missing_ok=True)
 
 
@@ -845,7 +845,8 @@ def run_daemon(config: AppConfig) -> None:
         if wrote_state:
             state = state_store.read()
             if state is not None and state.pid == os.getpid():
-                paths.socket.unlink(missing_ok=True)
+                if not paths.uses_abstract_socket:
+                    paths.socket.unlink(missing_ok=True)
                 paths.state.unlink(missing_ok=True)
 
 

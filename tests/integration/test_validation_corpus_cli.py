@@ -84,6 +84,14 @@ def test_linux_runner_contains_all_release_stages():
     assert "G:\\" not in script
 
 
+def test_linux_runner_records_gpu_release_at_service_shutdown():
+    script = (ROOT / "scripts" / "run_validation_linux.sh").read_text("utf-8")
+
+    assert "SERVICE_GPU_BEFORE" in script
+    assert "service-release-summary.json" in script
+    assert 'service_release.get("gpu_stages")' in script
+
+
 def _complete_evidence():
     digest = "a" * 64
     return {

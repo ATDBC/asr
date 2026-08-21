@@ -20,6 +20,7 @@ from .release_validation import (
 
 
 CHECKSUM_FILE = "checksums.sha256"
+RUNTIME_DIRECTORIES = frozenset({"validation_results", ".service-work"})
 WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 WINDOWS_ABSOLUTE_ANYWHERE = re.compile(r"[A-Za-z]:[\\/]")
 SECRET_VALUE = re.compile(r"(?:hf_|token\s*[=:]|api[_-]?key\s*[=:])", re.I)
@@ -46,13 +47,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_runtime_path(root: Path, path: Path) -> bool:
+    relative = Path(path).relative_to(root)
+    return bool(relative.parts) and relative.parts[0] in RUNTIME_DIRECTORIES
+
+
 def _artifact_files(root: Path) -> tuple[Path, ...]:
     return tuple(
         sorted(
             (
                 path
                 for path in Path(root).rglob("*")
-                if path.is_file() and path.name != CHECKSUM_FILE
+                if (
+                    path.is_file()
+                    and path.name != CHECKSUM_FILE
+                    and not _is_runtime_path(Path(root), path)
+                )
             ),
             key=lambda path: path.relative_to(root).as_posix(),
         )
@@ -113,7 +123,9 @@ def _wav_properties(path: Path) -> tuple[int, int, int, int]:
 
 def _verify_audio(root: Path, errors: list[str]) -> dict[str, int]:
     durations: dict[str, int] = {}
-    for path in sorted(root.rglob("*.wav")):
+    for path in sorted(
+        path for path in root.rglob("*.wav") if not _is_runtime_path(root, path)
+    ):
         relative = path.relative_to(root).as_posix()
         try:
             duration, rate, channels, width = _wav_properties(path)

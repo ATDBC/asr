@@ -11,19 +11,11 @@ from pathlib import Path
 import re
 import statistics
 import tempfile
+from types import SimpleNamespace
 import wave
 
-from funasr_transcriber.cli import (
-    execute_model_phases,
-    require_physical_gpu_zero,
-)
+from funasr_transcriber.cli import submit_to_service
 from funasr_transcriber.config import load_config
-from funasr_transcriber.firered_client import FireRedWorkerClient
-from funasr_transcriber.gpu import (
-    build_gpu_stage_record,
-    query_gpu,
-    require_gpu_capacity,
-)
 from funasr_transcriber.metrics import (
     cer,
     cpcer,
@@ -33,7 +25,6 @@ from funasr_transcriber.metrics import (
 from funasr_transcriber.pipeline import normalize_for_integrity
 from funasr_transcriber.ramc_corpus import strip_control_markers
 from funasr_transcriber.schemas import AlignmentConfidence
-from funasr_transcriber.speaker_diarization import SpeakerDiarizer
 
 
 TRANSCRIPT_PATTERN = re.compile(
@@ -98,16 +89,50 @@ def clip_wav(source: Path, destination: Path) -> None:
         output_stream.writeframes(frames)
 
 
-def record_gpu_stage(stage, before, owner, diagnostics) -> None:
-    response = getattr(owner, "last_response", {}) or {}
-    metrics = response.get("metrics") or {}
-    diagnostics.gpu_stages[stage] = build_gpu_stage_record(
-        before,
-        query_gpu("cuda:0"),
-        peak_gpu_bytes=metrics.get("peak_gpu_bytes"),
-        load_seconds=metrics.get("load_seconds"),
-        inference_seconds=metrics.get("inference_seconds"),
+def transcribe_with_service(
+    audio: Path,
+    output_dir: Path,
+    config,
+    config_path: Path | None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Run a RAMC item through the resident service and read its exports."""
+
+    response = submit_to_service(
+        SimpleNamespace(
+            input_audio=audio,
+            output_dir=output_dir,
+            overwrite=False,
+            keep_intermediate=False,
+            enable_overlap=False,
+            disable_overlap=True,
+            profile_resources=True,
+            config=config_path,
+        ),
+        config,
     )
+    result = response.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("output_dir"), str):
+        raise RuntimeError("service did not return an output directory")
+    published = Path(result["output_dir"]).resolve()
+    expected = output_dir.resolve()
+    if published != expected:
+        raise RuntimeError(
+            f"service published unexpected output directory: {published} != {expected}"
+        )
+    try:
+        transcript = json.loads(
+            (published / "transcript.json").read_text(encoding="utf-8")
+        )
+        diagnostics = json.loads(
+            (published / "diagnostics.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"service output is missing a valid transcript or diagnostics: {published}"
+        ) from exc
+    if not isinstance(transcript, dict) or not isinstance(diagnostics, dict):
+        raise RuntimeError("service output payload must be a JSON object")
+    return transcript, diagnostics
 
 
 def main() -> int:
@@ -121,7 +146,6 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    require_physical_gpu_zero(config.general.device)
     per_recording = []
     with tempfile.TemporaryDirectory(prefix="ramc-e2e-") as temporary:
         temporary_path = Path(temporary)
@@ -142,60 +166,50 @@ def main() -> int:
             else:
                 clip = temporary_path / f"{source.stem}.wav"
                 clip_wav(source, clip)
-            result = execute_model_phases(
+            output_dir = temporary_path / "outputs" / source.stem
+            transcript, diagnostics = transcribe_with_service(
                 clip.resolve(),
+                output_dir,
                 config,
-                overlap_enabled=False,
-                asr_client_factory=lambda stage: FireRedWorkerClient(
-                    worker_python=config.asr.worker_python,
-                    model_root=config.paths.model_dir,
-                    device="cuda:0",
-                    timeout_seconds=config.asr.timeout_seconds,
-                    stderr_log_path=(
-                        temporary_path / f"{source.stem}-{stage}.log"
-                    ),
-                ),
-                diarizer_factory=lambda: SpeakerDiarizer.from_config(config),
-                overlap_preparer_factory=lambda diarizer: None,
-                gpu_check=lambda stage: require_gpu_capacity("cuda:0"),
-                gpu_after=record_gpu_stage,
+                args.config,
             )
             hypothesis = [
                 {
-                    "start": turn.start_ms / 1000,
-                    "end": turn.end_ms / 1000,
-                    "speaker": turn.speaker_id,
+                    "start": int(turn["start_ms"]) / 1000,
+                    "end": int(turn["end_ms"]) / 1000,
+                    "speaker": turn["speaker"],
                 }
-                for turn in result.transcript.turns
+                for turn in transcript.get("turns", [])
             ]
             hyp_by_speaker = defaultdict(str)
             low_chars = total_chars = 0
-            for turn in result.transcript.turns:
-                hyp_by_speaker[turn.speaker_id] += turn.text
-                total_chars += len(turn.text)
-                if turn.confidence is AlignmentConfidence.LOW:
-                    low_chars += len(turn.text)
+            for turn in transcript.get("turns", []):
+                text = str(turn["text"])
+                hyp_by_speaker[turn["speaker"]] += text
+                total_chars += len(text)
+                if turn.get("alignment_confidence") == AlignmentConfidence.LOW.value:
+                    low_chars += len(text)
             tracks = evaluate_speaker_tracks(reference, hypothesis)
-            sentences = result.diagnostics.asr.get("sentences") or []
+            sentences = (diagnostics.get("asr") or {}).get("sentences") or []
             lid_covered = sum(
                 bool(item.get("language"))
                 and item.get("language_confidence") is not None
                 for item in sentences
             )
             valid_timestamps = sum(
-                0 <= turn.start_ms < turn.end_ms
-                for turn in result.transcript.turns
+                0 <= int(turn["start_ms"]) < int(turn["end_ms"])
+                for turn in transcript.get("turns", [])
             )
             transcript_digest = hashlib.sha256(
                 json.dumps(
                     [
                         {
-                            "speaker_id": turn.speaker_id,
-                            "start_ms": turn.start_ms,
-                            "end_ms": turn.end_ms,
-                            "text": turn.text,
+                            "speaker_id": turn["speaker"],
+                            "start_ms": turn["start_ms"],
+                            "end_ms": turn["end_ms"],
+                            "text": turn["text"],
                         }
-                        for turn in result.transcript.turns
+                        for turn in transcript.get("turns", [])
                     ],
                     ensure_ascii=False,
                     sort_keys=True,
@@ -205,24 +219,26 @@ def main() -> int:
             per_recording.append(
                 {
                     "name": source.stem,
-                    "cer": cer(ref_text, result.transcript.full_text),
+                    "cer": cer(ref_text, str(transcript.get("full_text", ""))),
                     "cpcer": cpcer(ref_by_speaker, dict(hyp_by_speaker)),
                     "purity": tracks["weighted_purity"],
                     "der_like": tracks["der_like"],
                     "reference_speakers": len(ref_by_speaker),
-                    "hypothesis_speakers": result.transcript.speaker_count,
+                    "hypothesis_speakers": int(transcript["speaker_count"]),
                     "low_confidence_ratio": (
                         low_chars / total_chars if total_chars else 0.0
                     ),
                     "text_retained": (
-                        normalize_for_integrity(result.asr_text)
-                        == normalize_for_integrity(result.transcript.full_text)
+                        normalize_for_integrity(
+                            str((diagnostics.get("asr") or {}).get("text", ""))
+                        )
+                        == normalize_for_integrity(str(transcript.get("full_text", "")))
                     ),
                     "lid_sentences": len(sentences),
                     "lid_covered": lid_covered,
-                    "timestamp_checked": len(result.transcript.turns),
+                    "timestamp_checked": len(transcript.get("turns", [])),
                     "timestamp_valid": valid_timestamps,
-                    "gpu_stages": result.diagnostics.gpu_stages,
+                    "resource_profile": diagnostics.get("resource_profile") or {},
                     "result_sha256": transcript_digest,
                 }
             )
@@ -264,11 +280,10 @@ def main() -> int:
         item["timestamp_checked"] for item in per_recording
     )
     timestamp_valid = sum(item["timestamp_valid"] for item in per_recording)
-    gpu_stages = {
-        f"{item['name']}:{stage}": record
+    profiled_recordings = sum(
+        item["resource_profile"].get("enabled") is True
         for item in per_recording
-        for stage, record in item["gpu_stages"].items()
-    }
+    )
     release_evidence = {
         "lid_coverage": {
             "sentences": lid_sentences,
@@ -282,7 +297,10 @@ def main() -> int:
                 timestamp_checked > 0 and timestamp_valid == timestamp_checked
             ),
         },
-        "gpu_stages": gpu_stages,
+        "resource_profiles": {
+            "requested": len(per_recording),
+            "completed": profiled_recordings,
+        },
         "result_hashes": {
             item["name"]: item["result_sha256"] for item in per_recording
         },
@@ -293,8 +311,7 @@ def main() -> int:
             "timestamp_integrity": release_evidence["timestamp_integrity"][
                 "passed"
             ],
-            "gpu_evidence": bool(gpu_stages)
-            and all(item.get("released") is True for item in gpu_stages.values()),
+            "resource_profiles": profiled_recordings == len(per_recording),
         }
     )
     payload = {

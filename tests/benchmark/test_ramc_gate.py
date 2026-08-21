@@ -7,7 +7,7 @@ import sys
 import pytest
 
 
-def test_ramc_tool_emits_firered_release_evidence():
+def test_ramc_tool_emits_persistent_service_evidence():
     source = (
         Path(__file__).parents[2] / "tools" / "benchmark_ramc_e2e.py"
     ).read_text(encoding="utf-8")
@@ -16,7 +16,7 @@ def test_ramc_tool_emits_firered_release_evidence():
         '"release_evidence"',
         '"lid_coverage"',
         '"timestamp_integrity"',
-        '"gpu_stages"',
+        '"resource_profiles"',
         '"result_hashes"',
     ):
         assert field in source
@@ -52,5 +52,8 @@ def test_ramc_release_gate_is_run_explicitly(tmp_path: Path):
     evidence = payload["release_evidence"]
     assert evidence["lid_coverage"]["ratio"] == 1.0
     assert evidence["timestamp_integrity"]["passed"] is True
-    assert evidence["gpu_stages"]
+    assert evidence["resource_profiles"] == {
+        "requested": 20,
+        "completed": 20,
+    }
     assert len(evidence["result_hashes"]) == 20

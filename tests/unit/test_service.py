@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import sys
 import threading
 
 import pytest
@@ -238,6 +240,28 @@ def test_socket_server_serves_health_submission_and_graceful_stop(
         assert result["result"] == {"output_dir": "job"}
         assert client.stop_and_wait("stop")["status"] == "draining"
         assert daemon.wait_stopped(timeout=1)
+    finally:
+        server.close()
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="abstract Unix sockets are a Linux transport fallback",
+)
+def test_socket_server_serves_health_from_a_long_work_directory(tmp_path: Path):
+    paths = ServicePaths.from_work_dir(tmp_path / ("x" * 100))
+    assert len(os.fsencode(str(paths.socket))) > 108
+    daemon = DaemonService(queue_limit=1, run_job=lambda request: {})
+    server = ServiceSocketServer(
+        paths,
+        daemon,
+        config_fingerprint="test-fingerprint",
+    )
+    try:
+        server.start()
+        assert ServiceClient(paths, timeout_seconds=1).health("health")[
+            "status"
+        ] == "ready"
     finally:
         server.close()
 

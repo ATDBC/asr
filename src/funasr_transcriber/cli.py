@@ -7,7 +7,9 @@ from pathlib import Path
 import logging
 import os
 import shutil
+import subprocess
 import sys
+import time
 from typing import Any, Callable, Sequence
 import uuid
 
@@ -19,7 +21,7 @@ from .errors import EnvironmentError, OutputError, TranscriberError
 from .exporters import export_transcript, publish_output_directory
 from .firered_client import FireRedWorkerClient
 from .gpu import build_gpu_stage_record, query_gpu, require_gpu_capacity
-from .locking import TaskLock
+from .locking import ServiceStartupLock, TaskLock
 from .model_registry import (
     acquire_overlap_assets,
     download_models,
@@ -34,6 +36,13 @@ from .overlap import (
 )
 from .pipeline import TranscriptionPipeline, attribute_primary
 from .speaker_diarization import SpeakerDiarizer
+from .service_protocol import (
+    ServiceClient,
+    ServicePaths,
+    ServiceProtocolError,
+    ServiceRequest,
+    config_fingerprint,
+)
 
 
 def default_output_dir(input_path: Path) -> Path:
@@ -44,6 +53,92 @@ def default_output_dir(input_path: Path) -> Path:
 def staging_output_dir(output_dir: Path, request_id: str) -> Path:
     target = Path(output_dir)
     return target.with_name(f".{target.name}.staging-{request_id}")
+
+
+def launch_service(config, paths: ServicePaths, config_path: Path | None) -> None:
+    """Start only this project's daemon, pinned to physical GPU 0."""
+
+    command = [sys.executable, "-m", "funasr_transcriber.service"]
+    if config_path is not None:
+        command.extend(["--config", str(Path(config_path).expanduser().resolve())])
+    paths.directory.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    environment["CUDA_VISIBLE_DEVICES"] = "0"
+    with paths.log.open("a", encoding="utf-8", buffering=1) as log:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=environment,
+            close_fds=True,
+        )
+
+
+def _service_client(config, paths: ServicePaths) -> ServiceClient:
+    return ServiceClient(
+        paths,
+        timeout_seconds=config.service.startup_timeout_seconds,
+    )
+
+
+def _wait_for_service_ready(config, paths: ServicePaths) -> ServiceClient:
+    deadline = time.monotonic() + config.service.startup_timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        client = _service_client(config, paths)
+        try:
+            client.health(uuid.uuid4().hex)
+            return client
+        except ServiceProtocolError as exc:
+            last_error = exc
+            time.sleep(0.1)
+    raise ServiceProtocolError(
+        "local service did not become ready before startup timeout"
+        + (f": {last_error}" if last_error is not None else "")
+    )
+
+
+def submit_to_service(args: argparse.Namespace, config) -> dict[str, object]:
+    """Submit one CLI request, auto-starting a compatible local daemon."""
+
+    input_audio = Path(args.input_audio).expanduser().resolve()
+    output_dir = Path(
+        args.output_dir or default_output_dir(input_audio)
+    ).expanduser().resolve()
+    if not args.overwrite and output_dir.exists():
+        raise OutputError(f"output already exists: {output_dir}")
+    paths = ServicePaths.from_work_dir(config.paths.work_dir)
+    client = _service_client(config, paths)
+    try:
+        client.health(uuid.uuid4().hex)
+    except ServiceProtocolError:
+        with ServiceStartupLock(paths.directory):
+            try:
+                client = _service_client(config, paths)
+                client.health(uuid.uuid4().hex)
+            except ServiceProtocolError:
+                launch_service(config, paths, getattr(args, "config", None))
+                client = _wait_for_service_ready(config, paths)
+    overlap_enabled = (
+        True
+        if getattr(args, "enable_overlap", False)
+        else False
+        if getattr(args, "disable_overlap", False)
+        else config.overlap.enabled
+    )
+    request = ServiceRequest(
+        identifier=uuid.uuid4().hex,
+        action="submit",
+        input_audio=input_audio,
+        output_dir=output_dir,
+        config_fingerprint=config_fingerprint(config),
+        overwrite=bool(args.overwrite),
+        keep_intermediate=bool(args.keep_intermediate),
+        overlap_enabled=overlap_enabled,
+        profile_resources=bool(getattr(args, "profile_resources", False)),
+    )
+    return client.submit_and_wait(request)
 
 
 def require_physical_gpu_zero(device: str) -> None:

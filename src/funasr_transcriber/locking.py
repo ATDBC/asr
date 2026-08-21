@@ -178,3 +178,110 @@ class TaskLock:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.release()
+
+
+class ServiceStartupLock:
+    """Serialize service startup without claiming any input-audio path."""
+
+    def __init__(self, directory: Path):
+        self.directory = Path(directory)
+        self.path = self.directory / "startup.lock"
+        self.acquired = False
+        self._stream = None
+
+    def _existing_payload(self) -> dict:
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BusyError(
+                f"service startup lock is unreadable: {self.path}"
+            ) from exc
+
+    def acquire(self) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        if sys.platform != "win32":
+            self._acquire_posix()
+            return
+        for _ in range(2):
+            try:
+                descriptor = os.open(
+                    self.path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                existing = self._existing_payload()
+                pid = int(existing.get("pid") or 0)
+                if _pid_is_alive(pid):
+                    raise BusyError(
+                        f"service startup is already running: pid={pid}"
+                    )
+                self.path.unlink(missing_ok=True)
+                continue
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "pid": os.getpid(),
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    stream,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.acquired = True
+            return
+        raise BusyError("unable to acquire service startup lock")
+
+    def _acquire_posix(self) -> None:
+        import fcntl
+
+        stream = self.path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            stream.close()
+            raise BusyError("service startup is already running") from exc
+        stream.seek(0)
+        stream.truncate()
+        json.dump(
+            {
+                "pid": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            },
+            stream,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        stream.flush()
+        os.fsync(stream.fileno())
+        self._stream = stream
+        self.acquired = True
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        if self._stream is not None:
+            import fcntl
+
+            try:
+                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._stream.close()
+                self._stream = None
+                self.acquired = False
+            return
+        try:
+            payload = self._existing_payload()
+            if int(payload.get("pid") or 0) == os.getpid():
+                self.path.unlink(missing_ok=True)
+        finally:
+            self.acquired = False
+
+    def __enter__(self) -> "ServiceStartupLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.release()

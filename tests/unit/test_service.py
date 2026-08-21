@@ -15,9 +15,15 @@ from funasr_transcriber.schemas import (
 from funasr_transcriber.service import (
     DaemonService,
     HotModelHost,
+    ServiceSocketServer,
     run_normal_branches,
 )
-from funasr_transcriber.service_protocol import ServiceBusyError, ServiceRequest
+from funasr_transcriber.service_protocol import (
+    ServiceBusyError,
+    ServiceClient,
+    ServicePaths,
+    ServiceRequest,
+)
 
 
 def _result() -> AsrResult:
@@ -191,3 +197,36 @@ def test_stop_drains_accepted_jobs_and_rejects_new_submissions():
     release.set()
     assert accepted.result(timeout=1) == {"output_dir": "accepted"}
     assert daemon.wait_stopped(timeout=1)
+
+
+def test_socket_server_serves_health_submission_and_graceful_stop(
+    tmp_path: Path,
+):
+    paths = ServicePaths.from_work_dir(tmp_path)
+    daemon = DaemonService(
+        queue_limit=1,
+        run_job=lambda request: {"output_dir": request.identifier},
+    )
+    server = ServiceSocketServer(
+        paths,
+        daemon,
+        config_fingerprint="test-fingerprint",
+    )
+    server.start()
+    client = ServiceClient(paths, timeout_seconds=1)
+    try:
+        assert client.health("health")["status"] == "ready"
+        result = client.submit_and_wait(
+            ServiceRequest(
+                identifier="job",
+                action="submit",
+                input_audio=tmp_path / "input.wav",
+                output_dir=tmp_path / "output",
+                config_fingerprint="test-fingerprint",
+            )
+        )
+        assert result["result"] == {"output_dir": "job"}
+        assert client.stop_and_wait("stop")["status"] == "draining"
+        assert daemon.wait_stopped(timeout=1)
+    finally:
+        server.close()

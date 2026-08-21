@@ -6,10 +6,19 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 import queue
+import socketserver
 import threading
 from typing import Any, Callable
 
-from .service_protocol import ServiceBusyError, ServiceRequest
+from .service_protocol import (
+    ServiceBusyError,
+    ServicePaths,
+    ServiceProtocolError,
+    ServiceRequest,
+    encode_message,
+    parse_request,
+    read_message,
+)
 from .schemas import AsrResult, SpeakerSegment
 
 
@@ -255,3 +264,131 @@ class DaemonService:
                     self._queue.task_done()
         finally:
             self._stopped.set()
+
+
+class _ThreadingUnixStreamServer(
+    socketserver.ThreadingMixIn,
+    socketserver.UnixStreamServer,
+):
+    daemon_threads = True
+
+
+class _ServiceRequestHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        host: ServiceSocketServer = self.server.service_host  # type: ignore[attr-defined]
+        identifier = ""
+        try:
+            request = parse_request(read_message(self.rfile))
+            identifier = request.identifier
+            if request.action == "health":
+                payload: dict[str, object] = {
+                    "id": identifier,
+                    "ok": True,
+                    "terminal": True,
+                    "status": "ready",
+                }
+            elif request.action == "submit":
+                if request.config_fingerprint != host.config_fingerprint:
+                    raise ServiceProtocolError(
+                        "service configuration is incompatible; stop it first"
+                    )
+                result = host.daemon.submit(request).result()
+                payload = {
+                    "id": identifier,
+                    "ok": True,
+                    "terminal": True,
+                    "result": result,
+                }
+            else:
+                host.daemon.request_stop()
+                payload = {
+                    "id": identifier,
+                    "ok": True,
+                    "terminal": True,
+                    "status": "draining",
+                }
+                host.watch_for_stop()
+        except Exception as exc:
+            payload = {
+                "id": identifier,
+                "ok": False,
+                "terminal": True,
+                "error": str(exc),
+            }
+        self.wfile.write(encode_message(payload))
+        self.wfile.flush()
+
+
+class ServiceSocketServer:
+    """Threaded Unix-socket front end for a single ``DaemonService`` owner."""
+
+    def __init__(
+        self,
+        paths: ServicePaths,
+        daemon: DaemonService,
+        config_fingerprint: str,
+    ):
+        self.paths = paths
+        self.daemon = daemon
+        self.config_fingerprint = str(config_fingerprint)
+        self._server: _ThreadingUnixStreamServer | None = None
+        self._thread: threading.Thread | None = None
+        self._watcher: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def start(self) -> None:
+        with self._lock:
+            if self._server is not None:
+                return
+            if self._closed:
+                raise RuntimeError("service socket server is closed")
+            self.paths.directory.mkdir(parents=True, exist_ok=True)
+            if self.paths.socket.exists():
+                raise ServiceProtocolError(
+                    f"service socket already exists: {self.paths.socket}"
+                )
+            self.daemon.start()
+            server = _ThreadingUnixStreamServer(
+                str(self.paths.socket),
+                _ServiceRequestHandler,
+            )
+            server.service_host = self  # type: ignore[attr-defined]
+            self._server = server
+            self._thread = threading.Thread(
+                target=server.serve_forever,
+                name="funasr-transcriber-socket",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def watch_for_stop(self) -> None:
+        with self._lock:
+            if self._watcher is not None:
+                return
+            self._watcher = threading.Thread(
+                target=self._close_after_drain,
+                name="funasr-transcriber-stop",
+                daemon=True,
+            )
+            self._watcher.start()
+
+    def _close_after_drain(self) -> None:
+        self.daemon.wait_stopped()
+        self.close()
+
+    def close(self) -> None:
+        self.daemon.request_stop()
+        self.daemon.wait_stopped()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            server = self._server
+            thread = self._thread
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1)
+        self.paths.socket.unlink(missing_ok=True)

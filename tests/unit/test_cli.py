@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from funasr_transcriber import cli
+from funasr_transcriber.config import load_config
 from funasr_transcriber.cli import (
     default_output_dir,
     main,
@@ -17,6 +18,7 @@ from funasr_transcriber.errors import (
     OutputError,
     TranscriptionError,
 )
+from funasr_transcriber.service_protocol import ServiceProtocolError
 
 
 def test_default_output_is_next_to_input():
@@ -185,3 +187,73 @@ def test_doctor_enforces_physical_gpu_zero_before_full_smoke(monkeypatch):
 
     assert cli._run_doctor(SimpleNamespace(config=None, skip_cuda=False)) == 0
     assert events == ["physical:cuda:0", "doctor"]
+
+
+def test_transcribe_client_starts_service_only_when_health_is_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+):
+    audio = tmp_path / "input.wav"
+    audio.write_bytes(b"audio")
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+    calls: list[str] = []
+    launched = False
+
+    class FakeClient:
+        health_calls = 0
+
+        def __init__(self, paths, timeout_seconds):
+            self.paths = paths
+
+        def health(self, identifier):
+            type(self).health_calls += 1
+            calls.append(f"health:{identifier}")
+            if not launched:
+                raise ServiceProtocolError("not running")
+            return {"status": "ready"}
+
+        def submit_and_wait(self, request):
+            calls.append(f"submit:{request.identifier}")
+            return {"ok": True, "result": {"output_dir": str(request.output_dir)}}
+
+    class FakeStartupLock:
+        def __init__(self, directory):
+            assert directory == tmp_path / "work" / "service"
+
+        def __enter__(self):
+            calls.append("lock")
+            return self
+
+        def __exit__(self, *args):
+            calls.append("unlock")
+
+    monkeypatch.setattr(cli, "ServiceClient", FakeClient)
+    monkeypatch.setattr(cli, "ServiceStartupLock", FakeStartupLock)
+
+    def fake_launch(received_config, paths, config_path):
+        nonlocal launched
+        launched = True
+        calls.append(f"launch:{paths.socket}")
+
+    monkeypatch.setattr(cli, "launch_service", fake_launch)
+    args = SimpleNamespace(
+        input_audio=audio,
+        output_dir=tmp_path / "output",
+        overwrite=False,
+        keep_intermediate=False,
+        enable_overlap=False,
+        disable_overlap=False,
+        profile_resources=False,
+        config=None,
+    )
+
+    result = cli.submit_to_service(args, config)
+
+    assert result["result"]["output_dir"] == str(tmp_path / "output")
+    assert calls[0].startswith("health:")
+    assert calls.count("lock") == 1
+    assert calls.count("unlock") == 1
+    assert any(item.startswith("launch:") for item in calls)
+    assert any(item.startswith("submit:") for item in calls)

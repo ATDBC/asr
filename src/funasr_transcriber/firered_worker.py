@@ -38,15 +38,89 @@ class GuardedVad:
     def detect(self, path: str):
         result, probabilities = self._vad.detect(path)
         for start_s, end_s in result.get("timestamps", []):
-            if float(end_s) - float(start_s) > 60.0:
-                raise ValueError(
-                    "FireRedVAD segment exceeds the 60 second AED limit: "
-                    f"{start_s}..{end_s}"
-                )
+            _check_segment_bounds(float(start_s), float(end_s))
         return result, probabilities
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._vad, name)
+
+
+def _check_segment_bounds(start_s: float, end_s: float) -> None:
+    if end_s - start_s > 60.0:
+        raise ValueError(
+            "FireRedVAD segment exceeds the 60 second AED limit: "
+            f"{start_s}..{end_s}"
+        )
+
+
+class ScriptedVad:
+    """Replay caller-provided segments, subdividing long turns with the neural VAD."""
+
+    def __init__(
+        self,
+        segments_s: list[tuple[float, float]],
+        fallback_vad: object | None = None,
+    ):
+        self._segments = list(segments_s)
+        self._fallback_vad = fallback_vad
+
+    def detect(self, path: str):
+        if not any(end - start > 60.0 for start, end in self._segments):
+            return {"timestamps": list(self._segments)}, None
+        neural: list[tuple[float, float]] = []
+        if self._fallback_vad is not None:
+            neural_result, _ = self._fallback_vad.detect(path)
+            neural = [
+                (float(start), float(end))
+                for start, end in neural_result.get("timestamps", [])
+            ]
+        output: list[tuple[float, float]] = []
+        for start_s, end_s in self._segments:
+            if end_s - start_s <= 60.0:
+                output.append((start_s, end_s))
+                continue
+            subdivided = [
+                (max(start_s, neural_start), min(end_s, neural_end))
+                for neural_start, neural_end in neural
+                if min(end_s, neural_end) > max(start_s, neural_start)
+            ]
+            if subdivided:
+                output.extend(subdivided)
+                continue
+            cursor = start_s
+            while end_s - cursor > 60.0:
+                output.append((cursor, cursor + 60.0))
+                cursor += 60.0
+            output.append((cursor, end_s))
+        for start_s, end_s in output:
+            _check_segment_bounds(start_s, end_s)
+        return {"timestamps": output}, None
+
+
+def _parse_scripted_segments(raw: object) -> list[tuple[float, float]]:
+    """Validate request-provided VAD segments and convert ms to seconds."""
+
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ValueError("vad_segments_ms must be a non-empty list")
+    segments: list[tuple[float, float]] = []
+    previous_start = -1.0
+    previous_end = -1.0
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("vad_segments_ms entries must contain two timestamps")
+        try:
+            start_s = float(item[0]) / 1000.0
+            end_s = float(item[1]) / 1000.0
+        except (TypeError, ValueError) as exc:
+            raise ValueError("vad_segments_ms entries must be numeric") from exc
+        if not start_s >= 0.0 or not end_s > start_s:
+            raise ValueError("vad_segments_ms bounds are invalid")
+        if start_s < previous_start or end_s < previous_end:
+            raise ValueError("vad_segments_ms must be monotonic")
+        segments.append((start_s, end_s))
+        previous_start = start_s
+        previous_end = end_s
+    return segments
 
 
 def read_audio_info(path: Path) -> AudioInfo:
@@ -208,8 +282,22 @@ def serve(
             if action not in {"transcribe", "verify"}:
                 raise ValueError(f"unsupported worker action: {action}")
             path = _validate_audio(request.get("audio_path"), audio_info)
+            raw_segments = request.get("vad_segments_ms")
+            scripted_segments = (
+                None
+                if raw_segments is None
+                else _parse_scripted_segments(raw_segments)
+            )
             inference_started = clock()
-            raw = system.process(str(path), uttid=identifier)
+            if scripted_segments is None:
+                raw = system.process(str(path), uttid=identifier)
+            else:
+                original_vad = getattr(system, "vad", None)
+                system.vad = ScriptedVad(scripted_segments, original_vad)
+                try:
+                    raw = system.process(str(path), uttid=identifier)
+                finally:
+                    system.vad = original_vad
             inference_seconds += clock() - inference_started
             response = normalize_official_result(identifier, raw)
             response["metrics"] = {

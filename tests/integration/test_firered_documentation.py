@@ -42,14 +42,15 @@ def test_architecture_describes_current_worker_lifecycle():
         assert legacy_name not in architecture
 
 
-def test_architecture_documents_hot_parallel_service():
+def test_architecture_documents_hot_diarization_first_service():
     architecture = (
         ROOT / "docs" / "architecture" / "current-transcription-pipeline.md"
     ).read_text(encoding="utf-8")
 
     for required in (
         "Unix socket",
-        "ASR 与 diarization 并行",
+        "diarization 先行完成",
+        "vad_segments_ms",
         "--profile-resources",
         "--enable-overlap",
         "service stop",

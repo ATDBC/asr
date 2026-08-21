@@ -46,6 +46,9 @@ def _fake_worker(tmp_path: Path, mode: str = "normal") -> Path:
                 identifier = "wrong-id" if MODE == "wrong_id" else request["id"]
                 stem = Path(request["audio_path"]).stem
                 text = "一。" if stem == "one" else "二。"
+                vad_segments = [[0, 500]]
+                if MODE == "echo":
+                    vad_segments = request.get("vad_segments_ms") or [[0, 600]]
                 response = {{
                     "id": identifier,
                     "ok": True,
@@ -57,7 +60,7 @@ def _fake_worker(tmp_path: Path, mode: str = "normal") -> Path:
                         "end_ms": 500,
                         "asr_confidence": 0.9
                     }}],
-                    "vad_segments_ms": [[0, 500]],
+                    "vad_segments_ms": vad_segments,
                     "duration_ms": 600
                 }}
                 print(json.dumps(response, ensure_ascii=False), flush=True)
@@ -179,3 +182,20 @@ def test_client_close_is_idempotent(tmp_path: Path):
     client.close()
 
     assert client.pid is None
+
+
+def test_client_sends_vad_segments_when_provided(tmp_path: Path):
+    with _client(tmp_path, "echo") as client:
+        result = client.transcribe(
+            _audio(tmp_path, "one"),
+            vad_segments_ms=[[0, 500], [500, 600]],
+        )
+
+    assert result.vad_segments_ms == ((0, 500), (500, 600))
+
+
+def test_client_omits_vad_segments_by_default(tmp_path: Path):
+    with _client(tmp_path, "echo") as client:
+        result = client.transcribe(_audio(tmp_path, "one"))
+
+    assert result.vad_segments_ms == ((0, 600),)

@@ -10,9 +10,10 @@ FireRedASR2S；不存在旧 FunASR ASR fallback。
 - 固定使用物理 GPU 0（`cuda:0`）。
 - GPU 总显存至少 23 GiB；常驻服务热加载前至少 13,312 MiB 空闲。
 - WAV、MP3、M4A、FLAC、AAC、OGG，最长两小时。
-- 自动估计 1～10 位说话人；服务按 FIFO 串行消费作业，但单个作业的 ASR 与
-  diarization 并行。
-- FireRed 流程固定为 VAD → AED → Punc；不加载语言识别模型。
+- 自动估计 1～10 位说话人；服务按 FIFO 串行消费作业。单个作业先完成说话人分离，
+  其段落直接作为 ASR 切分。
+- 生产转录以说话人分离段落经 FireRed AED → Punc 识别；不加载语言识别模型。
+  doctor 与 overlap 重解码仍使用 FireRed VAD。
 
 本工具不依赖 FastAPI、MySQL、原项目 `.env`、讯飞接口或声纹角色识别。
 
@@ -191,8 +192,8 @@ funasr-transcribe /data/recording.mp3 \
 ~~~
 
 首次转录会自动启动本机后台服务。服务在 `work_dir/service/` 保存自己的 Unix socket、
-状态和日志，并常驻一个 FireRed worker 与一个 3D-Speaker owner。普通作业让两条分支并行，
-多个 CLI 请求按 FIFO 排队；每次 CLI 返回不会释放热模型。
+状态和日志，并常驻一个 FireRed worker 与一个 3D-Speaker owner。普通作业先跑说话人分离、
+再以其段落做 ASR，多个 CLI 请求按 FIFO 排队；每次 CLI 返回不会释放热模型。
 
 ```bash
 # 查看本项目服务是否 ready
@@ -227,7 +228,7 @@ TXT 示例：
 JSON 保留毫秒级起止时间、说话人、来源、对齐置信度与重叠标记。diagnostics
 记录句级 AED/ASR 置信度、VAD 区间、阶段耗时、GPU 准入/释放样本和降级告警。默认
 `resource_profile` 仅为 `{"enabled": false}`；使用 `--profile-resources` 后还会记录服务、
-FireRed 与临时 overlap owner 的资源峰值、模型清单和并行分支时间，绝不包含其他项目 PID。
+FireRed 与临时 overlap owner 的资源峰值、模型清单和分支耗时，绝不包含其他项目 PID。
 
 ## 退出码
 

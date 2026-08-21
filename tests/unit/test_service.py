@@ -65,7 +65,7 @@ class FakeAsr:
     def close(self):
         self.events.append("asr:close")
 
-    def transcribe(self, path: Path):
+    def transcribe(self, path: Path, vad_segments_ms=None):
         self.events.append("asr:transcribe")
         return _result()
 
@@ -108,61 +108,57 @@ def test_hot_model_host_loads_once_and_closes_only_owned_models():
     assert events.count("speaker:close") == 1
 
 
-class CoordinatedAsr:
-    def __init__(self, gate: threading.Barrier):
-        self.gate = gate
+class RecordingAsr:
+    def __init__(self):
+        self.received_segments = None
+        self.events: list[str] = []
 
-    def transcribe(self, path: Path):
-        self.gate.wait()
+    def transcribe(self, path: Path, vad_segments_ms=None):
+        self.events.append("asr:transcribe")
+        self.received_segments = vad_segments_ms
         return _result()
 
 
-class CoordinatedDiarizer:
-    def __init__(self, gate: threading.Barrier):
-        self.gate = gate
+class RecordingDiarizer:
+    def __init__(self, events: list[str]):
+        self.events = events
 
     def diarize(self, path: Path):
-        self.gate.wait()
-        return (SpeakerSegment(1, 0, 600),)
+        self.events.append("speaker:diarize")
+        return (SpeakerSegment(1, 0, 600), SpeakerSegment(2, 700, 1200))
 
 
-def test_normal_job_starts_asr_and_diarization_before_waiting_for_results(
-    tmp_path: Path,
-):
-    gate = threading.Barrier(2, timeout=1)
+def test_normal_job_runs_diarization_before_asr_with_segments(tmp_path: Path):
+    asr = RecordingAsr()
+    diarizer = RecordingDiarizer(asr.events)
 
     result = run_normal_branches(
         tmp_path / "normalized.wav",
-        CoordinatedAsr(gate),
-        CoordinatedDiarizer(gate),
+        asr,
+        diarizer,
     )
 
+    assert asr.events == ["speaker:diarize", "asr:transcribe"]
+    assert asr.received_segments == [[0, 600], [700, 1200]]
     assert result.asr_result.text == "原始。"
-    assert result.speaker_segments == (SpeakerSegment(1, 0, 600),)
-    assert gate.broken is False
+    assert result.speaker_segments == (
+        SpeakerSegment(1, 0, 600),
+        SpeakerSegment(2, 700, 1200),
+    )
 
 
-class FailingAsr:
-    def transcribe(self, path: Path):
-        raise TranscriptionError("asr failed")
-
-
-class BlockingDiarizer:
-    def __init__(self):
-        self.finished = False
-
+class FailingDiarizer:
     def diarize(self, path: Path):
-        self.finished = True
-        return (SpeakerSegment(1, 0, 600),)
+        raise TranscriptionError("diarization failed")
 
 
-def test_normal_branch_waits_for_the_other_owner_before_raising(tmp_path: Path):
-    diarizer = BlockingDiarizer()
+def test_diarization_failure_skips_asr(tmp_path: Path):
+    asr = RecordingAsr()
 
-    with pytest.raises(TranscriptionError, match="asr failed"):
-        run_normal_branches(tmp_path / "normalized.wav", FailingAsr(), diarizer)
+    with pytest.raises(TranscriptionError, match="diarization failed"):
+        run_normal_branches(tmp_path / "normalized.wav", asr, FailingDiarizer())
 
-    assert diarizer.finished is True
+    assert asr.events == []
 
 
 def _request(identifier: str) -> ServiceRequest:
@@ -454,7 +450,7 @@ def test_overlap_job_evicts_hot_owners_before_temporary_models(
     events: list[str] = []
 
     class ResidentAsr:
-        def transcribe(self, path):
+        def transcribe(self, path, vad_segments_ms=None):
             return _result()
 
     class ResidentSpeaker:
@@ -515,7 +511,7 @@ def test_overlap_job_evicts_hot_owners_before_temporary_models(
         def __init__(self):
             events.append("temporary:asr")
 
-        def transcribe(self, path):
+        def transcribe(self, path, vad_segments_ms=None):
             text = "甲。" if Path(path) == track_one else "乙。"
             return AsrResult(
                 text,

@@ -58,6 +58,11 @@ def attribute_primary(
     speaker_segments: tuple[SpeakerSegment, ...],
     config: AppConfig,
 ) -> tuple[AttributedToken, ...]:
+    """Coverage-based token attribution retained for run_normalized/tests.
+
+    The production service instead transcribes diarization segments directly
+    and attributes tokens with ``alignment.attribute_by_segment``.
+    """
     if asr_result.untimed_sentences:
         raise TranscriptionError(
             "FireRed ASR requires complete timestamps for all text"

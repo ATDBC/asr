@@ -34,7 +34,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "max_speakers": 10,
         "chunk_seconds": 1.0,
         "chunk_step_seconds": 0.5,
-        "merge_cosine": 0.23,
+        "merge_cosine": 0.5,
     },
     "vad": {
         "speech_noise_thres": 0.45,

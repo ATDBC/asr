@@ -1,4 +1,4 @@
-"""Persistent local owners and parallel normal-model execution."""
+"""Persistent local owners and diarization-first normal-model execution."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import threading
 from time import perf_counter
 from typing import Any, Callable
 
+from .alignment import attribute_by_segment
 from .audio import normalize_audio, probe_audio
 from .config import AppConfig, load_config
 from .diagnostics import export_diagnostics
@@ -37,7 +38,7 @@ from .overlap import (
     SubprocessOverlapPreparer,
     apply_prepared_overlap,
 )
-from .pipeline import TranscriptionPipeline, attribute_primary
+from .pipeline import TranscriptionPipeline
 from .resource_profile import ResourceSampler
 from .service_protocol import (
     ServiceBusyError,
@@ -162,10 +163,9 @@ def run_normal_branches(
     speaker_owner: Any,
     profile_enabled: bool = False,
 ) -> NormalBranchResult:
-    """Start ASR and diarization before waiting for either result."""
+    """Run diarization first, then transcribe each speaker segment as a VAD segment."""
 
     branch_metrics: dict[str, dict[str, object]] = {}
-    metrics_lock = threading.Lock()
 
     def measure(name: str, operation: Callable[..., Any], *args: Any) -> Any:
         started_at = perf_counter()
@@ -173,49 +173,27 @@ def run_normal_branches(
             return operation(*args)
         finally:
             ended_at = perf_counter()
-            with metrics_lock:
-                branch_metrics[name] = {
-                    "started_at_monotonic": started_at,
-                    "ended_at_monotonic": ended_at,
-                    "seconds": ended_at - started_at,
-                }
+            branch_metrics[name] = {
+                "started_at_monotonic": started_at,
+                "ended_at_monotonic": ended_at,
+                "seconds": ended_at - started_at,
+            }
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        asr_future = executor.submit(
-            measure,
-            "asr",
-            asr_owner.transcribe,
-            Path(normalized),
-        )
-        speaker_future = executor.submit(
-            measure,
-            "diarization",
-            _run_speaker,
-            speaker_owner,
-            Path(normalized),
-            profile_enabled,
-        )
-        asr_result: AsrResult | None = None
-        speaker_result: tuple[tuple[SpeakerSegment, ...], dict[str, object]] | None = None
-        asr_error: Exception | None = None
-        speaker_error: Exception | None = None
-        try:
-            asr_result = asr_future.result()
-        except Exception as exc:
-            asr_error = exc
-        try:
-            speaker_result = speaker_future.result()
-        except Exception as exc:
-            speaker_error = exc
-    if asr_error is not None:
-        raise asr_error
-    if speaker_error is not None:
-        raise speaker_error
-    if asr_result is None or speaker_result is None:
-        raise RuntimeError("normal model branches returned no result")
-    speaker_segments, speaker_metrics = speaker_result
+    speaker_segments, speaker_metrics = measure(
+        "diarization",
+        _run_speaker,
+        speaker_owner,
+        Path(normalized),
+        profile_enabled,
+    )
     if speaker_metrics:
         branch_metrics["diarization"]["memory"] = speaker_metrics
+    asr_result: AsrResult = measure(
+        "asr",
+        asr_owner.transcribe,
+        Path(normalized),
+        [[segment.start_ms, segment.end_ms] for segment in speaker_segments],
+    )
     return NormalBranchResult(
         asr_result=asr_result,
         speaker_segments=speaker_segments,
@@ -739,10 +717,9 @@ class ServiceJobRunner:
             if not branches.speaker_segments:
                 raise TranscriptionError("speaker diarization returned no segments")
             with diagnostics.stage("alignment"):
-                attributed = attribute_primary(
-                    branches.asr_result,
+                attributed = attribute_by_segment(
+                    branches.asr_result.tokens,
                     branches.speaker_segments,
-                    self.config,
                 )
             enhancement = (
                 self._run_overlap_enhancement(

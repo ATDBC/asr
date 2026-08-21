@@ -15,12 +15,14 @@ funasr-transcribe recording.wav
   │
   └─ 服务内：FFmpeg 归一化为 16 kHz / 单声道 / PCM_16
        │
-       ├─ FireRedWorkerClient.transcribe(normalized.wav)
-       └─ SpeakerDiarizer.diarize(normalized.wav)
+       ├─ SpeakerDiarizer.diarize(normalized.wav)
+       │        ↓ 每个 speaker 段直接作为 VAD 段
+       └─ FireRedWorkerClient.transcribe(normalized.wav, vad_segments_ms)
               ↑
-       ASR 与 diarization 并行，两个分支都收束后才报告错误
+       diarization 先行完成；ASR 只使用其段落，不再对短段运行 FireRedVAD；
+       超过 60 秒的长 turn 由 worker 用 FireRedVAD 在该段范围内细分
               │
-       token—speaker 对齐、轮次构建、原子导出 TXT / JSON / diagnostics
+       token 按所在段直接归属说话人、轮次构建、原子导出 TXT / JSON / diagnostics
               │
        两个热模型继续常驻，供 FIFO 中的下一个作业复用
 ```
@@ -58,9 +60,16 @@ funasr-transcribe service stop --config /etc/funasr-transcriber.toml
 支持 `transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
 超时或 worker 提前退出都会成为转录错误，不会切换旧 ASR。
 
+生产 `transcribe` 请求携带 `vad_segments_ms`（diarization 段落原样发送）；worker 用一个
+脚本化 VAD 重放这些段落，其中超过 60 秒的长 turn 会借用神经 FireRedVAD 在该段范围内
+细分（神经 VAD 在该段内无输出时退化为 60 秒硬切分）。官方 AED/Punc 批处理与 uttid
+时间戳路径保持不变，响应回显细分后的段落。未携带该字段的请求（doctor 的 `verify`、
+overlap 临时 worker 对分离轨道的重解码）仍运行 FireRedVAD。
+
 worker 固定加载 FireRedASR2S 提交
 `4e7d9aaf4482a47cec1724807026b9b151926eb5` 的 FireRedVAD、FireRedASR2-AED 和
-FireRedPunc。语言识别模型不加载。VAD 先生成保持时间顺序的独立语音段；
+FireRedPunc。语言识别模型不加载。切分段保持时间顺序（生产请求来自 diarization
+段落，doctor/overlap 请求来自 FireRedVAD）；
 `[asr].segment_batch_size` 同时传给官方 AED 与 Punc batch。2026-08-21 在本机 GPU 0
 以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次后，选定默认值 4：三次输出
 均与 batch 1 稳定 fingerprint 一致，中位端到端 28.50 秒，进程峰值 5,690 MiB；batch
@@ -102,9 +111,10 @@ inventory、以及 ASR 和 diarization 的开始/结束单调时间与耗时。�
 
 ## 对齐与输出
 
+生产路径中每个 token 按生成它的 diarization 段直接归属说话人，不做覆盖率对齐。
 没有 overlap 修改时，最终轮次全文必须与 FireRed 全文在 NFKC 且忽略空白后完全一致；
-不一致即失败。`diagnostics.json.asr` 保留 VAD 区间、句级文字、时间范围、AED 置信度和
-阶段耗时，不包含语言识别结果或语言置信度。
+不一致即失败。`diagnostics.json.asr` 保留 VAD 区间（生产作业为 diarization 段落）、
+句级文字、时间范围、AED 置信度和阶段耗时，不包含语言识别结果或语言置信度。
 
 每项成功作业原子发布：
 

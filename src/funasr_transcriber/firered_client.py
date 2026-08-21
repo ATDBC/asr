@@ -203,6 +203,7 @@ class FireRedWorkerClient:
         self,
         action: str,
         audio_path: Path | None = None,
+        vad_segments_ms: list[list[int]] | None = None,
     ) -> dict[str, object]:
         self.start()
         process = self._process
@@ -215,6 +216,11 @@ class FireRedWorkerClient:
             if not path.is_absolute():
                 raise ValueError("FireRed audio path must be absolute")
             request["audio_path"] = str(path)
+        if vad_segments_ms is not None:
+            request["vad_segments_ms"] = [
+                [int(start_ms), int(end_ms)]
+                for start_ms, end_ms in vad_segments_ms
+            ]
         try:
             process.stdin.write(
                 json.dumps(
@@ -235,9 +241,13 @@ class FireRedWorkerClient:
             self.last_response = response
         return response
 
-    def transcribe(self, audio_path: Path) -> AsrResult:
+    def transcribe(
+        self,
+        audio_path: Path,
+        vad_segments_ms: list[list[int]] | None = None,
+    ) -> AsrResult:
         return parse_worker_response(
-            self._request("transcribe", Path(audio_path))
+            self._request("transcribe", Path(audio_path), vad_segments_ms)
         )
 
     def verify(self, audio_path: Path) -> AsrResult:

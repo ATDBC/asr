@@ -130,9 +130,23 @@ def test_client_passes_segment_batch_size_to_worker(tmp_path: Path):
         timeout_seconds=1.0,
         stderr_log_path=tmp_path / "worker.log",
         segment_batch_size=4,
+        segment_frame_budget=6000,
+        segment_memory_limit_mib=9000,
+        segment_memory_safety_mib=256,
+        use_half=True,
     )
 
-    assert client._command()[-2:] == ["--segment-batch-size", "4"]
+    assert client._command()[-9:] == [
+        "--segment-batch-size",
+        "4",
+        "--segment-frame-budget",
+        "6000",
+        "--segment-memory-limit-mib",
+        "9000",
+        "--segment-memory-safety-mib",
+        "256",
+        "--use-half",
+    ]
 
 
 @pytest.mark.parametrize(

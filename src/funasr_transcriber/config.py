@@ -26,7 +26,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "asr": {
         "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
         "timeout_seconds": 1800,
+        "use_half": True,
         "segment_batch_size": 8,
+        "segment_frame_budget": 8000,
+        "segment_memory_limit_mib": 10000,
+        "segment_memory_safety_mib": 512,
     },
     "diarization": {
         "speaker_count": "auto",
@@ -88,7 +92,11 @@ class PathConfig:
 class AsrConfig:
     worker_python: Path
     timeout_seconds: int
+    use_half: bool
     segment_batch_size: int
+    segment_frame_budget: int
+    segment_memory_limit_mib: int
+    segment_memory_safety_mib: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +240,15 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
                 values["asr"]["worker_python"]
             ).expanduser(),
             timeout_seconds=int(values["asr"]["timeout_seconds"]),
+            use_half=bool(values["asr"]["use_half"]),
             segment_batch_size=int(values["asr"]["segment_batch_size"]),
+            segment_frame_budget=int(values["asr"]["segment_frame_budget"]),
+            segment_memory_limit_mib=int(
+                values["asr"]["segment_memory_limit_mib"]
+            ),
+            segment_memory_safety_mib=int(
+                values["asr"]["segment_memory_safety_mib"]
+            ),
         ),
         diarization=DiarizationConfig(
             speaker_count=speaker_count,
@@ -296,6 +312,12 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("ASR timeout_seconds must be positive")
     if config.asr.segment_batch_size <= 0:
         raise ValueError("ASR segment_batch_size must be positive")
+    if config.asr.segment_frame_budget <= 0:
+        raise ValueError("ASR segment_frame_budget must be positive")
+    if config.asr.segment_memory_limit_mib <= 0:
+        raise ValueError("ASR segment_memory_limit_mib must be positive")
+    if config.asr.segment_memory_safety_mib < 0:
+        raise ValueError("ASR segment_memory_safety_mib must not be negative")
     diarization = config.diarization
     if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
         raise ValueError("min_speakers/max_speakers must stay within 1..10")

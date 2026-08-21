@@ -1,4 +1,8 @@
-"""FireRedASR2S JSON Lines worker, executed only inside `.venv-asr`."""
+"""FireRed AED/Punc JSON Lines worker with a hosted VAD helper.
+
+The worker is the AED/Punc functional owner. FireRedVAD is hosted in the same
+`.venv-asr` process only to refine long speaker-separation intervals.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +11,18 @@ from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Callable, IO, Protocol
 
 from .firered_contract import normalize_official_result
+from .firered_scheduler import AdaptiveBatchScheduler
 
 
 LOGGER = logging.getLogger(__name__)
+
+SCRIPTED_VAD_THRESHOLD_SECONDS = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +30,287 @@ class AudioInfo:
     sample_rate: int
     channels: int
     subtype: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledSegment:
+    """One VAD interval with its position in the caller's chronological list."""
+
+    index: int
+    start_s: float
+    end_s: float
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_s - self.start_s
+
+
+def duration_ordered_batches(
+    segments: list[tuple[float, float]] | tuple[tuple[float, float], ...],
+    batch_size: int,
+    frame_budget: int | None = None,
+    frame_rate: int = 100,
+) -> list[list[ScheduledSegment]]:
+    """Group intervals by similar duration while retaining original indices.
+
+    The returned groups are execution order only. Callers must use ``index``
+    to restore chronological output order before formatting the response.
+    ``frame_budget`` is optional and limits the sum of estimated feature frames
+    per batch; an individual interval is allowed to exceed the budget.
+    """
+
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if frame_budget is not None and frame_budget <= 0:
+        raise ValueError("frame_budget must be positive when provided")
+    scheduled = [
+        ScheduledSegment(index, float(start_s), float(end_s))
+        for index, (start_s, end_s) in enumerate(segments)
+    ]
+    ordered = sorted(
+        scheduled,
+        key=lambda item: (item.duration_s, item.index),
+    )
+    batches: list[list[ScheduledSegment]] = []
+    current: list[ScheduledSegment] = []
+    current_frames = 0
+    for item in ordered:
+        item_frames = max(1, int(round(item.duration_s * frame_rate)))
+        budget_would_be_exceeded = (
+            frame_budget is not None
+            and current
+            and current_frames + item_frames > frame_budget
+        )
+        if current and (
+            len(current) >= batch_size or budget_would_be_exceeded
+        ):
+            batches.append(current)
+            current = []
+            current_frames = 0
+        current.append(item)
+        current_frames += item_frames
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _synchronize_cuda() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except ImportError:
+        pass
+
+
+def _reset_cuda_peak_memory() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except ImportError:
+        pass
+
+
+def _cuda_peak_memory_mib() -> int | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return int(torch.cuda.max_memory_allocated() / (1024 * 1024))
+    except ImportError:
+        pass
+    return None
+
+
+def _cuda_free_memory_mib() -> int | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            free_bytes, _ = torch.cuda.mem_get_info()
+            return int(free_bytes / (1024 * 1024))
+    except ImportError:
+        pass
+    return None
+
+
+def _scheduled_process(
+    system: FireRedSystem,
+    wav_path: str,
+    uttid: str,
+    vad_segments: list[tuple[float, float]],
+    batch_size: int,
+    frame_budget: int | None = None,
+    memory_limit_mib: int | None = 10_000,
+    memory_safety_mib: int = 512,
+    free_memory_provider: Callable[[], int | None] | None = None,
+    clock: Callable[[], float] = time.perf_counter,
+) -> dict[str, object]:
+    """Run the pinned modules with duration-aware AED batches.
+
+    This mirrors the small orchestration layer in the pinned FireRed system,
+    but keeps the project-owned execution scheduler outside the ignored model
+    checkout. All result lists are restored to the caller's VAD order before
+    punctuation and response formatting.
+    """
+
+    import soundfile as sf
+
+    wav_np, sample_rate = sf.read(wav_path, dtype="int16")
+    duration_s = wav_np.shape[0] / sample_rate
+    config = system.config
+    records: list[tuple[int, dict[str, object], object]] = []
+    scheduler = AdaptiveBatchScheduler(
+        vad_segments,
+        max_batch_size=batch_size,
+        frame_budget=frame_budget or 8000,
+        memory_limit_mib=memory_limit_mib,
+        safety_mib=memory_safety_mib,
+        free_memory_provider=free_memory_provider or _cuda_free_memory_mib,
+    )
+    scheduler.plan()
+    while (decision := scheduler.next_batch()) is not None:
+        batch = list(decision.items)
+        batch_uttid: list[str] = []
+        batch_wav: list[tuple[int, object]] = []
+        for item in batch:
+            start = int(item.start_s * sample_rate)
+            end = int(item.end_s * sample_rate)
+            batch_uttid.append(
+                f"{uttid}_s{int(item.start_s * 1000)}_e{int(item.end_s * 1000)}"
+            )
+            batch_wav.append((sample_rate, wav_np[start:end]))
+        _reset_cuda_peak_memory()
+        asr_started = clock()
+        asr_results = system.asr.transcribe(batch_uttid, batch_wav)
+        _synchronize_cuda()
+        scheduler.observe(
+            decision,
+            actual_seconds=clock() - asr_started,
+            actual_peak_mib=_cuda_peak_memory_mib(),
+        )
+        lid_results = (
+            system.lid.process(batch_uttid, batch_wav)
+            if getattr(config, "enable_lid", False)
+            else [None] * len(asr_results)
+        )
+        item_by_uttid = {
+            uttid: item for uttid, item in zip(batch_uttid, batch)
+        }
+        lid_by_uttid = {
+            str(result.get("uttid")): result
+            for result in lid_results
+            if isinstance(result, dict) and result.get("uttid") is not None
+        }
+        for asr_result in asr_results:
+            result_uttid = str(asr_result.get("uttid") or "")
+            item = item_by_uttid.get(result_uttid)
+            if item is None:
+                raise ValueError(
+                    "FireRed AED returned an unknown segment uttid: "
+                    f"{result_uttid}"
+                )
+            lid_result = lid_by_uttid.get(result_uttid)
+            text = str(asr_result.get("text", "")).strip()
+            if not text or re.search(r"(<blank>)|(<sil>)", text):
+                continue
+            records.append((item.index, asr_result, lid_result))
+
+    records.sort(key=lambda item: item[0])
+    asr_results = [item[1] for item in records]
+    lid_results = [item[2] for item in records]
+    punc_results: list[dict[str, object]]
+    if getattr(config, "enable_punc", False):
+        punc_results = []
+        punc_batch: list[tuple[dict[str, object], str]] = []
+        for index, asr_result in enumerate(asr_results):
+            timestamp = asr_result.get("timestamp", [])
+            punc_batch.append((asr_result, timestamp))
+            if len(punc_batch) < batch_size and index != len(asr_results) - 1:
+                continue
+            punc_results.extend(
+                system.punc.process_with_timestamp(
+                    [item[1] for item in punc_batch],
+                    [str(item[0]["uttid"]) for item in punc_batch],
+                )
+            )
+            punc_batch = []
+    else:
+        punc_results = [item for item in asr_results]
+
+    sentences: list[dict[str, object]] = []
+    words: list[dict[str, object]] = []
+    for asr_result, punc_result, lid_result in zip(
+        asr_results, punc_results, lid_results
+    ):
+        start_ms, end_ms = str(asr_result["uttid"]).split("_")[-2:]
+        start_ms = int(start_ms[1:])
+        end_ms = int(end_ms[1:])
+        if getattr(config.asr_config, "return_timestamp", False):
+            for index, punc_sentence in enumerate(
+                punc_result["punc_sentences"]
+            ):
+                start = start_ms + int(float(punc_sentence["start_s"]) * 1000)
+                end = start_ms + int(float(punc_sentence["end_s"]) * 1000)
+                if index == 0:
+                    start = start_ms
+                if index == len(punc_result["punc_sentences"]) - 1:
+                    end = end_ms
+                sentence = {
+                    "start_ms": start,
+                    "end_ms": end,
+                    "text": punc_sentence["punc_text"],
+                    "asr_confidence": asr_result["confidence"],
+                    "lang": None,
+                    "lang_confidence": 0,
+                }
+                if lid_result:
+                    sentence["lang"] = lid_result["lang"]
+                    sentence["lang_confidence"] = lid_result["confidence"]
+                sentences.append(sentence)
+        else:
+            text = (
+                punc_result["punc_text"]
+                if getattr(config, "enable_punc", False)
+                else asr_result["text"]
+            )
+            sentences.append(
+                {
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "text": text,
+                    "asr_confidence": asr_result["confidence"],
+                    "lang": None,
+                    "lang_confidence": 0,
+                }
+            )
+        for word, start, end in asr_result.get("timestamp", []):
+            words.append(
+                {
+                    "start_ms": int(float(start) * 1000 + start_ms),
+                    "end_ms": int(float(end) * 1000 + start_ms),
+                    "text": word,
+                }
+            )
+
+    text = "".join(str(sentence["text"]) for sentence in sentences)
+    text = re.sub(r"([.,!?])\s*([a-zA-Z])", r"\1 \2", text)
+    return {
+        "uttid": uttid,
+        "text": text,
+        "sentences": sentences,
+        "vad_segments_ms": [
+            (int(start * 1000), int(end * 1000))
+            for start, end in vad_segments
+        ],
+        "dur_s": duration_s,
+        "words": words,
+        "wav_path": wav_path,
+        "_scheduler": scheduler.summary(),
+    }
 
 
 class FireRedSystem(Protocol):
@@ -54,7 +343,7 @@ def _check_segment_bounds(start_s: float, end_s: float) -> None:
 
 
 class ScriptedVad:
-    """Replay caller-provided segments, subdividing long turns with the neural VAD."""
+    """Replay speaker segments, refining long turns from one global VAD pass."""
 
     def __init__(
         self,
@@ -65,32 +354,40 @@ class ScriptedVad:
         self._fallback_vad = fallback_vad
 
     def detect(self, path: str):
-        if not any(end - start > 60.0 for start, end in self._segments):
+        long_segment = any(
+            end - start > SCRIPTED_VAD_THRESHOLD_SECONDS
+            for start, end in self._segments
+        )
+        if not long_segment:
             return {"timestamps": list(self._segments)}, None
-        neural: list[tuple[float, float]] = []
+        neural_segments: list[tuple[float, float]] = []
         if self._fallback_vad is not None:
             neural_result, _ = self._fallback_vad.detect(path)
-            neural = [
+            neural_segments = [
                 (float(start), float(end))
                 for start, end in neural_result.get("timestamps", [])
             ]
         output: list[tuple[float, float]] = []
         for start_s, end_s in self._segments:
-            if end_s - start_s <= 60.0:
+            duration = end_s - start_s
+            if duration <= SCRIPTED_VAD_THRESHOLD_SECONDS:
                 output.append((start_s, end_s))
                 continue
-            subdivided = [
-                (max(start_s, neural_start), min(end_s, neural_end))
-                for neural_start, neural_end in neural
-                if min(end_s, neural_end) > max(start_s, neural_start)
-            ]
+            subdivided: list[tuple[float, float]] = []
+            for neural_start, neural_end in neural_segments:
+                intersection_start = max(start_s, neural_start)
+                intersection_end = min(end_s, neural_end)
+                if intersection_end > intersection_start:
+                    subdivided.append((intersection_start, intersection_end))
             if subdivided:
                 output.extend(subdivided)
                 continue
             cursor = start_s
-            while end_s - cursor > 60.0:
-                output.append((cursor, cursor + 60.0))
-                cursor += 60.0
+            while end_s - cursor > SCRIPTED_VAD_THRESHOLD_SECONDS:
+                output.append(
+                    (cursor, cursor + SCRIPTED_VAD_THRESHOLD_SECONDS)
+                )
+                cursor += SCRIPTED_VAD_THRESHOLD_SECONDS
             output.append((cursor, end_s))
         for start_s, end_s in output:
             _check_segment_bounds(start_s, end_s)
@@ -192,7 +489,11 @@ def _peak_gpu_bytes() -> int | None:
 
 
 def firered_inventory(system: FireRedSystem) -> dict[str, object]:
-    """Return concrete module facts after the official system has loaded."""
+    """Return physical inventory facts, including the hosted VAD helper.
+
+    The ``vad`` entry describes a speaker-separation helper even though the
+    model is physically loaded by this worker process.
+    """
 
     from .resource_profile import module_inventory
 
@@ -293,9 +594,26 @@ def serve(
                 raw = system.process(str(path), uttid=identifier)
             else:
                 original_vad = getattr(system, "vad", None)
-                system.vad = ScriptedVad(scripted_segments, original_vad)
+                scripted_vad = ScriptedVad(scripted_segments, original_vad)
+                system.vad = scripted_vad
                 try:
-                    raw = system.process(str(path), uttid=identifier)
+                    if (
+                        hasattr(system, "asr")
+                        and hasattr(system, "config")
+                    ):
+                        vad_result, _ = scripted_vad.detect(str(path))
+                        raw = _scheduled_process(
+                            system,
+                            str(path),
+                            identifier,
+                            list(vad_result["timestamps"]),
+                            int(system.config.asr_batch_size),
+                            getattr(system.config, "segment_frame_budget", None),
+                            getattr(system.config, "segment_memory_limit_mib", 10_000),
+                            getattr(system.config, "segment_memory_safety_mib", 512),
+                        )
+                    else:
+                        raw = system.process(str(path), uttid=identifier)
                 finally:
                     system.vad = original_vad
             inference_seconds += clock() - inference_started
@@ -305,6 +623,9 @@ def serve(
                 "inference_seconds": inference_seconds,
                 "peak_gpu_bytes": peak_sampler(),
             }
+            scheduler_metrics = raw.get("_scheduler")
+            if isinstance(scheduler_metrics, dict):
+                response["metrics"]["scheduler"] = scheduler_metrics
             if action == "verify":
                 response["verified"] = True
             _write_response(protocol_output, response)
@@ -320,8 +641,12 @@ def build_firered_system(
     model_root: Path,
     device: str,
     segment_batch_size: int = 1,
+    segment_frame_budget: int = 8000,
+    segment_memory_limit_mib: int = 10_000,
+    segment_memory_safety_mib: int = 512,
+    use_half: bool = False,
 ) -> FireRedSystem:
-    """Construct the pinned official three-module system in the ASR process."""
+    """Construct the AED/Punc worker and its hosted speaker-VAD helper."""
 
     import torch
     from fireredasr2s import FireRedAsr2System, FireRedAsr2SystemConfig
@@ -339,6 +664,12 @@ def build_firered_system(
         raise RuntimeError("CUDA is unavailable in the FireRed environment")
     if segment_batch_size <= 0:
         raise ValueError("segment_batch_size must be positive")
+    if segment_frame_budget <= 0:
+        raise ValueError("segment_frame_budget must be positive")
+    if segment_memory_limit_mib <= 0:
+        raise ValueError("segment_memory_limit_mib must be positive")
+    if segment_memory_safety_mib < 0:
+        raise ValueError("segment_memory_safety_mib must not be negative")
     torch.cuda.set_device(device_index)
 
     root = Path(model_root).expanduser().resolve() / "fireredasr2s"
@@ -360,7 +691,7 @@ def build_firered_system(
         ),
         asr_config=FireRedAsr2Config(
             use_gpu=True,
-            use_half=False,
+            use_half=use_half,
             beam_size=3,
             nbest=1,
             decode_max_len=0,
@@ -377,6 +708,9 @@ def build_firered_system(
         enable_punc=True,
     )
     system = FireRedAsr2System(config)
+    system.config.segment_frame_budget = segment_frame_budget
+    system.config.segment_memory_limit_mib = segment_memory_limit_mib
+    system.config.segment_memory_safety_mib = segment_memory_safety_mib
     system.vad = GuardedVad(system.vad)
     return system
 
@@ -386,6 +720,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-root", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--segment-batch-size", type=_positive_int, default=1)
+    parser.add_argument("--segment-frame-budget", type=_positive_int, default=8000)
+    parser.add_argument("--segment-memory-limit-mib", type=_positive_int, default=10_000)
+    parser.add_argument("--segment-memory-safety-mib", type=_nonnegative_int, default=512)
+    parser.add_argument("--use-half", action="store_true")
     return parser
 
 
@@ -393,6 +731,13 @@ def _positive_int(value: str) -> int:
     result = int(value)
     if result <= 0:
         raise argparse.ArgumentTypeError("segment batch size must be positive")
+    return result
+
+
+def _nonnegative_int(value: str) -> int:
+    result = int(value)
+    if result < 0:
+        raise argparse.ArgumentTypeError("must not be negative")
     return result
 
 
@@ -411,6 +756,10 @@ def main(argv: list[str] | None = None) -> int:
             args.model_root,
             args.device,
             args.segment_batch_size,
+            args.segment_frame_budget,
+            args.segment_memory_limit_mib,
+            args.segment_memory_safety_mib,
+            args.use_half,
         ),
         peak_sampler=_peak_gpu_bytes,
     )

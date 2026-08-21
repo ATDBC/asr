@@ -33,7 +33,7 @@ def test_architecture_describes_current_worker_lifecycle():
     ).read_text(encoding="utf-8")
 
     assert "FireRedWorkerClient" in architecture
-    assert "FireRed worker 关闭" in architecture
+    assert "FireRed AED/Punc worker" in architecture
     assert "SpeakerDiarizer 关闭" in architecture
     assert "segment_batch_size" in architecture
     assert "FireRedLID" not in architecture

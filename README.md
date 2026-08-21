@@ -12,7 +12,8 @@ FireRedASR2S；不存在旧 FunASR ASR fallback。
 - WAV、MP3、M4A、FLAC、AAC、OGG，最长两小时。
 - 自动估计 1～10 位说话人；服务按 FIFO 串行消费作业。单个作业先完成说话人分离，
   其段落直接作为 ASR 切分。
-- 生产转录以说话人分离段落经 FireRed AED → Punc 识别；不加载语言识别模型。
+- 生产转录以说话人分离段落经 FireRed AED → Punc 识别，默认启用 BF16（3090 上为
+  `torch.bfloat16`）；不加载语言识别模型。
   doctor 与 overlap 重解码仍使用 FireRed VAD。
 
 本工具不依赖 FastAPI、MySQL、原项目 `.env`、讯飞接口或声纹角色识别。
@@ -87,7 +88,11 @@ work_dir = "/var/tmp/funasr-transcriber"
 [asr]
 worker_python = "/path/to/standalone_transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
+use_half = true                 # GPU 支持时由 FireRed 选择 BF16
 segment_batch_size = 8
+segment_frame_budget = 8000
+segment_memory_limit_mib = 10000
+segment_memory_safety_mib = 512
 
 [service]
 queue_limit = 16
@@ -107,9 +112,17 @@ GPU 1 重映射成逻辑 `cuda:0`。配置优先级为：
 命令行 > FUNASR_TRANSCRIBER_* 环境变量 > TOML > 内置默认值
 ~~~
 
-`segment_batch_size` 是 VAD 完成后 AED 与 Punc 的官方批处理大小。每个 VAD 段仍按
-原时间顺序导出；默认 8 是速度与显存校准后的取值，注意 batch 8 的转写与 batch 1/4
+`segment_batch_size` 是动态调度器允许的 AED 最大批大小。调度器先按时长降低 padding，
+在第一个 AED batch 前读取一次 GPU 0 空闲显存，再用 `segment_frame_budget`、
+`segment_memory_limit_mib` 和安全余量一次性切出完整批次计划。执行期间严格按计划消费；
+每个 batch 完成后的实际耗时和显存峰值只用于诊断和更新预测模型，不会重排后续批次。每个
+VAD 段仍按原时间顺序导出，完整计划、实际观测和预测超限记录写入
+`diagnostics.json.scheduler`。默认 8 是速度与显存校准后的取值，注意 batch 8 的转写与 batch 1/4
 不完全逐字一致（batch 间浮点差异），但同一 batch 重复运行结果稳定。
+
+生产默认 `use_half = true`。FireRed 上游在 GPU 支持 BF16 时将该选项解析为
+`torch.bfloat16`；不支持 BF16 的设备才会退化到上游的 FP16 路径。设为 `false` 可恢复
+FP32。当前物理 GPU 0 为 RTX 3090，生产路径实际使用 BF16。
 
 ## 模型准备
 
@@ -145,7 +158,7 @@ funasr-transcribe doctor --config /etc/funasr-transcriber.toml
 `segmentation-3.0` 与 `speaker-diarization-3.1` 的访问条件。`HF_TOKEN` 只从环境
 读取，不写入配置、日志或 diagnostics。
 
-仅当 ModelScope 无法获取 FireRed 三模型时，才显式使用 Hugging Face fallback：
+仅当 ModelScope 无法获取 FireRed VAD/AED/Punc 资产时，才显式使用 Hugging Face fallback：
 
 ~~~bash
 .venv-asr/bin/python -c \
@@ -155,8 +168,8 @@ funasr-transcribe doctor --config /etc/funasr-transcriber.toml
 fallback 仍会校验三个模型目录，3D-Speaker 相关资产继续由 ModelScope 获取。不要
 混用不完整目录。
 
-`doctor` 对内置 `hello_zh.wav` 依次执行 FireRedVAD、FireRedASR2-AED、FireRedPunc
-全链推理；关闭 worker 后检查显存释放，再按顺序
+`doctor` 对内置 `hello_zh.wav` 依次执行说话人分离阶段的 FireRedVAD、FireRed
+AED/Punc worker 全链推理；关闭 worker 后检查显存释放，再按顺序
 验证 Speaker 和 overlap 环境。`--skip-cuda` 只用于环境型测试，会明确显示模型
 smoke 未运行，不能作为发布通过证据。
 
@@ -192,7 +205,8 @@ funasr-transcribe /data/recording.mp3 \
 ~~~
 
 首次转录会自动启动本机后台服务。服务在 `work_dir/service/` 保存自己的 Unix socket、
-状态和日志，并常驻一个 FireRed worker 与一个 3D-Speaker owner。普通作业先跑说话人分离、
+状态和日志，并常驻一个 FireRed AED/Punc worker 与一个 3D-Speaker owner。FireRedVAD
+功能上属于说话人分离阶段，但目前由同一个 `.venv-asr` worker 进程承载。普通作业先跑说话人分离、
 再以其段落做 ASR，多个 CLI 请求按 FIFO 排队；每次 CLI 返回不会释放热模型。
 
 ```bash

@@ -5,13 +5,18 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from funasr_transcriber.firered_worker import (
     AudioInfo,
     GuardedVad,
+    _scheduled_process,
     firered_inventory,
+    duration_ordered_batches,
     serve,
+    _parser,
 )
 
 
@@ -66,6 +71,166 @@ def test_firered_inventory_excludes_lid_module():
     inventory = firered_inventory(system)
 
     assert set(inventory["modules"]) == {"vad", "asr", "punc"}
+
+
+def test_worker_half_precision_switch_defaults_off_and_can_be_enabled(tmp_path: Path):
+    parser = _parser()
+
+    assert parser.parse_args(["--model-root", str(tmp_path)]).use_half is False
+    assert parser.parse_args(
+        ["--model-root", str(tmp_path), "--use-half"]
+    ).use_half is True
+
+
+def test_duration_ordered_batches_retain_indices_for_order_restoration():
+    segments = [(0.0, 3.0), (3.0, 4.0), (4.0, 6.0), (6.0, 7.0)]
+
+    batches = duration_ordered_batches(segments, batch_size=2)
+
+    assert [[item.index for item in batch] for batch in batches] == [
+        [1, 3],
+        [2, 0],
+    ]
+    assert [
+        (item.index, item.start_s, item.end_s)
+        for batch in batches
+        for item in batch
+    ] == [
+        (1, 3.0, 4.0),
+        (3, 6.0, 7.0),
+        (2, 4.0, 6.0),
+        (0, 0.0, 3.0),
+    ]
+
+
+def test_duration_ordered_batches_respect_frame_budget_before_batch_limit():
+    segments = [(0.0, 40.0), (40.0, 70.0), (70.0, 100.0)]
+
+    batches = duration_ordered_batches(segments, batch_size=8, frame_budget=5_000)
+
+    assert [[item.index for item in batch] for batch in batches] == [[1], [2], [0]]
+
+
+def test_scheduled_process_restores_original_result_order(tmp_path: Path):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(7 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def __init__(self):
+            self.batches: list[list[str]] = []
+
+        def transcribe(self, uttids, wavs):
+            self.batches.append(list(uttids))
+            results = []
+            for uttid in uttids:
+                start_ms = int(uttid.split("_s", 1)[1].split("_e", 1)[0])
+                end_ms = int(uttid.rsplit("_e", 1)[1])
+                results.append(
+                    {
+                        "uttid": uttid,
+                        "text": str(start_ms),
+                        "confidence": 0.9,
+                        "timestamp": [(str(start_ms), 0.0, (end_ms - start_ms) / 1000)],
+                    }
+                )
+            return results
+
+    class Punc:
+        def process_with_timestamp(self, timestamps, uttids):
+            return [
+                {
+                    "uttid": uttid,
+                    "punc_sentences": [
+                        {"punc_text": uttid.split("_s", 1)[1], "start_s": 0, "end_s": 1}
+                    ],
+                }
+                for uttid in uttids
+            ]
+
+    asr = Asr()
+    system = SimpleNamespace(
+        asr=asr,
+        punc=Punc(),
+        config=SimpleNamespace(
+            asr_batch_size=2,
+            enable_lid=False,
+            enable_punc=True,
+            asr_config=SimpleNamespace(return_timestamp=True),
+        ),
+    )
+    raw = _scheduled_process(
+        system,
+        str(wav),
+        "job",
+        [(0.0, 3.0), (3.0, 4.0), (4.0, 6.0), (6.0, 7.0)],
+        batch_size=2,
+    )
+
+    assert [batch[0].split("_s", 1)[1].split("_e", 1)[0] for batch in asr.batches] == [
+        "3000",
+        "4000",
+    ]
+    assert [sentence["start_ms"] for sentence in raw["sentences"]] == [
+        0,
+        3000,
+        4000,
+        6000,
+    ]
+
+
+def test_scheduled_process_matches_dropped_aed_items_by_uttid(tmp_path: Path):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(4 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def transcribe(self, uttids, wavs):
+            # Simulate the pinned feature extractor dropping the first item.
+            uttid = uttids[-1]
+            start_ms = int(uttid.split("_s", 1)[1].split("_e", 1)[0])
+            end_ms = int(uttid.rsplit("_e", 1)[1])
+            return [
+                {
+                    "uttid": uttid,
+                    "text": "保留",
+                    "confidence": 0.9,
+                    "timestamp": [("保", 0.0, (end_ms - start_ms) / 1000)],
+                }
+            ]
+
+    class Punc:
+        def process_with_timestamp(self, timestamps, uttids):
+            return [
+                {
+                    "uttid": uttid,
+                    "punc_sentences": [
+                        {"punc_text": "保留。", "start_s": 0, "end_s": 1}
+                    ],
+                }
+                for uttid in uttids
+            ]
+
+    system = SimpleNamespace(
+        asr=Asr(),
+        punc=Punc(),
+        config=SimpleNamespace(
+            asr_batch_size=2,
+            enable_lid=False,
+            enable_punc=True,
+            asr_config=SimpleNamespace(return_timestamp=True),
+        ),
+    )
+    raw = _scheduled_process(
+        system,
+        str(wav),
+        "job",
+        [(0.0, 1.0), (1.0, 5.0), (5.0, 6.0)],
+        batch_size=2,
+    )
+
+    assert [sentence["start_ms"] for sentence in raw["sentences"]] == [
+        1000,
+        5000,
+    ]
 
 
 def _request(identifier: str, action: str, path: Path | None = None) -> str:
@@ -363,11 +528,12 @@ def test_worker_subdivides_long_scripted_segment_with_neural_vad(
     tmp_path: Path,
 ):
     wav = (tmp_path / "normalized.wav").resolve()
-    wav.write_bytes(b"fake")
+    sf.write(wav, np.zeros(30 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
 
     class NeuralVad:
-        def detect(self, path: str):
-            return {"timestamps": [(0.0, 20.0), (25.0, 70.0)]}, None
+        def detect(self, audio):
+            assert audio == str(wav)
+            return {"timestamps": [(0.0, 10.0), (15.0, 20.0)]}, None
 
     neural = NeuralVad()
     system = ScriptedVadSystem(_official(wav))
@@ -376,7 +542,7 @@ def test_worker_subdivides_long_scripted_segment_with_neural_vad(
 
     serve(
         StringIO(
-            _segment_request("long", wav, [[0, 5_000], [10_000, 80_000]])
+            _segment_request("long", wav, [[0, 5_000], [10_000, 30_000]])
         ),
         target,
         lambda: system,
@@ -385,8 +551,52 @@ def test_worker_subdivides_long_scripted_segment_with_neural_vad(
 
     payload = json.loads(target.getvalue())
     assert payload["ok"] is True
-    assert system.seen_timestamps == [(0.0, 5.0), (10.0, 20.0), (25.0, 70.0)]
+    assert system.seen_timestamps == [(0.0, 5.0), (15.0, 20.0)]
     assert system.vad is neural
+
+
+def test_worker_runs_neural_vad_once_and_intersects_long_speaker_segments(
+    tmp_path: Path,
+):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(35 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class NeuralVad:
+        def __init__(self):
+            self.calls = []
+
+        def detect(self, audio):
+            self.calls.append(audio)
+            assert audio == str(wav)
+            return {"timestamps": [(2.0, 14.0), (18.0, 32.0)]}, None
+
+    neural = NeuralVad()
+    system = ScriptedVadSystem(_official(wav))
+    system.vad = neural
+    target = StringIO()
+
+    serve(
+        StringIO(
+            _segment_request(
+                "global-vad",
+                wav,
+                [[0, 5_000], [10_000, 21_000], [25_000, 36_000]],
+            )
+        ),
+        target,
+        lambda: system,
+        _valid_info,
+    )
+
+    payload = json.loads(target.getvalue())
+    assert payload["ok"] is True
+    assert len(neural.calls) == 1
+    assert system.seen_timestamps == [
+        (0.0, 5.0),
+        (10.0, 14.0),
+        (18.0, 21.0),
+        (25.0, 32.0),
+    ]
 
 
 def test_worker_hard_splits_long_segment_without_fallback_vad(tmp_path: Path):
@@ -404,7 +614,10 @@ def test_worker_hard_splits_long_segment_without_fallback_vad(tmp_path: Path):
 
     payload = json.loads(target.getvalue())
     assert payload["ok"] is True
-    assert system.seen_timestamps == [(0.0, 60.0), (60.0, 120.0), (120.0, 121.0)]
+    assert system.seen_timestamps == [
+        (float(start), float(min(start + 10, 121)))
+        for start in range(0, 121, 10)
+    ]
     assert system.vad is None
 
 

@@ -73,7 +73,7 @@ def _close_owner(owner: Any) -> None:
 
 
 class HotModelHost:
-    """Own one hot FireRed client and one hot 3D-Speaker diarizer."""
+    """Own one hot FireRed AED/Punc client and one 3D-Speaker diarizer."""
 
     def __init__(
         self,
@@ -194,6 +194,11 @@ def run_normal_branches(
         Path(normalized),
         [[segment.start_ms, segment.end_ms] for segment in speaker_segments],
     )
+    asr_response = getattr(asr_owner, "last_response", {})
+    if isinstance(asr_response, dict):
+        metrics = asr_response.get("metrics")
+        if isinstance(metrics, dict) and isinstance(metrics.get("scheduler"), dict):
+            branch_metrics["asr"]["scheduler"] = metrics["scheduler"]
     return NormalBranchResult(
         asr_result=asr_result,
         speaker_segments=speaker_segments,
@@ -555,7 +560,11 @@ class ServiceJobRunner:
             device="cuda:0",
             timeout_seconds=self.config.asr.timeout_seconds,
             stderr_log_path=job_dir / "overlap-firered-worker.log",
+            use_half=self.config.asr.use_half,
             segment_batch_size=self.config.asr.segment_batch_size,
+            segment_frame_budget=self.config.asr.segment_frame_budget,
+            segment_memory_limit_mib=self.config.asr.segment_memory_limit_mib,
+            segment_memory_safety_mib=self.config.asr.segment_memory_safety_mib,
         )
 
     def _owned_pid_getters(self) -> dict[str, Callable[[], int | None]]:
@@ -714,6 +723,9 @@ class ServiceJobRunner:
                     speaker_owner,
                     profile_enabled=request.profile_resources,
                 )
+            scheduler = branches.branch_metrics.get("asr", {}).get("scheduler")
+            if request.profile_resources and isinstance(scheduler, dict):
+                diagnostics.scheduler = scheduler
             if not branches.speaker_segments:
                 raise TranscriptionError("speaker diarization returned no segments")
             with diagnostics.stage("alignment"):
@@ -798,7 +810,11 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             device="cuda:0",
             timeout_seconds=config.asr.timeout_seconds,
             stderr_log_path=paths.directory / "firered-worker.log",
+            use_half=config.asr.use_half,
             segment_batch_size=config.asr.segment_batch_size,
+            segment_frame_budget=config.asr.segment_frame_budget,
+            segment_memory_limit_mib=config.asr.segment_memory_limit_mib,
+            segment_memory_safety_mib=config.asr.segment_memory_safety_mib,
         )
 
     def gpu_check() -> None:

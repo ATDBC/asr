@@ -58,7 +58,12 @@ def parse_worker_response(response: dict[str, object]) -> AsrResult:
 
 
 class FireRedWorkerClient:
-    """Own exactly one FireRed subprocess and correlate all its responses."""
+    """Own one isolated FireRed AED/Punc subprocess and correlate responses.
+
+    The subprocess also hosts the FireRedVAD helper used by the speaker-
+    separation stage; that helper is not part of the worker's functional ASR
+    role.
+    """
 
     def __init__(
         self,
@@ -68,7 +73,12 @@ class FireRedWorkerClient:
         timeout_seconds: float,
         stderr_log_path: Path,
         worker_script: Path | None = None,
+        # FireRed's upstream use_half flag selects BF16 when the GPU supports it.
+        use_half: bool = False,
         segment_batch_size: int = 1,
+        segment_frame_budget: int = 8000,
+        segment_memory_limit_mib: int = 10000,
+        segment_memory_safety_mib: int = 512,
     ):
         self.worker_python = Path(worker_python)
         self.model_root = Path(model_root)
@@ -78,7 +88,11 @@ class FireRedWorkerClient:
         self.worker_script = (
             Path(worker_script) if worker_script is not None else None
         )
+        self.use_half = bool(use_half)
         self.segment_batch_size = int(segment_batch_size)
+        self.segment_frame_budget = int(segment_frame_budget)
+        self.segment_memory_limit_mib = int(segment_memory_limit_mib)
+        self.segment_memory_safety_mib = int(segment_memory_safety_mib)
         self._process: subprocess.Popen[str] | None = None
         self._selector: selectors.BaseSelector | None = None
         self._stderr: IO[str] | None = None
@@ -94,7 +108,7 @@ class FireRedWorkerClient:
     def _command(self) -> list[str]:
         if self.worker_script is not None:
             return [str(self.worker_python), str(self.worker_script)]
-        return [
+        command = [
             str(self.worker_python),
             "-m",
             "funasr_transcriber.firered_worker",
@@ -104,7 +118,16 @@ class FireRedWorkerClient:
             self.device,
             "--segment-batch-size",
             str(self.segment_batch_size),
+            "--segment-frame-budget",
+            str(self.segment_frame_budget),
+            "--segment-memory-limit-mib",
+            str(self.segment_memory_limit_mib),
+            "--segment-memory-safety-mib",
+            str(self.segment_memory_safety_mib),
         ]
+        if self.use_half:
+            command.append("--use-half")
+        return command
 
     def start(self) -> "FireRedWorkerClient":
         if self._process is not None:
@@ -113,6 +136,12 @@ class FireRedWorkerClient:
             raise ValueError("timeout_seconds must be positive")
         if self.segment_batch_size <= 0:
             raise ValueError("segment_batch_size must be positive")
+        if self.segment_frame_budget <= 0:
+            raise ValueError("segment_frame_budget must be positive")
+        if self.segment_memory_limit_mib <= 0:
+            raise ValueError("segment_memory_limit_mib must be positive")
+        if self.segment_memory_safety_mib < 0:
+            raise ValueError("segment_memory_safety_mib must not be negative")
         self.stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._stderr = self.stderr_log_path.open(
             "a",

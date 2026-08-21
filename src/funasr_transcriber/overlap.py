@@ -157,7 +157,13 @@ class OverlapEnhancement:
 
 
 class WorkerClient(Protocol):
-    def call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def call(
+        self,
+        action: str,
+        payload: dict[str, Any],
+        on_started: Callable[[int], None] | None = None,
+        on_finished: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
         """Run an isolated worker action."""
 
 
@@ -222,6 +228,8 @@ class SubprocessOverlapPreparer:
         device: str = "cuda:0",
         output_dir: Path | None = None,
         cache_dir: Path | None = None,
+        on_worker_started: Callable[[int], None] | None = None,
+        on_worker_finished: Callable[[int], None] | None = None,
     ):
         self.worker = worker
         self.diarizer = diarizer
@@ -233,6 +241,21 @@ class SubprocessOverlapPreparer:
         self.device = device
         self.output_dir = output_dir or Path("overlap-output")
         self.cache_dir = cache_dir
+        self.on_worker_started = on_worker_started
+        self.on_worker_finished = on_worker_finished
+
+    def _worker_call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if (
+            self.on_worker_started is None
+            and self.on_worker_finished is None
+        ):
+            return self.worker.call(action, payload)
+        return self.worker.call(
+            action,
+            payload,
+            on_started=self.on_worker_started,
+            on_finished=self.on_worker_finished,
+        )
 
     @staticmethod
     def _match_speaker(
@@ -267,7 +290,7 @@ class SubprocessOverlapPreparer:
         """Run only pyannote/ClearVoice, with no 3D-Speaker reference."""
 
         try:
-            detected = self.worker.call(
+            detected = self._worker_call(
                 "detect",
                 {
                     "audio_path": str(Path(audio_path).resolve()),
@@ -290,7 +313,7 @@ class SubprocessOverlapPreparer:
         if not windows:
             return SeparatedOverlap((), ())
         try:
-            separated = self.worker.call(
+            separated = self._worker_call(
                 "separate",
                 {
                     "audio_path": str(Path(audio_path).resolve()),

@@ -12,6 +12,7 @@ import shutil
 import socketserver
 import sys
 import threading
+from time import perf_counter
 from typing import Any, Callable
 
 from .audio import normalize_audio, probe_audio
@@ -37,6 +38,7 @@ from .overlap import (
     apply_prepared_overlap,
 )
 from .pipeline import TranscriptionPipeline, attribute_primary
+from .resource_profile import ResourceSampler
 from .service_protocol import (
     ServiceBusyError,
     ServicePaths,
@@ -139,6 +141,7 @@ class NormalBranchResult:
     asr_result: AsrResult
     speaker_segments: tuple[SpeakerSegment, ...]
     speaker_metrics: dict[str, object]
+    branch_metrics: dict[str, dict[str, object]]
 
 
 def _run_speaker(
@@ -161,9 +164,32 @@ def run_normal_branches(
 ) -> NormalBranchResult:
     """Start ASR and diarization before waiting for either result."""
 
+    branch_metrics: dict[str, dict[str, object]] = {}
+    metrics_lock = threading.Lock()
+
+    def measure(name: str, operation: Callable[..., Any], *args: Any) -> Any:
+        started_at = perf_counter()
+        try:
+            return operation(*args)
+        finally:
+            ended_at = perf_counter()
+            with metrics_lock:
+                branch_metrics[name] = {
+                    "started_at_monotonic": started_at,
+                    "ended_at_monotonic": ended_at,
+                    "seconds": ended_at - started_at,
+                }
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        asr_future = executor.submit(asr_owner.transcribe, Path(normalized))
+        asr_future = executor.submit(
+            measure,
+            "asr",
+            asr_owner.transcribe,
+            Path(normalized),
+        )
         speaker_future = executor.submit(
+            measure,
+            "diarization",
             _run_speaker,
             speaker_owner,
             Path(normalized),
@@ -188,10 +214,13 @@ def run_normal_branches(
     if asr_result is None or speaker_result is None:
         raise RuntimeError("normal model branches returned no result")
     speaker_segments, speaker_metrics = speaker_result
+    if speaker_metrics:
+        branch_metrics["diarization"]["memory"] = speaker_metrics
     return NormalBranchResult(
         asr_result=asr_result,
         speaker_segments=speaker_segments,
         speaker_metrics=speaker_metrics,
+        branch_metrics=branch_metrics,
     )
 
 
@@ -440,6 +469,7 @@ class ServiceJobRunner:
         temporary_diarizer_factory: Callable[[], Any] | None = None,
         temporary_asr_factory: Callable[[Path], Any] | None = None,
         gpu_sampler: Callable[[str], Any] | None = query_gpu,
+        sampler_factory: Callable[..., Any] = ResourceSampler,
     ):
         self.config = config
         self.hot_host = hot_host
@@ -453,6 +483,9 @@ class ServiceJobRunner:
             temporary_asr_factory or self._default_temporary_asr
         )
         self._gpu_sampler = gpu_sampler
+        self._sampler_factory = sampler_factory
+        self._active_overlap_pid: int | None = None
+        self._capture_overlap_pid = False
 
     @staticmethod
     def _staging_output_dir(output_dir: Path, request_id: str) -> Path:
@@ -476,7 +509,24 @@ class ServiceJobRunner:
             device="cuda:0",
             output_dir=job_dir / "overlap-output",
             cache_dir=Path(self.config.paths.model_dir) / "huggingface",
+            on_worker_started=(
+                self._record_overlap_started
+                if self._capture_overlap_pid
+                else None
+            ),
+            on_worker_finished=(
+                self._record_overlap_finished
+                if self._capture_overlap_pid
+                else None
+            ),
         )
+
+    def _record_overlap_started(self, pid: int) -> None:
+        self._active_overlap_pid = int(pid)
+
+    def _record_overlap_finished(self, pid: int) -> None:
+        if self._active_overlap_pid == int(pid):
+            self._active_overlap_pid = None
 
     def _default_temporary_diarizer(self) -> Any:
         from .speaker_diarization import SpeakerDiarizer
@@ -493,6 +543,47 @@ class ServiceJobRunner:
             timeout_seconds=self.config.asr.timeout_seconds,
             stderr_log_path=job_dir / "overlap-firered-worker.log",
         )
+
+    def _owned_pid_getters(self) -> dict[str, Callable[[], int | None]]:
+        def firered_pid() -> int | None:
+            owner = self.hot_host.asr_owner
+            pid = getattr(owner, "pid", None)
+            return pid if isinstance(pid, int) and pid > 0 else None
+
+        return {
+            "service": os.getpid,
+            "firered": firered_pid,
+            "overlap": lambda: self._active_overlap_pid,
+        }
+
+    def _start_resource_sampler(self, request: ServiceRequest) -> Any | None:
+        if not request.profile_resources:
+            return None
+        sampler = self._sampler_factory(
+            "cuda:0",
+            self.config.service.profile_sampling_interval_ms,
+            self._owned_pid_getters(),
+        )
+        sampler.start()
+        return sampler
+
+    def _finish_resource_profile(
+        self,
+        sampler: Any,
+        branches: NormalBranchResult,
+        diagnostics: Any,
+    ) -> None:
+        snapshot = dict(sampler.stop())
+        diagnostics.resource_profile = {
+            "enabled": True,
+            **snapshot,
+            "inventories": dict(getattr(self.hot_host, "inventories", {})),
+            "branches": dict(branches.branch_metrics),
+            "uncertainty": {
+                "driver_memory_unit": "MiB",
+                "pid_observed": dict(snapshot.get("pid_observed") or {}),
+            },
+        }
 
     def _run_overlap_enhancement(
         self,
@@ -580,6 +671,9 @@ class ServiceJobRunner:
         if job_dir.exists():
             raise OutputError(f"service job directory already exists: {job_dir}")
         job_dir.mkdir(parents=True, exist_ok=False)
+        sampler = self._start_resource_sampler(request)
+        profile_finished = False
+        self._capture_overlap_pid = request.profile_resources
         try:
             input_info = self._probe(
                 input_audio,
@@ -632,6 +726,9 @@ class ServiceJobRunner:
                 diagnostics,
                 overlap_enhancement=enhancement,
             )
+            if sampler is not None:
+                self._finish_resource_profile(sampler, branches, diagnostics)
+                profile_finished = True
             export_transcript(
                 result.transcript,
                 staging_dir,
@@ -649,6 +746,10 @@ class ServiceJobRunner:
                 raise OutputError(f"unable to publish output: {exc}") from exc
             return {"output_dir": str(published)}
         finally:
+            if sampler is not None and not profile_finished:
+                sampler.stop()
+            self._active_overlap_pid = None
+            self._capture_overlap_pid = False
             shutil.rmtree(staging_dir, ignore_errors=True)
             if not request.keep_intermediate:
                 shutil.rmtree(job_dir, ignore_errors=True)

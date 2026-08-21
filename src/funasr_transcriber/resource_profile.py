@@ -218,7 +218,12 @@ class ResourceSampler:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self.sample_once()
+        try:
+            self.sample_once()
+        except Exception:
+            # Profiling remains observational even when nvidia-smi is
+            # temporarily unavailable at service startup.
+            pass
         self._thread = threading.Thread(
             target=self._run,
             name="resource-profile-sampler",

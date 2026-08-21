@@ -436,3 +436,99 @@ def test_overlap_job_evicts_hot_owners_before_temporary_models(
     assert events.index("overlap:detect") < events.index("temporary:speaker")
     assert events.index("temporary:speaker-close") < events.index("temporary:asr")
     assert events[-1] == "hot:start"
+
+
+def _profiled_runner(tmp_path: Path, sampler_factory):
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+
+    class HotHost:
+        started = True
+        asr_owner = FakeAsr([])
+        speaker_owner = FakeDiarizer([])
+        inventories = {"firered": {"modules": {}}, "speaker": {"embedding": {}}}
+
+    def normalize(source_path, destination, max_seconds):
+        destination.write_bytes(b"normalized")
+
+    return (
+        ServiceJobRunner(
+            config,
+            hot_host=HotHost(),
+            probe=lambda path, max_seconds: AudioInfo(
+                Path(path), 600, 16000, 1, "wav"
+            ),
+            normalize=normalize,
+            sampler_factory=sampler_factory,
+        ),
+        source,
+    )
+
+
+def test_disabled_profile_does_not_create_sampler(tmp_path: Path):
+    created = []
+    runner, source = _profiled_runner(
+        tmp_path,
+        sampler_factory=lambda *args, **kwargs: created.append((args, kwargs)),
+    )
+
+    runner.run(
+        ServiceRequest(
+            identifier="normal",
+            action="submit",
+            input_audio=source,
+            output_dir=tmp_path / "output",
+            config_fingerprint="test-fingerprint",
+            profile_resources=False,
+        )
+    )
+
+    payload = __import__("json").loads(
+        (tmp_path / "output" / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert created == []
+    assert payload["resource_profile"] == {"enabled": False}
+
+
+def test_enabled_profile_records_owned_pids_and_branch_metrics(tmp_path: Path):
+    class FakeSampler:
+        def start(self):
+            return None
+
+        def stop(self):
+            return {
+                "sampling_interval_ms": 200,
+                "sample_count": 2,
+                "process_peak_mib": {"service": 514, "firered": 9256},
+                "cpu_rss_peak_kib": {"service": 1000},
+                "pid_observed": {"service": True, "firered": True},
+            }
+
+    runner, source = _profiled_runner(
+        tmp_path,
+        sampler_factory=lambda *args, **kwargs: FakeSampler(),
+    )
+
+    runner.run(
+        ServiceRequest(
+            identifier="profiled",
+            action="submit",
+            input_audio=source,
+            output_dir=tmp_path / "output",
+            config_fingerprint="test-fingerprint",
+            profile_resources=True,
+        )
+    )
+
+    payload = __import__("json").loads(
+        (tmp_path / "output" / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    profile = payload["resource_profile"]
+    assert profile["enabled"] is True
+    assert profile["process_peak_mib"] == {"service": 514, "firered": 9256}
+    assert profile["branches"]["asr"]["seconds"] >= 0
+    assert profile["branches"]["diarization"]["seconds"] >= 0
+    assert "other_processes" not in profile

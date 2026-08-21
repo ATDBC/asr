@@ -253,6 +253,34 @@ def test_detect_and_separate_can_finish_before_temporary_speaker_matching(
     assert preparation.windows[0].tracks[0].speaker_id == 1
 
 
+def test_detect_stage_forwards_overlap_worker_lifetime_callbacks(tmp_path: Path):
+    started = []
+    finished = []
+
+    class Worker:
+        def call(self, action, payload, on_started=None, on_finished=None):
+            if on_started is not None:
+                on_started(123)
+            if on_finished is not None:
+                on_finished(123)
+            return {"ok": True, "windows": []}
+
+    preparer = SubprocessOverlapPreparer(
+        worker=Worker(),
+        diarizer=None,
+        min_score=0.6,
+        min_margin=0.08,
+        min_rms=0.001,
+        on_worker_started=started.append,
+        on_worker_finished=finished.append,
+    )
+
+    preparer.detect_and_separate(tmp_path / "source.wav")
+
+    assert started == [123]
+    assert finished == [123]
+
+
 def test_apply_replaces_window_only_after_two_tracks_pass(tmp_path: Path):
     first_track = tmp_path / "track-1.wav"
     second_track = tmp_path / "track-2.wav"

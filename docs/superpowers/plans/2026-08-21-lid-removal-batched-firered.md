@@ -178,6 +178,7 @@ Historical migration specifications remain historical records and are not rewrit
 - Modify: `src/funasr_transcriber/firered_client.py:63-105`
 - Modify: `src/funasr_transcriber/service.py:567-582,806-827`
 - Modify: `src/funasr_transcriber/doctor.py:42-56`
+- Modify (ignored, if present): `artifacts/release_validation_corpus/.service-work/local-validation.toml`
 - Modify: `tests/unit/test_config.py`
 - Modify: `tests/unit/test_firered_worker.py`
 - Modify: `tests/unit/test_firered_client.py`
@@ -243,6 +244,11 @@ Historical migration specifications remain historical records and are not rewrit
   ```
 
   Pass `config.asr.segment_batch_size` from both resident and temporary service factories and the doctor factory. Update the protocol docstring to `VAD, AED, and punctuation`.
+
+  If the ignored local validation TOML exists, remove its obsolete
+  `lid_warning_confidence` entry and add `segment_batch_size = 1` in `[asr]` so
+  strict config parsing continues to load that user-provided validation setup. Do
+  not add that ignored file to Git.
 
 - [ ] **Step 4: Re-run the focused worker/config tests.**
 
@@ -426,6 +432,9 @@ Historical migration specifications remain historical records and are not rewrit
 - [ ] **Step 8: Set and verify the calibrated default.**
 
   Read `recommended_segment_batch_size` from the generated JSON. Set that exact positive integer in both `DEFAULTS["asr"]["segment_batch_size"]` and `config/default.toml`, retain 1 when the report recommends 1, and record the selected value and report path in the current architecture document. Run the real service smoke once with the same value and assert an output transcript, diagnostics without `languages`, and a worker inventory without `lid`.
+
+  Set the same selected integer in the ignored local validation TOML when that
+  file exists; leave it untracked.
 
 - [ ] **Step 9: Commit the benchmark, calibrated default and verification evidence.**
 

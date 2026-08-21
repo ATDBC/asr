@@ -11,7 +11,7 @@ work_dir = "/var/tmp/funasr-transcriber"
 [asr]
 worker_python = "/opt/funasr-transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
-segment_batch_size = 1
+segment_batch_size = 4
 
 [diarization]
 speaker_count = "auto"

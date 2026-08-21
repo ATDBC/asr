@@ -86,7 +86,7 @@ work_dir = "/var/tmp/funasr-transcriber"
 [asr]
 worker_python = "/path/to/standalone_transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
-segment_batch_size = 1
+segment_batch_size = 4
 
 [service]
 queue_limit = 16

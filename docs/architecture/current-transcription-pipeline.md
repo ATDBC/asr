@@ -61,8 +61,12 @@ funasr-transcribe service stop --config /etc/funasr-transcriber.toml
 worker 固定加载 FireRedASR2S 提交
 `4e7d9aaf4482a47cec1724807026b9b151926eb5` 的 FireRedVAD、FireRedASR2-AED 和
 FireRedPunc。语言识别模型不加载。VAD 先生成保持时间顺序的独立语音段；
-`[asr].segment_batch_size` 同时传给官方 AED 与 Punc batch，默认 1，只有 GPU 0 校准
-确认输出一致、无超预算后才会提高。官方结果只有句级 `asr_confidence`；稳定协议将句级值
+`[asr].segment_batch_size` 同时传给官方 AED 与 Punc batch。2026-08-21 在本机 GPU 0
+以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次后，选定默认值 4：三次输出
+均与 batch 1 稳定 fingerprint 一致，中位端到端 28.50 秒，进程峰值 5,690 MiB；batch
+2/8 因 fingerprint 不一致淘汰。完整报告位于
+`outputs/measurements/20260821T060915Z-firered-batches/result.json`。官方结果只有句级
+`asr_confidence`；稳定协议将句级值
 附给所属 token，不虚构词级分数。标点附着到带时间戳 token 后，协议验证全文、句子、
 token、VAD 与音频时长的一致性。
 

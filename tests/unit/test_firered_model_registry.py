@@ -51,8 +51,9 @@ def test_acquisition_uses_modelscope_and_atomic_sibling_directories(
 
     assert paths == resolve_firered_paths(tmp_path, require_existing=True)
     assert [item[0] for item in downloads] == [
-        FIRERED_MODELS[key][0] for key in ("vad", "lid", "aed", "punc")
+        FIRERED_MODELS[key][0] for key in ("vad", "aed", "punc")
     ]
+    assert all("FireRedLID" not in model_id for model_id, _ in downloads)
     assert all(".download-" in target.name for _, target in downloads)
     assert any(command[0] == "clone" for command, _ in commands)
     assert any(
@@ -105,5 +106,6 @@ def test_huggingface_is_only_used_when_explicit(tmp_path: Path):
     )
 
     assert downloaded == [
-        FIRERED_MODELS[key][1] for key in ("vad", "lid", "aed", "punc")
+        FIRERED_MODELS[key][1] for key in ("vad", "aed", "punc")
     ]
+    assert all("FireRedLID" not in model_id for model_id in downloaded)

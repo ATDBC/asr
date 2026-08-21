@@ -21,7 +21,6 @@ FIRERED_COMMIT = "4e7d9aaf4482a47cec1724807026b9b151926eb5"
 FIRERED_REPOSITORY = "https://github.com/FireRedTeam/FireRedASR2S.git"
 FIRERED_MODELS = {
     "vad": ("xukaituo/FireRedVAD", "FireRedTeam/FireRedVAD", "FireRedVAD"),
-    "lid": ("xukaituo/FireRedLID", "FireRedTeam/FireRedLID", "FireRedLID"),
     "aed": (
         "xukaituo/FireRedASR2-AED",
         "FireRedTeam/FireRedASR2-AED",
@@ -33,6 +32,7 @@ FIRERED_MODELS = {
         "FireRedPunc",
     ),
 }
+FIRERED_MODEL_NAMES = ("vad", "aed", "punc")
 OVERLAP_MODELS = (
     (
         "pyannote/speaker-diarization-3.1",
@@ -71,7 +71,6 @@ class ModelVerification:
 class FireRedPaths:
     source: Path
     vad: Path
-    lid: Path
     aed: Path
     punc: Path
 
@@ -94,7 +93,6 @@ def resolve_firered_paths(
     paths = FireRedPaths(
         source=root / "source",
         vad=root / FIRERED_MODELS["vad"][2],
-        lid=root / FIRERED_MODELS["lid"][2],
         aed=root / FIRERED_MODELS["aed"][2],
         punc=root / FIRERED_MODELS["punc"][2],
     )
@@ -104,7 +102,6 @@ def resolve_firered_paths(
             for name, path in (
                 ("firered_source", paths.source),
                 ("firered_vad", paths.vad / "VAD"),
-                ("firered_lid", paths.lid),
                 ("firered_aed", paths.aed),
                 ("firered_punc", paths.punc),
             )
@@ -275,7 +272,7 @@ def verify_models(model_dir: Path) -> ModelVerification:
                 missing.append("firered_source_commit")
         except ModelError:
             missing.append("firered_source_commit")
-    for name in ("vad", "lid", "aed", "punc"):
+    for name in FIRERED_MODEL_NAMES:
         if not _valid_firered_asset(name, getattr(paths, name)):
             missing.append(f"firered_{name}")
     speaker_vad = root / "modelscope" / "iic" / SPEAKER_VAD_DIR
@@ -307,7 +304,7 @@ def acquire_firered_assets(
     hf_download: Callable[..., Any] | None = None,
     git_runner: Callable[..., Any] | None = None,
 ) -> FireRedPaths:
-    """Acquire pinned source and four model directories using atomic renames."""
+    """Acquire pinned source and three model directories using atomic renames."""
 
     if source not in {"modelscope", "huggingface"}:
         raise ValueError("source must be modelscope or huggingface")
@@ -319,7 +316,6 @@ def acquire_firered_assets(
     for name, target in (
         ("source", paths.source),
         ("vad", paths.vad),
-        ("lid", paths.lid),
         ("aed", paths.aed),
         ("punc", paths.punc),
     ):
@@ -377,7 +373,7 @@ def acquire_firered_assets(
             raise ModelError(f"unable to import Hugging Face Hub: {exc}") from exc
         hf_download = huggingface_download
 
-    for name in ("vad", "lid", "aed", "punc"):
+    for name in FIRERED_MODEL_NAMES:
         target = getattr(paths, name)
         if target.exists():
             continue

@@ -16,7 +16,7 @@ from funasr_transcriber.model_registry import (
 
 def _complete_layout(tmp_path: Path) -> None:
     paths = resolve_firered_paths(tmp_path, require_existing=False)
-    for path in (paths.vad, paths.lid, paths.aed, paths.punc):
+    for path in (paths.vad, paths.aed, paths.punc):
         path.mkdir(parents=True)
         (path / "model.pth.tar").write_bytes(b"model")
     (paths.vad / "VAD").mkdir()
@@ -42,6 +42,7 @@ def test_firered_paths_use_isolated_layout(tmp_path: Path):
     assert paths.aed == (
         tmp_path / "fireredasr2s" / "FireRedASR2-AED"
     ).resolve()
+    assert not hasattr(paths, "lid")
 
 
 def test_verify_models_lists_missing_components(tmp_path: Path):
@@ -66,6 +67,22 @@ def test_verify_models_accepts_complete_layout(monkeypatch, tmp_path: Path):
 
     assert result.ok is True
     assert result.missing == ()
+
+
+def test_verify_models_does_not_require_firered_lid(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _complete_layout(tmp_path)
+    monkeypatch.setattr(
+        "funasr_transcriber.model_registry._source_head",
+        lambda path, runner=None: FIRERED_COMMIT,
+    )
+
+    result = verify_models(tmp_path)
+
+    assert result.ok is True
+    assert "firered_lid" not in result.missing
 
 
 def test_verify_models_rejects_wrong_firered_commit(monkeypatch, tmp_path: Path):

@@ -119,6 +119,19 @@ def test_client_status_reuses_existing_worker(tmp_path: Path):
     assert status == {"models": ["vad"]}
 
 
+def test_client_passes_segment_batch_size_to_worker(tmp_path: Path):
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable),
+        model_root=tmp_path / "models",
+        device="cuda:0",
+        timeout_seconds=1.0,
+        stderr_log_path=tmp_path / "worker.log",
+        segment_batch_size=4,
+    )
+
+    assert client._command()[-2:] == ["--segment-batch-size", "4"]
+
+
 @pytest.mark.parametrize(
     ("mode", "message"),
     (

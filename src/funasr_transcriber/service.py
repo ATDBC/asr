@@ -577,6 +577,7 @@ class ServiceJobRunner:
             device="cuda:0",
             timeout_seconds=self.config.asr.timeout_seconds,
             stderr_log_path=job_dir / "overlap-firered-worker.log",
+            segment_batch_size=self.config.asr.segment_batch_size,
         )
 
     def _owned_pid_getters(self) -> dict[str, Callable[[], int | None]]:
@@ -820,6 +821,7 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             device="cuda:0",
             timeout_seconds=config.asr.timeout_seconds,
             stderr_log_path=paths.directory / "firered-worker.log",
+            segment_batch_size=config.asr.segment_batch_size,
         )
 
     def gpu_check() -> None:

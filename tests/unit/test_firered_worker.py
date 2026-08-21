@@ -3,10 +3,16 @@ from __future__ import annotations
 from io import StringIO
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from funasr_transcriber.firered_worker import AudioInfo, GuardedVad, serve
+from funasr_transcriber.firered_worker import (
+    AudioInfo,
+    GuardedVad,
+    firered_inventory,
+    serve,
+)
 
 
 def _official(path: Path) -> dict[str, object]:
@@ -39,6 +45,27 @@ class FakeSystem:
     def process(self, path: str, uttid: str):
         self.calls.append((path, uttid))
         return self.result
+
+
+class EmptyModule:
+    def parameters(self):
+        return ()
+
+    def buffers(self):
+        return ()
+
+
+def test_firered_inventory_excludes_lid_module():
+    module = EmptyModule()
+    system = SimpleNamespace(
+        vad=SimpleNamespace(vad_model=module),
+        asr=SimpleNamespace(model=module),
+        punc=SimpleNamespace(model=module),
+    )
+
+    inventory = firered_inventory(system)
+
+    assert set(inventory["modules"]) == {"vad", "asr", "punc"}
 
 
 def _request(identifier: str, action: str, path: Path | None = None) -> str:

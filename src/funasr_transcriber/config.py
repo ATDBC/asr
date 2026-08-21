@@ -26,7 +26,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "asr": {
         "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
         "timeout_seconds": 1800,
-        "lid_warning_confidence": 0.80,
+        "segment_batch_size": 1,
     },
     "diarization": {
         "speaker_count": "auto",
@@ -86,7 +86,7 @@ class PathConfig:
 class AsrConfig:
     worker_python: Path
     timeout_seconds: int
-    lid_warning_confidence: float
+    segment_batch_size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,9 +228,7 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
                 values["asr"]["worker_python"]
             ).expanduser(),
             timeout_seconds=int(values["asr"]["timeout_seconds"]),
-            lid_warning_confidence=float(
-                values["asr"]["lid_warning_confidence"]
-            ),
+            segment_batch_size=int(values["asr"]["segment_batch_size"]),
         ),
         diarization=DiarizationConfig(
             speaker_count=speaker_count,
@@ -288,8 +286,8 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("max_audio_seconds must be 7200 in version 1")
     if config.asr.timeout_seconds <= 0:
         raise ValueError("ASR timeout_seconds must be positive")
-    if not 0.0 <= config.asr.lid_warning_confidence <= 1.0:
-        raise ValueError("ASR lid_warning_confidence must stay within 0..1")
+    if config.asr.segment_batch_size <= 0:
+        raise ValueError("ASR segment_batch_size must be positive")
     diarization = config.diarization
     if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
         raise ValueError("min_speakers/max_speakers must stay within 1..10")

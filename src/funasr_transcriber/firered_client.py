@@ -68,6 +68,7 @@ class FireRedWorkerClient:
         timeout_seconds: float,
         stderr_log_path: Path,
         worker_script: Path | None = None,
+        segment_batch_size: int = 1,
     ):
         self.worker_python = Path(worker_python)
         self.model_root = Path(model_root)
@@ -77,6 +78,7 @@ class FireRedWorkerClient:
         self.worker_script = (
             Path(worker_script) if worker_script is not None else None
         )
+        self.segment_batch_size = int(segment_batch_size)
         self._process: subprocess.Popen[str] | None = None
         self._selector: selectors.BaseSelector | None = None
         self._stderr: IO[str] | None = None
@@ -100,6 +102,8 @@ class FireRedWorkerClient:
             str(self.model_root.expanduser().resolve()),
             "--device",
             self.device,
+            "--segment-batch-size",
+            str(self.segment_batch_size),
         ]
 
     def start(self) -> "FireRedWorkerClient":
@@ -107,6 +111,8 @@ class FireRedWorkerClient:
             return self
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if self.segment_batch_size <= 0:
+            raise ValueError("segment_batch_size must be positive")
         self.stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._stderr = self.stderr_log_path.open(
             "a",

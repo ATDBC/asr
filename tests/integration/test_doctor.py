@@ -106,7 +106,7 @@ def test_doctor_checks_asr_virtual_environment(monkeypatch, tmp_path: Path):
     ("missing", "message"),
     [
         (("firered_source_commit",), "firered_source_commit"),
-        (("firered_lid",), "firered_lid"),
+        (("firered_aed",), "firered_aed"),
     ],
 )
 def test_doctor_rejects_invalid_firered_assets(

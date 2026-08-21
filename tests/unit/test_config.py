@@ -98,20 +98,24 @@ def test_default_asr_worker_configuration():
         "/opt/funasr-transcriber/.venv-asr/bin/python"
     )
     assert config.asr.timeout_seconds == 1800
-    assert config.asr.lid_warning_confidence == 0.80
+    assert config.asr.segment_batch_size == 1
 
 
 @pytest.mark.parametrize(
-    "setting",
+    ("setting", "message"),
     (
-        "timeout_seconds = 0",
-        "lid_warning_confidence = -0.1",
-        "lid_warning_confidence = 1.1",
+        ("timeout_seconds = 0", "ASR timeout_seconds"),
+        ("segment_batch_size = 0", "ASR segment_batch_size"),
+        ("segment_batch_size = -1", "ASR segment_batch_size"),
     ),
 )
-def test_asr_config_rejects_invalid_limits(tmp_path: Path, setting: str):
+def test_asr_config_rejects_invalid_limits(
+    tmp_path: Path,
+    setting: str,
+    message: str,
+):
     path = tmp_path / "config.toml"
     path.write_text(f"[asr]\n{setting}\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="ASR"):
+    with pytest.raises(ValueError, match=message):
         load_config(path)

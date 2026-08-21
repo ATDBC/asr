@@ -26,7 +26,7 @@ class AudioInfo:
 
 class FireRedSystem(Protocol):
     def process(self, path: str, uttid: str) -> dict[str, object]:
-        """Run the complete VAD, LID, AED, and punctuation path."""
+        """Run the complete VAD, AED, and punctuation path."""
 
 
 class GuardedVad:
@@ -124,7 +124,6 @@ def firered_inventory(system: FireRedSystem) -> dict[str, object]:
 
     owners = (
         ("vad", "vad_model"),
-        ("lid", "model"),
         ("asr", "model"),
         ("punc", "model"),
     )
@@ -229,13 +228,16 @@ def serve(
             )
 
 
-def build_firered_system(model_root: Path, device: str) -> FireRedSystem:
-    """Construct the pinned official four-module system in the ASR process."""
+def build_firered_system(
+    model_root: Path,
+    device: str,
+    segment_batch_size: int = 1,
+) -> FireRedSystem:
+    """Construct the pinned official three-module system in the ASR process."""
 
     import torch
     from fireredasr2s import FireRedAsr2System, FireRedAsr2SystemConfig
     from fireredasr2s.fireredasr2 import FireRedAsr2Config
-    from fireredasr2s.fireredlid import FireRedLidConfig
     from fireredasr2s.fireredpunc import FireRedPuncConfig
     from fireredasr2s.fireredvad import FireRedVadConfig
 
@@ -247,12 +249,13 @@ def build_firered_system(model_root: Path, device: str) -> FireRedSystem:
         raise ValueError(f"invalid CUDA device: {device}") from exc
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable in the FireRed environment")
+    if segment_batch_size <= 0:
+        raise ValueError("segment_batch_size must be positive")
     torch.cuda.set_device(device_index)
 
     root = Path(model_root).expanduser().resolve() / "fireredasr2s"
     config = FireRedAsr2SystemConfig(
         vad_model_dir=str(root / "FireRedVAD" / "VAD"),
-        lid_model_dir=str(root / "FireRedLID"),
         asr_type="aed",
         asr_model_dir=str(root / "FireRedASR2-AED"),
         punc_model_dir=str(root / "FireRedPunc"),
@@ -267,7 +270,6 @@ def build_firered_system(model_root: Path, device: str) -> FireRedSystem:
             extend_speech_frame=0,
             chunk_max_frame=30000,
         ),
-        lid_config=FireRedLidConfig(use_gpu=True, use_half=False),
         asr_config=FireRedAsr2Config(
             use_gpu=True,
             use_half=False,
@@ -280,10 +282,10 @@ def build_firered_system(model_root: Path, device: str) -> FireRedSystem:
             return_timestamp=True,
         ),
         punc_config=FireRedPuncConfig(use_gpu=True),
-        asr_batch_size=1,
-        punc_batch_size=1,
+        asr_batch_size=segment_batch_size,
+        punc_batch_size=segment_batch_size,
         enable_vad=True,
-        enable_lid=True,
+        enable_lid=False,
         enable_punc=True,
     )
     system = FireRedAsr2System(config)
@@ -295,7 +297,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-root", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--segment-batch-size", type=_positive_int, default=1)
     return parser
+
+
+def _positive_int(value: str) -> int:
+    result = int(value)
+    if result <= 0:
+        raise argparse.ArgumentTypeError("segment batch size must be positive")
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -309,7 +319,11 @@ def main(argv: list[str] | None = None) -> int:
     serve(
         sys.stdin,
         protocol_output,
-        lambda: build_firered_system(args.model_root, args.device),
+        lambda: build_firered_system(
+            args.model_root,
+            args.device,
+            args.segment_batch_size,
+        ),
         peak_sampler=_peak_gpu_bytes,
     )
     return 0

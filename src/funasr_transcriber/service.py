@@ -17,9 +17,25 @@ from typing import Any, Callable
 from .audio import normalize_audio, probe_audio
 from .config import AppConfig, load_config
 from .diagnostics import export_diagnostics
-from .errors import OutputError, TranscriberError, TranscriptionError
+from .errors import (
+    EnvironmentError as TranscriberEnvironmentError,
+    OutputError,
+    TranscriberError,
+    TranscriptionError,
+)
 from .exporters import export_transcript, publish_output_directory
-from .gpu import require_concurrent_gpu_capacity
+from .gpu import (
+    build_gpu_stage_record,
+    query_gpu,
+    require_concurrent_gpu_capacity,
+)
+from .overlap import (
+    JsonOverlapWorkerClient,
+    OverlapEnhancement,
+    OverlapPreparation,
+    SubprocessOverlapPreparer,
+    apply_prepared_overlap,
+)
 from .pipeline import TranscriptionPipeline, attribute_primary
 from .service_protocol import (
     ServiceBusyError,
@@ -420,15 +436,134 @@ class ServiceJobRunner:
         hot_host: HotModelHost,
         probe: Callable[..., Any] = probe_audio,
         normalize: Callable[..., Any] = normalize_audio,
+        overlap_factory: Callable[[Path], Any] | None = None,
+        temporary_diarizer_factory: Callable[[], Any] | None = None,
+        temporary_asr_factory: Callable[[Path], Any] | None = None,
+        gpu_sampler: Callable[[str], Any] | None = query_gpu,
     ):
         self.config = config
         self.hot_host = hot_host
         self._probe = probe
         self._normalize = normalize
+        self._overlap_factory = overlap_factory or self._default_overlap_factory
+        self._temporary_diarizer_factory = (
+            temporary_diarizer_factory or self._default_temporary_diarizer
+        )
+        self._temporary_asr_factory = (
+            temporary_asr_factory or self._default_temporary_asr
+        )
+        self._gpu_sampler = gpu_sampler
 
     @staticmethod
     def _staging_output_dir(output_dir: Path, request_id: str) -> Path:
         return output_dir.with_name(f".{output_dir.name}.staging-{request_id}")
+
+    def _default_overlap_factory(self, job_dir: Path) -> SubprocessOverlapPreparer:
+        worker = JsonOverlapWorkerClient(
+            worker_python=self.config.overlap.worker_python,
+            worker_script=Path(__file__).with_name("overlap_worker.py"),
+            work_dir=job_dir / "overlap-requests",
+            timeout_seconds=self.config.overlap.timeout_seconds,
+        )
+        return SubprocessOverlapPreparer(
+            worker=worker,
+            diarizer=None,
+            min_score=self.config.overlap.speaker_match_min_score,
+            min_margin=self.config.overlap.speaker_match_min_margin,
+            min_rms=self.config.overlap.track_min_rms,
+            detector_model=self.config.overlap.detector_model,
+            hf_token_env=self.config.overlap.hf_token_env,
+            device="cuda:0",
+            output_dir=job_dir / "overlap-output",
+            cache_dir=Path(self.config.paths.model_dir) / "huggingface",
+        )
+
+    def _default_temporary_diarizer(self) -> Any:
+        from .speaker_diarization import SpeakerDiarizer
+
+        return SpeakerDiarizer.from_config(self.config)
+
+    def _default_temporary_asr(self, job_dir: Path) -> Any:
+        from .firered_client import FireRedWorkerClient
+
+        return FireRedWorkerClient(
+            worker_python=self.config.asr.worker_python,
+            model_root=self.config.paths.model_dir,
+            device="cuda:0",
+            timeout_seconds=self.config.asr.timeout_seconds,
+            stderr_log_path=job_dir / "overlap-firered-worker.log",
+        )
+
+    def _run_overlap_enhancement(
+        self,
+        normalized: Path,
+        attributed: tuple[Any, ...],
+        speaker_segments: tuple[SpeakerSegment, ...],
+        job_dir: Path,
+        diagnostics: Any,
+    ) -> OverlapEnhancement:
+        speaker_owner = self.hot_host.speaker_owner
+        if speaker_owner is None:
+            raise TranscriptionError("resident speaker owner is unavailable")
+        centroid_provider = getattr(speaker_owner, "speaker_centroids", None)
+        if not callable(centroid_provider):
+            raise TranscriptionError("resident speaker owner cannot build centroids")
+        centroids = centroid_provider(normalized, speaker_segments)
+        before_release = (
+            self._gpu_sampler("cuda:0") if self._gpu_sampler is not None else None
+        )
+        self.hot_host.close()
+        try:
+            if before_release is not None and self._gpu_sampler is not None:
+                after_release = self._gpu_sampler("cuda:0")
+                release_record = build_gpu_stage_record(
+                    before_release,
+                    after_release,
+                    peak_gpu_bytes=None,
+                    load_seconds=None,
+                    inference_seconds=None,
+                )
+                diagnostics.gpu_stages["hot_release_for_overlap"] = release_record
+                if release_record["released"] is not True:
+                    raise TranscriberEnvironmentError(
+                        "resident models did not release GPU memory for overlap"
+                    )
+            preparer = self._overlap_factory(job_dir)
+            separated = preparer.detect_and_separate(normalized)
+            temporary_diarizer = _create_and_open(
+                self._temporary_diarizer_factory
+            )
+            try:
+                preparation: OverlapPreparation = preparer.match_tracks(
+                    separated,
+                    centroids,
+                    temporary_diarizer,
+                )
+            finally:
+                _close_owner(temporary_diarizer)
+            if not any(window.tracks for window in preparation.windows):
+                return apply_prepared_overlap(
+                    preparation,
+                    attributed,
+                    _NoTrackAsr(),
+                    self.config.overlap.speaker_match_min_score,
+                    self.config.overlap.speaker_match_min_margin,
+                )
+            temporary_asr = _create_and_open(
+                lambda: self._temporary_asr_factory(job_dir)
+            )
+            try:
+                return apply_prepared_overlap(
+                    preparation,
+                    attributed,
+                    temporary_asr,
+                    self.config.overlap.speaker_match_min_score,
+                    self.config.overlap.speaker_match_min_margin,
+                )
+            finally:
+                _close_owner(temporary_asr)
+        finally:
+            self.hot_host.start()
 
     def run(self, request: ServiceRequest) -> dict[str, object]:
         if request.action != "submit":
@@ -479,11 +614,23 @@ class ServiceJobRunner:
                     branches.speaker_segments,
                     self.config,
                 )
+            enhancement = (
+                self._run_overlap_enhancement(
+                    normalized,
+                    attributed,
+                    branches.speaker_segments,
+                    job_dir,
+                    diagnostics,
+                )
+                if request.overlap_enabled
+                else None
+            )
             result = pipeline.finish(
                 branches.asr_result,
                 attributed,
                 branches.speaker_segments,
                 diagnostics,
+                overlap_enhancement=enhancement,
             )
             export_transcript(
                 result.transcript,
@@ -505,6 +652,13 @@ class ServiceJobRunner:
             shutil.rmtree(staging_dir, ignore_errors=True)
             if not request.keep_intermediate:
                 shutil.rmtree(job_dir, ignore_errors=True)
+
+
+class _NoTrackAsr:
+    """The overlap applier never calls ASR when no matched track exists."""
+
+    def transcribe(self, path: Path) -> AsrResult:
+        raise AssertionError("overlap ASR must not run without matched tracks")
 
 
 def _require_physical_gpu_zero(config: AppConfig) -> None:

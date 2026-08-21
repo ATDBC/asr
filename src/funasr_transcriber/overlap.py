@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 import uuid
 
 import numpy as np
@@ -81,7 +81,13 @@ class JsonOverlapWorkerClient:
         self.work_dir = Path(work_dir)
         self.timeout_seconds = timeout_seconds
 
-    def call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def call(
+        self,
+        action: str,
+        payload: dict[str, Any],
+        on_started: Callable[[int], None] | None = None,
+        on_finished: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
         if action not in {"detect", "separate", "download", "verify"}:
             raise ValueError(f"unsupported overlap action: {action}")
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -102,26 +108,33 @@ class JsonOverlapWorkerClient:
             str(self.worker_script),
             str(request_path),
         ]
+        process = subprocess.Popen(
+            command,
+            cwd=str(self.work_dir),
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": "0"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if on_started is not None:
+            on_started(process.pid)
         try:
-            completed = subprocess.run(
-                command,
-                cwd=str(self.work_dir),
-                env={**os.environ, "CUDA_VISIBLE_DEVICES": "0"},
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout_seconds,
-                check=False,
-            )
+            _, stderr = process.communicate(timeout=self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.communicate()
             raise OverlapWorkerError(
                 f"overlap worker timed out after {self.timeout_seconds} seconds"
             ) from exc
+        finally:
+            if on_finished is not None:
+                on_finished(process.pid)
         if not result_path.is_file():
             raise OverlapWorkerError(
                 "overlap worker did not write a result file: "
-                f"exit={completed.returncode}, stderr={completed.stderr.strip()}"
+                f"exit={process.returncode}, stderr={stderr.strip()}"
             )
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -129,7 +142,7 @@ class JsonOverlapWorkerClient:
             raise OverlapWorkerError(
                 "overlap worker wrote invalid JSON"
             ) from exc
-        if completed.returncode != 0 or not result.get("ok"):
+        if process.returncode != 0 or not result.get("ok"):
             raise OverlapWorkerError(
                 str(result.get("error") or "overlap worker failed")
             )
@@ -188,11 +201,19 @@ class OverlapPreparation:
     warnings: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SeparatedOverlap:
+    """Validated detector/separator output with no speaker-model ownership."""
+
+    windows: tuple[dict[str, Any], ...]
+    warnings: tuple[str, ...]
+
+
 class SubprocessOverlapPreparer:
     def __init__(
         self,
         worker: WorkerClient,
-        diarizer: TrackDiarizer,
+        diarizer: TrackDiarizer | None,
         min_score: float,
         min_margin: float,
         min_rms: float,
@@ -242,11 +263,9 @@ class SubprocessOverlapPreparer:
         second_score = scores[1][1] if len(scores) > 1 else -1.0
         return best_speaker, best_score, best_score - second_score
 
-    def prepare(
-        self,
-        audio_path: Path,
-        speaker_segments: tuple[SpeakerSegment, ...],
-    ) -> OverlapPreparation:
+    def detect_and_separate(self, audio_path: Path) -> SeparatedOverlap:
+        """Run only pyannote/ClearVoice, with no 3D-Speaker reference."""
+
         try:
             detected = self.worker.call(
                 "detect",
@@ -263,13 +282,13 @@ class SubprocessOverlapPreparer:
                 },
             )
         except Exception as exc:
-            return OverlapPreparation(
+            return SeparatedOverlap(
                 (),
                 (f"overlap detection unavailable: {exc}",),
             )
         windows = detected.get("windows") or []
         if not windows:
-            return OverlapPreparation((), ())
+            return SeparatedOverlap((), ())
         try:
             separated = self.worker.call(
                 "separate",
@@ -285,29 +304,52 @@ class SubprocessOverlapPreparer:
                     ),
                 },
             )
-            centroids = self.diarizer.speaker_centroids(
-                audio_path,
-                speaker_segments,
-            )
         except Exception as exc:
-            return OverlapPreparation(
+            return SeparatedOverlap(
                 (),
                 (f"overlap separation unavailable: {exc}",),
             )
+        raw_windows = separated.get("windows") or []
+        if not isinstance(raw_windows, list):
+            return SeparatedOverlap(
+                (),
+                ("overlap separation unavailable: worker returned invalid windows",),
+            )
+        return SeparatedOverlap(
+            windows=tuple(
+                item for item in raw_windows if isinstance(item, dict)
+            ),
+            warnings=(),
+        )
 
-        warnings: list[str] = []
+    def match_tracks(
+        self,
+        separated: SeparatedOverlap,
+        centroids: dict[int, np.ndarray],
+        track_diarizer: TrackDiarizer,
+    ) -> OverlapPreparation:
+        """Match already-separated tracks using a temporary 3D-Speaker."""
+
         prepared_windows: list[PreparedWindow] = []
-        for window in separated.get("windows") or []:
-            start_ms = int(window["start_ms"])
-            end_ms = int(window["end_ms"])
+        for window in separated.windows:
+            try:
+                start_ms = int(window["start_ms"])
+                end_ms = int(window["end_ms"])
+            except (KeyError, TypeError, ValueError):
+                continue
             prepared_tracks: list[PreparedTrack] = []
             for track in window.get("tracks") or []:
-                track_path = Path(track["path"])
-                rms = float(track.get("rms", 0.0))
+                if not isinstance(track, dict):
+                    continue
+                try:
+                    track_path = Path(track["path"])
+                    rms = float(track.get("rms", 0.0))
+                except (KeyError, TypeError, ValueError):
+                    continue
                 if rms < self.min_rms:
                     continue
                 try:
-                    embedding = self.diarizer.embedding_for_audio(track_path)
+                    embedding = track_diarizer.embedding_for_audio(track_path)
                     speaker, score, margin = self._match_speaker(
                         embedding,
                         centroids,
@@ -335,8 +377,31 @@ class SubprocessOverlapPreparer:
             )
         return OverlapPreparation(
             windows=tuple(prepared_windows),
-            warnings=tuple(warnings),
+            warnings=separated.warnings,
         )
+
+    def prepare(
+        self,
+        audio_path: Path,
+        speaker_segments: tuple[SpeakerSegment, ...],
+    ) -> OverlapPreparation:
+        """Compatibility path for legacy callers owning one diarizer."""
+
+        if self.diarizer is None:
+            raise ValueError("prepare requires a diarizer")
+        separated = self.detect_and_separate(audio_path)
+        try:
+            centroids = self.diarizer.speaker_centroids(
+                audio_path,
+                speaker_segments,
+            )
+        except Exception as exc:
+            return OverlapPreparation(
+                (),
+                separated.warnings
+                + (f"overlap speaker matching unavailable: {exc}",),
+            )
+        return self.match_tracks(separated, centroids, self.diarizer)
 
 
 def apply_prepared_overlap(

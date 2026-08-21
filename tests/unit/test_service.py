@@ -28,6 +28,12 @@ from funasr_transcriber.service_protocol import (
     ServicePaths,
     ServiceRequest,
 )
+from funasr_transcriber.overlap import (
+    OverlapPreparation,
+    PreparedTrack,
+    PreparedWindow,
+    SeparatedOverlap,
+)
 
 
 def _result() -> AsrResult:
@@ -306,3 +312,127 @@ def test_daemon_module_loads_config_and_delegates_to_runner(
 
     assert service_module.main(["--config", str(tmp_path / "config.toml")]) == 0
     assert received == [config]
+
+
+def test_overlap_job_evicts_hot_owners_before_temporary_models(
+    tmp_path: Path,
+):
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    track_one = tmp_path / "track-one.wav"
+    track_two = tmp_path / "track-two.wav"
+    track_one.write_bytes(b"one")
+    track_two.write_bytes(b"two")
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+    events: list[str] = []
+
+    class ResidentAsr:
+        def transcribe(self, path):
+            return _result()
+
+    class ResidentSpeaker:
+        def diarize(self, path):
+            return (SpeakerSegment(1, 0, 600),)
+
+        def speaker_centroids(self, path, segments):
+            events.append("hot:centroids")
+            return {1: object(), 2: object()}
+
+    class HotHost:
+        def __init__(self):
+            self.started = True
+            self.asr_owner = ResidentAsr()
+            self.speaker_owner = ResidentSpeaker()
+
+        def close(self):
+            events.append("hot:close")
+            self.started = False
+            self.asr_owner = None
+            self.speaker_owner = None
+
+        def start(self):
+            events.append("hot:start")
+            self.started = True
+            return self
+
+    class Preparer:
+        def detect_and_separate(self, path):
+            events.append("overlap:detect")
+            return SeparatedOverlap(({},), ())
+
+        def match_tracks(self, separated, centroids, diarizer):
+            events.append("overlap:match")
+            return OverlapPreparation(
+                (
+                    PreparedWindow(
+                        "w1",
+                        0,
+                        600,
+                        (
+                            PreparedTrack(track_one, 1, 0.9, 0.2, 0.1),
+                            PreparedTrack(track_two, 2, 0.9, 0.2, 0.1),
+                        ),
+                    ),
+                ),
+                (),
+            )
+
+    class TemporarySpeaker:
+        def __init__(self):
+            events.append("temporary:speaker")
+
+        def close(self):
+            events.append("temporary:speaker-close")
+
+    class TemporaryAsr:
+        def __init__(self):
+            events.append("temporary:asr")
+
+        def transcribe(self, path):
+            text = "甲。" if Path(path) == track_one else "乙。"
+            return AsrResult(
+                text,
+                (TimedToken(text, 0, 500, 0.9),),
+                sentences=(
+                    RecognizedSentence(text, 0, 500, "zh mandarin", 0.99, 0.9),
+                ),
+                vad_segments_ms=((0, 500),),
+                duration_ms=600,
+            )
+
+        def close(self):
+            events.append("temporary:asr-close")
+
+    def normalize(source_path, destination, max_seconds):
+        destination.write_bytes(b"normalized")
+
+    runner = ServiceJobRunner(
+        config,
+        hot_host=HotHost(),
+        probe=lambda path, max_seconds: AudioInfo(
+            Path(path), 600, 16000, 1, "wav"
+        ),
+        normalize=normalize,
+        overlap_factory=lambda job_dir: Preparer(),
+        temporary_diarizer_factory=TemporarySpeaker,
+        temporary_asr_factory=lambda job_dir: TemporaryAsr(),
+        gpu_sampler=None,
+    )
+
+    runner.run(
+        ServiceRequest(
+            identifier="overlap",
+            action="submit",
+            input_audio=source,
+            output_dir=tmp_path / "output",
+            config_fingerprint="test-fingerprint",
+            overlap_enabled=True,
+        )
+    )
+
+    assert events.index("hot:close") < events.index("overlap:detect")
+    assert events.index("overlap:detect") < events.index("temporary:speaker")
+    assert events.index("temporary:speaker-close") < events.index("temporary:asr")
+    assert events[-1] == "hot:start"

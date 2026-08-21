@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from funasr_transcriber.overlap import (
+    SeparatedOverlap,
     SubprocessOverlapPreparer,
     accept_separated_window,
     apply_prepared_overlap,
@@ -199,6 +200,57 @@ def test_overlap_preparation_does_not_run_asr(tmp_path: Path):
     assert len(preparation.windows) == 1
     assert [track.speaker_id for track in preparation.windows[0].tracks] == [1, 2]
     assert preparation.warnings == ()
+
+
+def test_detect_and_separate_can_finish_before_temporary_speaker_matching(
+    tmp_path: Path,
+):
+    track = tmp_path / "track.wav"
+    track.write_bytes(b"track")
+    calls = []
+
+    class Worker:
+        def call(self, action, payload):
+            calls.append(action)
+            if action == "detect":
+                return {
+                    "ok": True,
+                    "windows": [{"id": "w1", "start_ms": 0, "end_ms": 100}],
+                }
+            return {
+                "ok": True,
+                "windows": [
+                    {
+                        "id": "w1",
+                        "start_ms": 0,
+                        "end_ms": 100,
+                        "tracks": [{"path": str(track), "rms": 0.1}],
+                    }
+                ],
+            }
+
+    class Diarizer:
+        def embedding_for_audio(self, path):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    preparer = SubprocessOverlapPreparer(
+        worker=Worker(),
+        diarizer=None,
+        min_score=0.6,
+        min_margin=0.08,
+        min_rms=0.001,
+    )
+
+    separated = preparer.detect_and_separate(tmp_path / "source.wav")
+    preparation = preparer.match_tracks(
+        separated,
+        {1: np.array([1.0, 0.0], dtype="float32")},
+        Diarizer(),
+    )
+
+    assert isinstance(separated, SeparatedOverlap)
+    assert calls == ["detect", "separate"]
+    assert preparation.windows[0].tracks[0].speaker_id == 1
 
 
 def test_apply_replaces_window_only_after_two_tracks_pass(tmp_path: Path):

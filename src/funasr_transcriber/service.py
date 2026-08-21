@@ -2,19 +2,33 @@
 
 from __future__ import annotations
 
+import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import queue
+import shutil
 import socketserver
+import sys
 import threading
 from typing import Any, Callable
 
+from .audio import normalize_audio, probe_audio
+from .config import AppConfig, load_config
+from .diagnostics import export_diagnostics
+from .errors import OutputError, TranscriberError, TranscriptionError
+from .exporters import export_transcript, publish_output_directory
+from .gpu import require_concurrent_gpu_capacity
+from .pipeline import TranscriptionPipeline, attribute_primary
 from .service_protocol import (
     ServiceBusyError,
     ServicePaths,
     ServiceProtocolError,
     ServiceRequest,
+    ServiceState,
+    ServiceStateStore,
+    config_fingerprint,
     encode_message,
     parse_request,
     read_message,
@@ -327,10 +341,12 @@ class ServiceSocketServer:
         paths: ServicePaths,
         daemon: DaemonService,
         config_fingerprint: str,
+        remove_socket_on_close: bool = True,
     ):
         self.paths = paths
         self.daemon = daemon
         self.config_fingerprint = str(config_fingerprint)
+        self._remove_socket_on_close = remove_socket_on_close
         self._server: _ThreadingUnixStreamServer | None = None
         self._thread: threading.Thread | None = None
         self._watcher: threading.Thread | None = None
@@ -391,4 +407,214 @@ class ServiceSocketServer:
             server.server_close()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1)
-        self.paths.socket.unlink(missing_ok=True)
+        if self._remove_socket_on_close:
+            self.paths.socket.unlink(missing_ok=True)
+
+
+class ServiceJobRunner:
+    """Run one queued request against the daemon's resident normal owners."""
+
+    def __init__(
+        self,
+        config: Any,
+        hot_host: HotModelHost,
+        probe: Callable[..., Any] = probe_audio,
+        normalize: Callable[..., Any] = normalize_audio,
+    ):
+        self.config = config
+        self.hot_host = hot_host
+        self._probe = probe
+        self._normalize = normalize
+
+    @staticmethod
+    def _staging_output_dir(output_dir: Path, request_id: str) -> Path:
+        return output_dir.with_name(f".{output_dir.name}.staging-{request_id}")
+
+    def run(self, request: ServiceRequest) -> dict[str, object]:
+        if request.action != "submit":
+            raise ValueError("service job runner requires a submit request")
+        if request.input_audio is None or request.output_dir is None:
+            raise ValueError("submit request is missing audio or output path")
+        input_audio = Path(request.input_audio).expanduser().resolve()
+        output_dir = Path(request.output_dir).expanduser().resolve()
+        if output_dir.exists() and not request.overwrite:
+            raise OutputError(f"output already exists: {output_dir}")
+        work_dir = Path(self.config.paths.work_dir).expanduser().resolve()
+        job_dir = work_dir / f"job-{request.identifier}"
+        staging_dir = self._staging_output_dir(output_dir, request.identifier)
+        if job_dir.exists():
+            raise OutputError(f"service job directory already exists: {job_dir}")
+        job_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            input_info = self._probe(
+                input_audio,
+                self.config.general.max_audio_seconds,
+            )
+            normalized = job_dir / "normalized.wav"
+            self._normalize(
+                input_audio,
+                normalized,
+                self.config.general.max_audio_seconds,
+            )
+            if not self.hot_host.started:
+                self.hot_host.start()
+            asr_owner = self.hot_host.asr_owner
+            speaker_owner = self.hot_host.speaker_owner
+            if asr_owner is None or speaker_owner is None:
+                raise TranscriptionError("resident model owners are unavailable")
+            pipeline = TranscriptionPipeline(self.config)
+            diagnostics = pipeline.new_diagnostics()
+            with diagnostics.stage("normal_model_branches"):
+                branches = run_normal_branches(
+                    normalized,
+                    asr_owner,
+                    speaker_owner,
+                    profile_enabled=request.profile_resources,
+                )
+            if not branches.speaker_segments:
+                raise TranscriptionError("speaker diarization returned no segments")
+            with diagnostics.stage("alignment"):
+                attributed = attribute_primary(
+                    branches.asr_result,
+                    branches.speaker_segments,
+                    self.config,
+                )
+            result = pipeline.finish(
+                branches.asr_result,
+                attributed,
+                branches.speaker_segments,
+                diagnostics,
+            )
+            export_transcript(
+                result.transcript,
+                staging_dir,
+                overwrite=False,
+                input_info=input_info,
+            )
+            export_diagnostics(result.diagnostics, staging_dir, overwrite=False)
+            try:
+                published = publish_output_directory(
+                    staging_dir,
+                    output_dir,
+                    overwrite=request.overwrite,
+                )
+            except OSError as exc:
+                raise OutputError(f"unable to publish output: {exc}") from exc
+            return {"output_dir": str(published)}
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            if not request.keep_intermediate:
+                shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def _require_physical_gpu_zero(config: AppConfig) -> None:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    first_visible = visible.split(",", 1)[0].strip() if visible else "0"
+    if config.general.device != "cuda:0" or first_visible != "0":
+        raise ServiceProtocolError(
+            "service is restricted to physical GPU 0; "
+            f"device={config.general.device}, CUDA_VISIBLE_DEVICES={visible!r}"
+        )
+
+
+def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost:
+    """Construct the only persistent FireRed and 3D-Speaker owners."""
+
+    from .firered_client import FireRedWorkerClient
+    from .speaker_diarization import SpeakerDiarizer
+
+    def asr_factory() -> FireRedWorkerClient:
+        return FireRedWorkerClient(
+            worker_python=config.asr.worker_python,
+            model_root=config.paths.model_dir,
+            device="cuda:0",
+            timeout_seconds=config.asr.timeout_seconds,
+            stderr_log_path=paths.directory / "firered-worker.log",
+        )
+
+    def gpu_check() -> None:
+        require_concurrent_gpu_capacity(
+            "cuda:0",
+            minimum_total_mib=config.service.minimum_total_mib,
+            required_free_mib=config.service.minimum_free_mib,
+        )
+
+    return HotModelHost(
+        asr_factory=asr_factory,
+        diarizer_factory=lambda: SpeakerDiarizer.from_config(config),
+        gpu_check=gpu_check,
+    )
+
+
+def run_daemon(config: AppConfig) -> None:
+    """Own resident models until the local service has drained and stopped."""
+
+    _require_physical_gpu_zero(config)
+    paths = ServicePaths.from_work_dir(config.paths.work_dir)
+    fingerprint = config_fingerprint(config)
+    state_store = ServiceStateStore(paths)
+    existing = state_store.require_compatible(fingerprint)
+    if existing is not None:
+        raise ServiceProtocolError(
+            f"a compatible local service is already running: pid={existing.pid}"
+        )
+    hot_host: HotModelHost | None = None
+    server: ServiceSocketServer | None = None
+    wrote_state = False
+    try:
+        hot_host = build_hot_model_host(config, paths)
+        hot_host.start()
+        runner = ServiceJobRunner(config, hot_host)
+        daemon = DaemonService(config.service.queue_limit, runner.run)
+        server = ServiceSocketServer(
+            paths,
+            daemon,
+            fingerprint,
+            remove_socket_on_close=False,
+        )
+        server.start()
+        state_store.write(
+            ServiceState(
+                pid=os.getpid(),
+                protocol_version=1,
+                config_fingerprint=fingerprint,
+            )
+        )
+        wrote_state = True
+        daemon.wait_stopped()
+    finally:
+        if server is not None:
+            server.close()
+        if hot_host is not None:
+            hot_host.close()
+        if wrote_state:
+            state = state_store.read()
+            if state is not None and state.pid == os.getpid():
+                paths.socket.unlink(missing_ok=True)
+                paths.state.unlink(missing_ok=True)
+
+
+def _daemon_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m funasr_transcriber.service")
+    parser.add_argument("--config", type=Path)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _daemon_parser()
+    try:
+        args = parser.parse_args(argv)
+        run_daemon(load_config(args.config))
+    except TranscriberError as exc:
+        print(str(exc), file=sys.stderr)
+        return exc.exit_code
+    except (ValueError, FileNotFoundError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

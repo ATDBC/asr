@@ -5,6 +5,8 @@ import threading
 
 import pytest
 
+from funasr_transcriber.audio import AudioInfo
+from funasr_transcriber.config import load_config
 from funasr_transcriber.errors import TranscriptionError
 from funasr_transcriber.schemas import (
     AsrResult,
@@ -15,9 +17,11 @@ from funasr_transcriber.schemas import (
 from funasr_transcriber.service import (
     DaemonService,
     HotModelHost,
+    ServiceJobRunner,
     ServiceSocketServer,
     run_normal_branches,
 )
+import funasr_transcriber.service as service_module
 from funasr_transcriber.service_protocol import (
     ServiceBusyError,
     ServiceClient,
@@ -230,3 +234,75 @@ def test_socket_server_serves_health_submission_and_graceful_stop(
         assert daemon.wait_stopped(timeout=1)
     finally:
         server.close()
+
+
+def test_service_job_runner_exports_normal_job_from_hot_owners(
+    tmp_path: Path,
+):
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+
+    class HotHost:
+        started = True
+        asr_owner = FakeAsr([])
+        speaker_owner = FakeDiarizer([])
+
+    def normalize(source_path, destination, max_seconds):
+        destination.write_bytes(b"normalized")
+        return AudioInfo(
+            path=Path(destination),
+            duration_ms=600,
+            sample_rate=16000,
+            channels=1,
+            codec="pcm_s16le",
+        )
+
+    runner = ServiceJobRunner(
+        config,
+        hot_host=HotHost(),
+        probe=lambda path, max_seconds: AudioInfo(
+            path=Path(path),
+            duration_ms=600,
+            sample_rate=16000,
+            channels=1,
+            codec="wav",
+        ),
+        normalize=normalize,
+    )
+    request = ServiceRequest(
+        identifier="normal",
+        action="submit",
+        input_audio=source,
+        output_dir=tmp_path / "output",
+        config_fingerprint="test-fingerprint",
+    )
+
+    result = runner.run(request)
+
+    output_dir = Path(result["output_dir"])
+    assert output_dir == tmp_path / "output"
+    assert (output_dir / "transcript.txt").read_text(encoding="utf-8")
+    assert (output_dir / "diagnostics.json").is_file()
+    assert not (tmp_path / "work" / "job-normal").exists()
+
+
+def test_daemon_module_loads_config_and_delegates_to_runner(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+    received = []
+    monkeypatch.setattr(service_module, "load_config", lambda path: config)
+    monkeypatch.setattr(
+        service_module,
+        "run_daemon",
+        lambda received_config: received.append(received_config),
+    )
+
+    assert service_module.main(["--config", str(tmp_path / "config.toml")]) == 0
+    assert received == [config]

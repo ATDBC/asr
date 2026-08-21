@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import json
 import logging
 import os
 import shutil
@@ -166,7 +167,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device")
     parser.add_argument("--keep-intermediate", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--disable-overlap", action="store_true")
+    overlap_group = parser.add_mutually_exclusive_group()
+    overlap_group.add_argument("--enable-overlap", action="store_true")
+    overlap_group.add_argument("--disable-overlap", action="store_true")
+    parser.add_argument("--profile-resources", action="store_true")
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -186,6 +190,13 @@ def _doctor_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="funasr-transcribe doctor")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--skip-cuda", action="store_true")
+    return parser
+
+
+def _service_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="funasr-transcribe service")
+    parser.add_argument("action", choices=("status", "stop"))
+    parser.add_argument("--config", type=Path)
     return parser
 
 
@@ -285,135 +296,24 @@ def _run_transcribe(args: argparse.Namespace) -> int:
     if args.device:
         overrides["general.device"] = args.device
     config = load_config(args.config, cli_overrides=overrides)
-    input_path = args.input_audio
-    output_dir = args.output_dir or default_output_dir(input_path)
-    if not args.overwrite and output_dir.exists():
-        raise OutputError(f"output already exists: {output_dir}")
+    response = submit_to_service(args, config)
+    result = response.get("result")
+    if isinstance(result, dict) and isinstance(result.get("output_dir"), str):
+        print(result["output_dir"])
+    return 0
 
-    config.paths.work_dir.mkdir(parents=True, exist_ok=True)
-    request_id = uuid.uuid4().hex
-    job_dir = config.paths.work_dir / f"job-{request_id}"
-    job_dir.mkdir(parents=True, exist_ok=False)
-    staging_dir = staging_output_dir(output_dir, request_id)
-    log_path = job_dir / "transcribe.log"
-    logger = logging.getLogger(f"funasr_transcriber.job.{job_dir.name}")
-    logger.setLevel(getattr(logging, args.log_level))
-    logger.propagate = False
-    handler = logging.FileHandler(log_path, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.addHandler(handler)
 
-    def progress(message: str) -> None:
-        print(message, file=sys.stderr)
-        logger.info(message)
-
-    try:
-        with TaskLock(config.paths.work_dir, input_path):
-            progress("[1/7] probing and normalizing audio")
-            input_info = probe_audio(
-                input_path,
-                config.general.max_audio_seconds,
-            )
-            normalized = job_dir / "normalized.wav"
-            normalize_audio(
-                input_path,
-                normalized,
-                max_seconds=config.general.max_audio_seconds,
-            )
-
-            require_physical_gpu_zero(config.general.device)
-
-            def asr_client_factory(stage: str):
-                return FireRedWorkerClient(
-                    worker_python=config.asr.worker_python,
-                    model_root=config.paths.model_dir,
-                    device="cuda:0",
-                    timeout_seconds=config.asr.timeout_seconds,
-                    stderr_log_path=job_dir / f"{stage}-worker.log",
-                )
-
-            def overlap_preparer_factory(diarizer):
-                worker = JsonOverlapWorkerClient(
-                    worker_python=config.overlap.worker_python,
-                    worker_script=Path(__file__).with_name("overlap_worker.py"),
-                    work_dir=job_dir / "overlap-requests",
-                    timeout_seconds=config.overlap.timeout_seconds,
-                )
-                return SubprocessOverlapPreparer(
-                    worker=worker,
-                    diarizer=diarizer,
-                    min_score=config.overlap.speaker_match_min_score,
-                    min_margin=config.overlap.speaker_match_min_margin,
-                    min_rms=config.overlap.track_min_rms,
-                    detector_model=config.overlap.detector_model,
-                    hf_token_env=config.overlap.hf_token_env,
-                    device=config.general.device,
-                    output_dir=job_dir / "overlap-output",
-                    cache_dir=config.paths.model_dir / "huggingface",
-                )
-
-            def gpu_check(stage: str):
-                progress(f"GPU 0 admission check: {stage}")
-                return require_gpu_capacity("cuda:0")
-
-            def gpu_after(stage, before, owner, diagnostics):
-                after = query_gpu("cuda:0")
-                response = getattr(owner, "last_response", {}) or {}
-                metrics = response.get("metrics") or {}
-                diagnostics.gpu_stages[stage] = build_gpu_stage_record(
-                    before,
-                    after,
-                    peak_gpu_bytes=metrics.get("peak_gpu_bytes"),
-                    load_seconds=metrics.get("load_seconds"),
-                    inference_seconds=metrics.get("inference_seconds"),
-                )
-
-            def export_result(result):
-                progress("[7/7] exporting transcript")
-                export_transcript(
-                    result.transcript,
-                    staging_dir,
-                    overwrite=False,
-                    input_info=input_info,
-                )
-                export_diagnostics(
-                    result.diagnostics,
-                    staging_dir,
-                    overwrite=False,
-                )
-                handler.flush()
-                shutil.copy2(log_path, staging_dir / "transcribe.log")
-                try:
-                    publish_output_directory(
-                        staging_dir,
-                        output_dir,
-                        overwrite=args.overwrite,
-                    )
-                except OSError as exc:
-                    raise OutputError(
-                        f"unable to publish output: {exc}"
-                    ) from exc
-
-            progress("[2/7] running serial GPU model phases")
-            execute_model_phases(
-                normalized,
-                config,
-                overlap_enabled=(
-                    config.overlap.enabled and not args.disable_overlap
-                ),
-                asr_client_factory=asr_client_factory,
-                diarizer_factory=lambda: SpeakerDiarizer.from_config(config),
-                overlap_preparer_factory=overlap_preparer_factory,
-                gpu_check=gpu_check,
-                gpu_after=gpu_after,
-                result_consumer=export_result,
-            )
-    finally:
-        logger.removeHandler(handler)
-        handler.close()
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        if not args.keep_intermediate:
-            shutil.rmtree(job_dir, ignore_errors=True)
+def _run_service(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    paths = ServicePaths.from_work_dir(config.paths.work_dir)
+    client = _service_client(config, paths)
+    identifier = uuid.uuid4().hex
+    response = (
+        client.health(identifier)
+        if args.action == "status"
+        else client.stop_and_wait(identifier)
+    )
+    print(json.dumps(response, ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -503,6 +403,20 @@ def main(
         runner = doctor_runner or _run_doctor
         try:
             return runner(args)
+        except TranscriberError as exc:
+            print(str(exc), file=sys.stderr)
+            return exc.exit_code
+        except (ValueError, FileNotFoundError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    if arguments and arguments[0] == "service":
+        parser = _service_parser()
+        try:
+            args = parser.parse_args(arguments[1:])
+        except SystemExit as exc:
+            return int(exc.code)
+        try:
+            return _run_service(args)
         except TranscriberError as exc:
             print(str(exc), file=sys.stderr)
             return exc.exit_code

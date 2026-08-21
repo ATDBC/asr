@@ -257,3 +257,52 @@ def test_transcribe_client_starts_service_only_when_health_is_unavailable(
     assert calls.count("unlock") == 1
     assert any(item.startswith("launch:") for item in calls)
     assert any(item.startswith("submit:") for item in calls)
+
+
+def test_transcribe_route_submits_to_persistent_service(monkeypatch, tmp_path: Path):
+    audio = tmp_path / "input.wav"
+    audio.write_bytes(b"audio")
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+    received = []
+    monkeypatch.setattr(cli, "load_config", lambda *args, **kwargs: config)
+    monkeypatch.setattr(
+        cli,
+        "submit_to_service",
+        lambda args, received_config: received.append((args, received_config))
+        or {"ok": True, "result": {"output_dir": str(tmp_path / "output")}},
+    )
+    args = SimpleNamespace(
+        input_audio=audio,
+        output_dir=tmp_path / "output",
+        device=None,
+        overwrite=False,
+        keep_intermediate=False,
+        disable_overlap=False,
+        enable_overlap=False,
+        profile_resources=False,
+        config=None,
+    )
+
+    assert cli._run_transcribe(args) == 0
+    assert received == [(args, config)]
+
+
+def test_service_status_uses_local_client(monkeypatch, tmp_path: Path, capsys):
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+
+    class FakeClient:
+        def __init__(self, paths, timeout_seconds):
+            assert paths == cli.ServicePaths.from_work_dir(config.paths.work_dir)
+
+        def health(self, identifier):
+            return {"ok": True, "status": "ready", "terminal": True}
+
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(cli, "ServiceClient", FakeClient)
+
+    assert cli.main(["service", "status"]) == 0
+    assert '"status": "ready"' in capsys.readouterr().out

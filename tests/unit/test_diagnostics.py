@@ -35,7 +35,7 @@ def test_export_diagnostics_includes_runtime_and_config(tmp_path: Path):
     diagnostics.runtime = {"python": "3.11"}
     diagnostics.config = {"HF_TOKEN": "secret", "device": "cuda:0"}
     diagnostics.speaker_count = 2
-    diagnostics.asr = {"languages": {"primary": "zh mandarin"}}
+    diagnostics.asr = {"sentences": [{"text": "你好。", "asr_confidence": 0.95}]}
     diagnostics.gpu_stages = {
         "primary_asr": {
             "before_free_mib": 22000,
@@ -52,7 +52,7 @@ def test_export_diagnostics_includes_runtime_and_config(tmp_path: Path):
     assert payload["runtime"]["python"] == "3.11"
     assert payload["config"]["HF_TOKEN"] == "<redacted>"
     assert payload["speaker_count"] == 2
-    assert payload["asr"]["languages"]["primary"] == "zh mandarin"
+    assert payload["asr"]["sentences"][0]["asr_confidence"] == 0.95
     assert payload["gpu_stages"]["primary_asr"]["released"] is True
 
 

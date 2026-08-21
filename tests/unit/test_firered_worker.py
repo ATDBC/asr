@@ -19,8 +19,6 @@ def _official(path: Path) -> dict[str, object]:
                 "end_ms": 900,
                 "text": "你好。",
                 "asr_confidence": 0.95,
-                "lang": "zh mandarin",
-                "lang_confidence": 0.99,
             }
         ],
         "vad_segments_ms": [(80, 920)],

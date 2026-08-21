@@ -37,10 +37,8 @@ def test_real_asr_returns_monotonic_tokens(tmp_path: Path):
     assert result.vad_segments_ms
     assert result.duration_ms > 0
     assert all(token.confidence is not None for token in result.tokens)
-    assert all(sentence.language for sentence in result.sentences)
     assert all(
-        0.0 <= sentence.language_confidence <= 1.0
-        and 0.0 <= sentence.asr_confidence <= 1.0
+        0.0 <= sentence.asr_confidence <= 1.0
         for sentence in result.sentences
     )
     assert any(

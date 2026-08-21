@@ -179,9 +179,7 @@ def test_doctor_runs_complete_firered_then_speaker_then_overlap_sequence(
                 "你好。",
                 (TimedToken("你好。", 0, 500, 0.9),),
                 sentences=(
-                    RecognizedSentence(
-                        "你好。", 0, 500, "zh mandarin", 0.99, 0.9
-                    ),
+                    RecognizedSentence("你好。", 0, 500, 0.9),
                 ),
                 vad_segments_ms=((0, 500),),
                 duration_ms=600,

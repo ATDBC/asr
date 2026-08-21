@@ -44,7 +44,7 @@ def _result() -> AsrResult:
         text="原始。",
         tokens=(TimedToken("原始。", 0, 500, 0.9),),
         sentences=(
-            RecognizedSentence("原始。", 0, 500, "zh mandarin", 0.99, 0.9),
+            RecognizedSentence("原始。", 0, 500, 0.9),
         ),
         vad_segments_ms=((0, 500),),
         duration_ms=600,
@@ -521,7 +521,7 @@ def test_overlap_job_evicts_hot_owners_before_temporary_models(
                 text,
                 (TimedToken(text, 0, 500, 0.9),),
                 sentences=(
-                    RecognizedSentence(text, 0, 500, "zh mandarin", 0.99, 0.9),
+                    RecognizedSentence(text, 0, 500, 0.9),
                 ),
                 vad_segments_ms=((0, 500),),
                 duration_ms=600,

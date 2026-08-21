@@ -37,22 +37,14 @@ class RecognizedSentence:
     text: str
     start_ms: int
     end_ms: int
-    language: str
-    language_confidence: float
     asr_confidence: float
 
     def __post_init__(self) -> None:
         if not self.text:
             raise ValueError("text must not be empty")
-        if not self.language:
-            raise ValueError("language must not be empty")
         _validate_range(self.start_ms, self.end_ms)
-        for name, value in (
-            ("language_confidence", self.language_confidence),
-            ("asr_confidence", self.asr_confidence),
-        ):
-            if not 0.0 <= value <= 1.0:
-                raise ValueError(f"{name} must stay within 0..1")
+        if not 0.0 <= self.asr_confidence <= 1.0:
+            raise ValueError("asr_confidence must stay within 0..1")
 
 
 @dataclass(frozen=True, slots=True)

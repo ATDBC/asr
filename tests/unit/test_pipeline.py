@@ -7,7 +7,6 @@ from funasr_transcriber.errors import TranscriptionError
 from funasr_transcriber.pipeline import (
     TranscriptionPipeline,
     attribute_primary,
-    summarize_languages,
 )
 from funasr_transcriber.overlap import OverlapEnhancement
 from funasr_transcriber.schemas import (
@@ -128,21 +127,6 @@ def test_pipeline_allows_validated_overlap_replacement(tmp_path: Path):
     assert all(turn.overlap for turn in result.transcript.turns)
 
 
-def test_language_summary_is_duration_weighted():
-    summary = summarize_languages(
-        (
-            RecognizedSentence(
-                "甲。", 0, 9000, "zh mandarin", 0.95, 0.9
-            ),
-            RecognizedSentence("Hi.", 9000, 10000, "en", 0.99, 0.9),
-        )
-    )
-
-    assert summary.primary_language == "zh mandarin"
-    assert summary.duration_ms == {"zh mandarin": 9000, "en": 1000}
-    assert summary.duration_ratio["zh mandarin"] == pytest.approx(0.9)
-
-
 def test_attribute_primary_rejects_untimed_firered_sentence():
     result = AsrResult(
         "原始句子。",
@@ -159,7 +143,7 @@ def test_attribute_primary_rejects_untimed_firered_sentence():
         )
 
 
-def test_staged_pipeline_records_lid_and_warnings(tmp_path: Path):
+def test_staged_pipeline_records_aed_metadata_without_lid(tmp_path: Path):
     config = load_config()
     asr_result = AsrResult(
         "你好。Hi.",
@@ -168,10 +152,8 @@ def test_staged_pipeline_records_lid_and_warnings(tmp_path: Path):
             TimedToken("Hi.", 1000, 1900, 0.90),
         ),
         sentences=(
-            RecognizedSentence(
-                "你好。", 0, 900, "zh mandarin", 0.95, 0.95
-            ),
-            RecognizedSentence("Hi.", 1000, 1900, "en", 0.70, 0.90),
+            RecognizedSentence("你好。", 0, 900, 0.95),
+            RecognizedSentence("Hi.", 1000, 1900, 0.90),
         ),
         vad_segments_ms=((0, 1900),),
         duration_ms=2000,
@@ -189,10 +171,22 @@ def test_staged_pipeline_records_lid_and_warnings(tmp_path: Path):
     )
 
     assert result.transcript.full_text == "你好。Hi."
-    assert diagnostics.asr["languages"]["primary"] == "en"
-    assert diagnostics.asr["languages"]["duration_ratio"] == {
-        "en": 0.5,
-        "zh mandarin": 0.5,
+    assert diagnostics.asr == {
+        "duration_ms": 2000,
+        "vad_segments_ms": [[0, 1900]],
+        "sentences": [
+            {
+                "text": "你好。",
+                "start_ms": 0,
+                "end_ms": 900,
+                "asr_confidence": 0.95,
+            },
+            {
+                "text": "Hi.",
+                "start_ms": 1000,
+                "end_ms": 1900,
+                "asr_confidence": 0.90,
+            },
+        ],
     }
-    assert any("primary language" in item for item in diagnostics.warnings)
-    assert any("low LID confidence" in item for item in diagnostics.warnings)
+    assert not any("language" in item.lower() or "lid" in item.lower() for item in diagnostics.warnings)

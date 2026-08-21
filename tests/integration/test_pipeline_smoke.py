@@ -83,7 +83,7 @@ def test_real_non_overlap_pipeline_uses_resident_service(tmp_path: Path):
         assert transcript["turns"]
         assert 1 <= transcript["speaker_count"] <= 10
         assert transcript["full_text"]
-        assert diagnostics["asr"]["languages"]["primary"]
+        assert "languages" not in diagnostics["asr"]
         assert diagnostics["resource_profile"]["enabled"] is True
     finally:
         try:

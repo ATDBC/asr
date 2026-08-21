@@ -194,17 +194,11 @@ def validate_stable_response(response: dict[str, object]) -> None:
             raise FireRedContractError("sentence must be an object")
         if not str(sentence.get("text") or ""):
             raise FireRedContractError("sentence text must not be empty")
-        if not str(sentence.get("language") or ""):
-            raise FireRedContractError("sentence language must not be empty")
         sentence_ranges.append(
             (
                 _milliseconds(sentence.get("start_ms"), "sentence start_ms"),
                 _milliseconds(sentence.get("end_ms"), "sentence end_ms"),
             )
-        )
-        _confidence(
-            sentence.get("language_confidence"),
-            "sentence language_confidence",
         )
         _confidence(
             sentence.get("asr_confidence"),
@@ -284,11 +278,6 @@ def normalize_official_result(
                 "end_ms": _milliseconds(
                     raw_sentence.get("end_ms"),
                     "sentence end_ms",
-                ),
-                "language": str(raw_sentence.get("lang") or ""),
-                "language_confidence": _confidence(
-                    raw_sentence.get("lang_confidence"),
-                    "sentence language_confidence",
                 ),
                 "asr_confidence": _confidence(
                     raw_sentence.get("asr_confidence"),

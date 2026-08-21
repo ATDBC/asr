@@ -55,8 +55,6 @@ def _fake_worker(tmp_path: Path, mode: str = "normal") -> Path:
                         "text": text,
                         "start_ms": 0,
                         "end_ms": 500,
-                        "language": "zh mandarin",
-                        "language_confidence": 0.99,
                         "asr_confidence": 0.9
                     }}],
                     "vad_segments_ms": [[0, 500]],
@@ -98,7 +96,8 @@ def test_client_reuses_one_process_for_multiple_requests(tmp_path: Path):
 
     assert first.text == "一。"
     assert second.text == "二。"
-    assert first.sentences[0].language == "zh mandarin"
+    assert first.sentences[0].asr_confidence == 0.9
+    assert not hasattr(first.sentences[0], "language")
 
 
 def test_client_verify_uses_same_stable_result(tmp_path: Path):

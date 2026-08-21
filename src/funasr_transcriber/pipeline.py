@@ -15,7 +15,6 @@ from .overlap import OverlapEnhancement
 from .schemas import (
     AsrResult,
     AttributedToken,
-    RecognizedSentence,
     SpeakerSegment,
     Transcript,
 )
@@ -49,39 +48,9 @@ class PipelineResult:
     asr_text: str
 
 
-@dataclass(frozen=True, slots=True)
-class LanguageSummary:
-    primary_language: str | None
-    duration_ms: dict[str, int]
-    duration_ratio: dict[str, float]
-
-
 def normalize_for_integrity(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text)
     return "".join(character for character in normalized if not character.isspace())
-
-
-def summarize_languages(
-    sentences: tuple[RecognizedSentence, ...],
-) -> LanguageSummary:
-    durations: dict[str, int] = {}
-    for sentence in sentences:
-        duration_ms = sentence.end_ms - sentence.start_ms
-        durations[sentence.language] = (
-            durations.get(sentence.language, 0) + duration_ms
-        )
-    ordered = dict(sorted(durations.items()))
-    total_ms = sum(ordered.values())
-    ratios = {
-        language: duration_ms / total_ms
-        for language, duration_ms in ordered.items()
-    } if total_ms else {}
-    primary = (
-        max(ordered, key=lambda language: ordered[language])
-        if ordered
-        else None
-    )
-    return LanguageSummary(primary, ordered, ratios)
 
 
 def attribute_primary(
@@ -128,43 +97,19 @@ class TranscriptionPipeline:
         diagnostics: Diagnostics,
         asr_result: AsrResult,
     ) -> None:
-        summary = summarize_languages(asr_result.sentences)
         diagnostics.asr = {
             "duration_ms": asr_result.duration_ms,
             "vad_segments_ms": [list(item) for item in asr_result.vad_segments_ms],
-            "languages": {
-                "primary": summary.primary_language,
-                "duration_ms": summary.duration_ms,
-                "duration_ratio": summary.duration_ratio,
-            },
             "sentences": [
                 {
                     "text": sentence.text,
                     "start_ms": sentence.start_ms,
                     "end_ms": sentence.end_ms,
-                    "language": sentence.language,
-                    "language_confidence": sentence.language_confidence,
                     "asr_confidence": sentence.asr_confidence,
                 }
                 for sentence in asr_result.sentences
             ],
         }
-        if (
-            summary.primary_language is not None
-            and summary.primary_language != "zh mandarin"
-        ):
-            diagnostics.warn(
-                "primary language is not zh mandarin: "
-                f"{summary.primary_language}"
-            )
-        threshold = self.config.asr.lid_warning_confidence
-        for index, sentence in enumerate(asr_result.sentences, start=1):
-            if sentence.language_confidence < threshold:
-                diagnostics.warn(
-                    "low LID confidence for sentence "
-                    f"{index}: {sentence.language_confidence:.3f} < "
-                    f"{threshold:.3f}"
-                )
 
     def finish(
         self,

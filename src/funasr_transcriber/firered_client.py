@@ -36,8 +36,6 @@ def parse_worker_response(response: dict[str, object]) -> AsrResult:
                 text=str(item["text"]),
                 start_ms=int(item["start_ms"]),
                 end_ms=int(item["end_ms"]),
-                language=str(item["language"]),
-                language_confidence=float(item["language_confidence"]),
                 asr_confidence=float(item["asr_confidence"]),
             )
             for item in response["sentences"]

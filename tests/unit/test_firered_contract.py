@@ -19,16 +19,12 @@ OFFICIAL = {
             "end_ms": 900,
             "text": "你好，世界。",
             "asr_confidence": 0.95,
-            "lang": "zh mandarin",
-            "lang_confidence": 0.99,
         },
         {
             "start_ms": 1000,
             "end_ms": 1800,
             "text": "Hello 2!",
             "asr_confidence": 0.91,
-            "lang": "en",
-            "lang_confidence": 0.98,
         },
     ],
     "vad_segments_ms": [(80, 920), (980, 1820)],
@@ -61,7 +57,13 @@ def test_normalize_attaches_punctuation_and_sentence_confidence():
         [0.95] * 4 + [0.91] * 2
     )
     assert response["duration_ms"] == 2000
-    assert response["sentences"][0]["language"] == "zh mandarin"
+    assert response["sentences"][0] == {
+        "text": "你好，世界。",
+        "start_ms": 100,
+        "end_ms": 900,
+        "asr_confidence": 0.95,
+    }
+    assert "language" not in response["sentences"][0]
     validate_stable_response(response)
 
 

@@ -20,8 +20,6 @@ def test_asr_result_carries_firered_metadata():
         "你好。",
         100,
         900,
-        "zh mandarin",
-        0.99,
         0.95,
     )
     result = AsrResult(

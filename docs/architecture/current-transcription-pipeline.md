@@ -59,8 +59,10 @@ funasr-transcribe service stop --config /etc/funasr-transcriber.toml
 超时或 worker 提前退出都会成为转录错误，不会切换旧 ASR。
 
 worker 固定加载 FireRedASR2S 提交
-`4e7d9aaf4482a47cec1724807026b9b151926eb5` 的 FireRedVAD、FireRedLID、
-FireRedASR2-AED 和 FireRedPunc。官方结果只有句级 `asr_confidence`；稳定协议将句级值
+`4e7d9aaf4482a47cec1724807026b9b151926eb5` 的 FireRedVAD、FireRedASR2-AED 和
+FireRedPunc。语言识别模型不加载。VAD 先生成保持时间顺序的独立语音段；
+`[asr].segment_batch_size` 同时传给官方 AED 与 Punc batch，默认 1，只有 GPU 0 校准
+确认输出一致、无超预算后才会提高。官方结果只有句级 `asr_confidence`；稳定协议将句级值
 附给所属 token，不虚构词级分数。标点附着到带时间戳 token 后，协议验证全文、句子、
 token、VAD 与音频时长的一致性。
 
@@ -94,11 +96,11 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
 inventory、以及 ASR 和 diarization 的开始/结束单调时间与耗时。采样器只接受这些明确登记
 的本项目 owner 名称，不会写入其他 PID、命令行或显存行。
 
-## LID、对齐与输出
+## 对齐与输出
 
-句级 FireRedLID 结果按持续时间汇总主语言和语言占比。主语言不是 `zh mandarin`，或任一句
-语言置信度低于配置阈值时写入 diagnostics warning。没有 overlap 修改时，最终轮次全文必须
-与 FireRed 全文在 NFKC 且忽略空白后完全一致；不一致即失败。
+没有 overlap 修改时，最终轮次全文必须与 FireRed 全文在 NFKC 且忽略空白后完全一致；
+不一致即失败。`diagnostics.json.asr` 保留 VAD 区间、句级文字、时间范围、AED 置信度和
+阶段耗时，不包含语言识别结果或语言置信度。
 
 每项成功作业原子发布：
 
@@ -113,7 +115,7 @@ recording_transcript/
 
 - `src/funasr_transcriber/service_protocol.py`：Unix socket 消息、状态文件与客户端。
 - `src/funasr_transcriber/service.py`：常驻 owner、FIFO、普通/overlap 作业和服务入口。
-- `src/funasr_transcriber/firered_worker.py`：隔离四模块运行时和 JSONL 服务。
+- `src/funasr_transcriber/firered_worker.py`：隔离三模块运行时和 JSONL 服务。
 - `src/funasr_transcriber/firered_client.py`：持久 worker、超时、关联和关闭。
 - `src/funasr_transcriber/speaker_diarization.py`：3D-Speaker 模型与显式释放。
 - `src/funasr_transcriber/overlap.py`：检测/分离、轨道匹配与替换应用。

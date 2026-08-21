@@ -287,10 +287,6 @@ def _recording_result(
     if not isinstance(sentences, list):
         raise RuntimeError("service diagnostics are missing ASR sentences")
     asr_text = asr_text_from_diagnostics(diagnostics)
-    lid_covered = sum(
-        bool(item.get("language")) and item.get("language_confidence") is not None
-        for item in sentences
-    )
     valid_timestamps = sum(
         0 <= int(turn["start_ms"]) < int(turn["end_ms"]) for turn in turns
     )
@@ -324,8 +320,6 @@ def _recording_result(
             normalize_for_integrity(asr_text)
             == normalize_for_integrity(str(transcript.get("full_text", "")))
         ),
-        "lid_sentences": len(sentences),
-        "lid_covered": lid_covered,
         "timestamp_checked": len(turns),
         "timestamp_valid": valid_timestamps,
         "resource_profile": profile if isinstance(profile, dict) else {},
@@ -391,19 +385,12 @@ def _summary_payload(
             "speaker_count": counts,
             "text_retention_rate": None,
         }
-    lid_sentences = sum(int(item["lid_sentences"]) for item in results)
-    lid_covered = sum(int(item["lid_covered"]) for item in results)
     timestamp_checked = sum(int(item["timestamp_checked"]) for item in results)
     timestamp_valid = sum(int(item["timestamp_valid"]) for item in results)
     profiled_recordings = sum(
         item["resource_profile"].get("enabled") is True for item in results
     )
     release_evidence = {
-        "lid_coverage": {
-            "sentences": lid_sentences,
-            "covered": lid_covered,
-            "ratio": lid_covered / lid_sentences if lid_sentences else 0.0,
-        },
         "timestamp_integrity": {
             "checked": timestamp_checked,
             "valid": timestamp_valid,
@@ -429,8 +416,6 @@ def _summary_payload(
         "low_confidence": ready
         and float(summary["low_confidence_ratio"]) <= 0.05,
         "text_retention": ready and float(summary["text_retention_rate"]) == 1.0,
-        "lid_coverage": ready
-        and release_evidence["lid_coverage"]["ratio"] == 1.0,
         "timestamp_integrity": ready
         and release_evidence["timestamp_integrity"]["passed"],
         "resource_profiles": ready and profiled_recordings == expected_count,

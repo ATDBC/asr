@@ -9,33 +9,17 @@ from typing import Any
 
 EVIDENCE_FIELDS = (
     "firered_modules",
-    "lid_coverage",
     "timestamp_integrity",
     "gpu_stages",
     "deterministic_hashes",
 )
-FIRERED_MODULES = ("vad", "lid", "aed", "punc")
+FIRERED_MODULES = ("vad", "aed", "punc")
 STRESS_DURATIONS = ("30", "60", "120")
 
 
 def _valid_modules(value: object) -> bool:
     return isinstance(value, Mapping) and all(
         value.get(name) is True for name in FIRERED_MODULES
-    )
-
-
-def _valid_lid(value: object) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    sentences = value.get("sentences")
-    covered = value.get("covered")
-    ratio = value.get("ratio")
-    return (
-        isinstance(sentences, int)
-        and not isinstance(sentences, bool)
-        and sentences > 0
-        and covered == sentences
-        and ratio == 1.0
     )
 
 
@@ -96,7 +80,6 @@ def _valid_hashes(value: object) -> bool:
 def missing_release_evidence(evidence: Mapping[str, Any]) -> list[str]:
     validators = {
         "firered_modules": _valid_modules,
-        "lid_coverage": _valid_lid,
         "timestamp_integrity": _valid_timestamps,
         "gpu_stages": _valid_gpu_stages,
         "deterministic_hashes": _valid_hashes,

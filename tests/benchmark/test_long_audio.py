@@ -14,7 +14,6 @@ def test_long_audio_tool_emits_release_evidence():
 
     for field in (
         '"release_evidence"',
-        '"lid_coverage"',
         '"timestamp_integrity"',
         '"gpu_stages"',
         '"deterministic_hashes"',
@@ -43,7 +42,7 @@ def test_long_audio_gate_requires_source(tmp_path: Path):
         (tmp_path / "stress" / "stress-summary.json").read_text("utf-8")
     )
     evidence = payload["release_evidence"]
-    assert evidence["lid_coverage"]["ratio"] == 1.0
+    assert "lid_coverage" not in evidence
     assert evidence["timestamp_integrity"]["passed"] is True
     assert evidence["gpu_stages"]
     assert set(evidence["deterministic_hashes"]) == {"30", "60", "120"}

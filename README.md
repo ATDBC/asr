@@ -1,7 +1,7 @@
 # Standalone FireRedASR2S Transcriber
 
 独立的 Linux 命令行录音转录工具。输入以普通话为主的音频，输出带毫秒时间戳、
-匿名说话人编号、语言识别信息的 TXT、结构化 JSON 与诊断文件。生产 ASR 使用
+匿名说话人编号的 TXT、结构化 JSON 与诊断文件。生产 ASR 使用
 FireRedASR2S；不存在旧 FunASR ASR fallback。
 
 ## 支持范围
@@ -12,7 +12,7 @@ FireRedASR2S；不存在旧 FunASR ASR fallback。
 - WAV、MP3、M4A、FLAC、AAC、OGG，最长两小时。
 - 自动估计 1～10 位说话人；服务按 FIFO 串行消费作业，但单个作业的 ASR 与
   diarization 并行。
-- 主要面向普通话；FireRedLID 会记录句级语言和置信度，非普通话或低置信度会告警。
+- FireRed 流程固定为 VAD → AED → Punc；不加载语言识别模型。
 
 本工具不依赖 FastAPI、MySQL、原项目 `.env`、讯飞接口或声纹角色识别。
 
@@ -86,7 +86,7 @@ work_dir = "/var/tmp/funasr-transcriber"
 [asr]
 worker_python = "/path/to/standalone_transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
-lid_warning_confidence = 0.80
+segment_batch_size = 1
 
 [service]
 queue_limit = 16
@@ -106,6 +106,10 @@ GPU 1 重映射成逻辑 `cuda:0`。配置优先级为：
 命令行 > FUNASR_TRANSCRIBER_* 环境变量 > TOML > 内置默认值
 ~~~
 
+`segment_batch_size` 是 VAD 完成后 AED 与 Punc 的官方批处理大小。每个 VAD 段仍按
+原时间顺序导出；默认值 1 代表逐段处理，只有在本机 GPU 0 校准证明结果不变且显存满足
+预算后才应提高。
+
 ## 模型准备
 
 FireRed 模型默认从 ModelScope 获取，目录如下：
@@ -114,7 +118,6 @@ FireRed 模型默认从 ModelScope 获取，目录如下：
 models/fireredasr2s/
 ├── source/                 # 固定 commit 的 FireRedASR2S
 ├── FireRedVAD/VAD/
-├── FireRedLID/
 ├── FireRedASR2-AED/
 └── FireRedPunc/
 ~~~
@@ -141,18 +144,18 @@ funasr-transcribe doctor --config /etc/funasr-transcriber.toml
 `segmentation-3.0` 与 `speaker-diarization-3.1` 的访问条件。`HF_TOKEN` 只从环境
 读取，不写入配置、日志或 diagnostics。
 
-仅当 ModelScope 无法获取 FireRed 四模型时，才显式使用 Hugging Face fallback：
+仅当 ModelScope 无法获取 FireRed 三模型时，才显式使用 Hugging Face fallback：
 
 ~~~bash
 .venv-asr/bin/python -c \
   'from pathlib import Path; from funasr_transcriber.model_registry import acquire_firered_assets; acquire_firered_assets(Path("/path/to/models"), source="huggingface")'
 ~~~
 
-fallback 仍会校验四个模型目录，3D-Speaker 相关资产继续由 ModelScope 获取。不要
+fallback 仍会校验三个模型目录，3D-Speaker 相关资产继续由 ModelScope 获取。不要
 混用不完整目录。
 
-`doctor` 对内置 `hello_zh.wav` 依次执行 FireRedVAD、FireRedLID、
-FireRedASR2-AED、FireRedPunc 全链推理；关闭 worker 后检查显存释放，再按顺序
+`doctor` 对内置 `hello_zh.wav` 依次执行 FireRedVAD、FireRedASR2-AED、FireRedPunc
+全链推理；关闭 worker 后检查显存释放，再按顺序
 验证 Speaker 和 overlap 环境。`--skip-cuda` 只用于环境型测试，会明确显示模型
 smoke 未运行，不能作为发布通过证据。
 
@@ -222,7 +225,7 @@ TXT 示例：
 ~~~
 
 JSON 保留毫秒级起止时间、说话人、来源、对齐置信度与重叠标记。diagnostics
-记录句级 LID/ASR 置信度、VAD 区间、阶段耗时、GPU 准入/释放样本和降级告警。默认
+记录句级 AED/ASR 置信度、VAD 区间、阶段耗时、GPU 准入/释放样本和降级告警。默认
 `resource_profile` 仅为 `{"enabled": false}`；使用 `--profile-resources` 后还会记录服务、
 FireRed 与临时 overlap owner 的资源峰值、模型清单和并行分支时间，绝不包含其他项目 PID。
 
@@ -298,5 +301,5 @@ artifacts/release_validation_corpus/run_validation_linux.sh \
 ~~~
 
 正式发布不得使用 `--skip-stress`。结果写入
-`validation_results/<运行时间>-<进程号>/`，最新汇总写入
-`validation_results/summary.json` 和 `validation_results/summary.txt`。
+`outputs/release_validation/<运行时间>-<进程号>/`，最新汇总写入
+`outputs/release_validation/summary.json` 和 `outputs/release_validation/summary.txt`。

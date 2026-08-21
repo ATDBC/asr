@@ -200,12 +200,11 @@ def test_build_validation_corpus_writes_complete_relative_layout(
         "schema_version": "1.0",
         "required": [
             "firered_modules",
-            "lid_coverage",
             "timestamp_integrity",
             "gpu_stages",
             "deterministic_hashes",
         ],
-        "firered_modules": ["vad", "lid", "aed", "punc"],
+        "firered_modules": ["vad", "aed", "punc"],
         "stress_durations_minutes": [30, 60, 120],
     }
     assert "G:\\" not in (output / "manifest.json").read_text("utf-8")

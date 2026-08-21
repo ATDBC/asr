@@ -81,7 +81,7 @@ def test_linux_runner_contains_all_release_stages():
     assert 'FIRERED_MODULES' in script
     assert '.venv-asr/bin/python' in script
     assert 'FireRedVAD' in script
-    assert 'FireRedLID' in script
+    assert 'FireRedLID' not in script
     assert 'FireRedASR2-AED' in script
     assert 'FireRedPunc' in script
     assert 'summary.txt' in script
@@ -102,14 +102,8 @@ def _complete_evidence():
     return {
         "firered_modules": {
             "vad": True,
-            "lid": True,
             "aed": True,
             "punc": True,
-        },
-        "lid_coverage": {
-            "sentences": 20,
-            "covered": 20,
-            "ratio": 1.0,
         },
         "timestamp_integrity": {
             "checked": 20,
@@ -144,7 +138,6 @@ def test_release_summary_rejects_missing_evidence_despite_zero_exit():
     assert summary["complete"] is False
     assert set(summary["missing_evidence"]) == {
         "firered_modules",
-        "lid_coverage",
         "timestamp_integrity",
         "gpu_stages",
         "deterministic_hashes",

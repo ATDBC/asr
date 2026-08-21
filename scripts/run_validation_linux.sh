@@ -158,7 +158,6 @@ release_evidence = {
     "firered_modules": {
         name: doctor_modules.get(name) for name in FIRERED_MODULES
     },
-    "lid_coverage": doctor_evidence.get("lid_coverage"),
     "timestamp_integrity": doctor_evidence.get("timestamp_integrity"),
     "gpu_stages": service_release.get("gpu_stages"),
     "deterministic_hashes": deterministic_hashes,
@@ -205,7 +204,6 @@ if config.asr.worker_python.resolve() != expected_python.resolve():
 root = config.paths.model_dir.resolve() / "fireredasr2s"
 required = {
     "FireRedVAD": root / "FireRedVAD" / "VAD" / "model.pth.tar",
-    "FireRedLID": root / "FireRedLID" / "model.pth.tar",
     "FireRedASR2-AED": root / "FireRedASR2-AED" / "model.pth.tar",
     "FireRedPunc": root / "FireRedPunc" / "model.pth.tar",
 }
@@ -251,10 +249,6 @@ profile = diagnostics.get("resource_profile") or {}
 checks = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 turns = transcript.get("turns") or []
 sentences = (diagnostics.get("asr") or {}).get("sentences") or []
-covered = sum(
-    bool(item.get("language")) and item.get("language_confidence") is not None
-    for item in sentences
-)
 ranges = [
     (int(item.get("start_ms", -1)), int(item.get("end_ms", -1)))
     for item in [*turns, *sentences]
@@ -271,14 +265,8 @@ module_check = all(
 release_evidence = {
     "firered_modules": {
         "vad": module_check,
-        "lid": module_check,
         "aed": module_check,
         "punc": module_check,
-    },
-    "lid_coverage": {
-        "sentences": len(sentences),
-        "covered": covered,
-        "ratio": covered / len(sentences) if sentences else 0.0,
     },
     "timestamp_integrity": {
         "checked": len(ranges),
@@ -288,7 +276,6 @@ release_evidence = {
 }
 payload = {
     "passed": bool(turns) and all(release_evidence["firered_modules"].values())
-    and release_evidence["lid_coverage"]["ratio"] == 1.0
     and release_evidence["timestamp_integrity"]["passed"]
     and profile.get("enabled") is True,
     "speaker_count": transcript.get("speaker_count"),

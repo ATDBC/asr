@@ -122,14 +122,7 @@ def main() -> int:
             diagnostics = json.loads(
                 (output / "diagnostics.json").read_text(encoding="utf-8")
             )
-            sentences = (diagnostics.get("asr") or {}).get("sentences") or []
             turns = transcript.get("turns") or []
-            run["lid_sentences"] = len(sentences)
-            run["lid_covered"] = sum(
-                bool(item.get("language"))
-                and item.get("language_confidence") is not None
-                for item in sentences
-            )
             run["timestamp_checked"] = len(turns)
             run["timestamp_valid"] = sum(
                 0 <= int(item.get("start_ms", -1))
@@ -153,8 +146,6 @@ def main() -> int:
         for item in results
         for index, run in enumerate(item["runs"], start=1)
     ]
-    lid_sentences = sum(run["lid_sentences"] for _, _, run in all_runs)
-    lid_covered = sum(run["lid_covered"] for _, _, run in all_runs)
     timestamp_checked = sum(
         run["timestamp_checked"] for _, _, run in all_runs
     )
@@ -165,11 +156,6 @@ def main() -> int:
         for stage, record in run["gpu_stages"].items()
     }
     release_evidence = {
-        "lid_coverage": {
-            "sentences": lid_sentences,
-            "covered": lid_covered,
-            "ratio": lid_covered / lid_sentences if lid_sentences else 0.0,
-        },
         "timestamp_integrity": {
             "checked": timestamp_checked,
             "valid": timestamp_valid,
@@ -183,8 +169,7 @@ def main() -> int:
         },
     }
     evidence_passed = (
-        release_evidence["lid_coverage"]["ratio"] == 1.0
-        and release_evidence["timestamp_integrity"]["passed"]
+        release_evidence["timestamp_integrity"]["passed"]
         and bool(gpu_stages)
         and all(
             record.get("released") is True

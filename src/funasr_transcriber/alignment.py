@@ -53,6 +53,7 @@ def attribute_tokens(
     output: list[AttributedToken] = []
     for token in sorted(tokens, key=lambda item: (item.start_ms, item.end_ms)):
         duration = token.end_ms - token.start_ms
+        source = "primary_asr"
         overlaps = sorted(
             (
                 (
@@ -77,12 +78,10 @@ def attribute_tokens(
                     segment.speaker_id,
                 ),
             )
-            if _distance_ms(token, nearest) > nearest_gap_ms:
-                raise TranscriptionError(
-                    f"no speaker near token at {token.start_ms}..{token.end_ms} ms"
-                )
             speaker_id = nearest.speaker_id
             confidence = AlignmentConfidence.LOW
+            if _distance_ms(token, nearest) > nearest_gap_ms:
+                source = "nearest_speaker_fallback"
         else:
             speaker_id = best_segment.speaker_id
             coverage = best_overlap / duration
@@ -107,6 +106,7 @@ def attribute_tokens(
                 end_ms=token.end_ms,
                 speaker_id=speaker_id,
                 confidence=confidence,
+                source=source,
             )
         )
     return tuple(output)

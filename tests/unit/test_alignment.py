@@ -58,13 +58,15 @@ def test_token_uses_nearest_speaker_inside_gap():
     assert result[0].confidence is AlignmentConfidence.LOW
 
 
-def test_token_rejects_unbounded_gap():
-    with pytest.raises(TranscriptionError, match="speaker"):
-        attribute_tokens(
-            tokens=(TimedToken("嗯", 2000, 2100),),
-            speaker_segments=(SpeakerSegment(1, 0, 1000),),
-            high_coverage_ratio=0.70,
-            medium_coverage_ratio=0.50,
-            nearest_gap_ms=300,
-        )
+def test_token_preserves_text_when_diarization_has_an_unbounded_gap():
+    result = attribute_tokens(
+        tokens=(TimedToken("嗯", 2000, 2100),),
+        speaker_segments=(SpeakerSegment(1, 0, 1000),),
+        high_coverage_ratio=0.70,
+        medium_coverage_ratio=0.50,
+        nearest_gap_ms=300,
+    )
 
+    assert result[0].speaker_id == 1
+    assert result[0].confidence is AlignmentConfidence.LOW
+    assert result[0].source == "nearest_speaker_fallback"

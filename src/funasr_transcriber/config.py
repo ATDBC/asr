@@ -26,7 +26,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "asr": {
         "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
         "timeout_seconds": 1800,
-        "segment_batch_size": 4,
+        "segment_batch_size": 8,
     },
     "diarization": {
         "speaker_count": "auto",

@@ -71,10 +71,11 @@ worker 固定加载 FireRedASR2S 提交
 FireRedPunc。语言识别模型不加载。切分段保持时间顺序（生产请求来自 diarization
 段落，doctor/overlap 请求来自 FireRedVAD）；
 `[asr].segment_batch_size` 同时传给官方 AED 与 Punc batch。2026-08-21 在本机 GPU 0
-以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次后，选定默认值 4：三次输出
-均与 batch 1 稳定 fingerprint 一致，中位端到端 28.50 秒，进程峰值 5,690 MiB；batch
-2/8 因 fingerprint 不一致淘汰。完整报告位于
-`outputs/measurements/20260821T060915Z-firered-batches/result.json`。官方结果只有句级
+以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次：batch 1/4 共享稳定
+fingerprint，中位端到端 28.50 秒（batch 4），进程峰值 5,690 MiB；batch 2/8 的
+fingerprint 与 batch 1 不同但各自三次重复稳定，batch 8 最快（中位 19.11 秒，峰值
+5,872 MiB）。默认值现为 8，接受与 batch 1/4 的逐字差异换取约 1.5 倍速度。完整报告
+位于 `outputs/measurements/20260821T060915Z-firered-batches/result.json`。官方结果只有句级
 `asr_confidence`；稳定协议将句级值
 附给所属 token，不虚构词级分数。标点附着到带时间戳 token 后，协议验证全文、句子、
 token、VAD 与音频时长的一致性。

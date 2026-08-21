@@ -98,7 +98,7 @@ def test_default_asr_worker_configuration():
         "/opt/funasr-transcriber/.venv-asr/bin/python"
     )
     assert config.asr.timeout_seconds == 1800
-    assert config.asr.segment_batch_size == 4
+    assert config.asr.segment_batch_size == 8
 
 
 @pytest.mark.parametrize(

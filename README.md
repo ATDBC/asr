@@ -87,7 +87,7 @@ work_dir = "/var/tmp/funasr-transcriber"
 [asr]
 worker_python = "/path/to/standalone_transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
-segment_batch_size = 4
+segment_batch_size = 8
 
 [service]
 queue_limit = 16
@@ -108,8 +108,8 @@ GPU 1 重映射成逻辑 `cuda:0`。配置优先级为：
 ~~~
 
 `segment_batch_size` 是 VAD 完成后 AED 与 Punc 的官方批处理大小。每个 VAD 段仍按
-原时间顺序导出；默认值 1 代表逐段处理，只有在本机 GPU 0 校准证明结果不变且显存满足
-预算后才应提高。
+原时间顺序导出；默认 8 是速度与显存校准后的取值，注意 batch 8 的转写与 batch 1/4
+不完全逐字一致（batch 间浮点差异），但同一 batch 重复运行结果稳定。
 
 ## 模型准备
 

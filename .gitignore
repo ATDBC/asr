@@ -11,5 +11,7 @@ __pycache__/
 .coverage
 htmlcov/
 artifacts/release_validation_corpus/
+artifacts/recombined_corpus/
+artifacts/concat_eval/
 validation_results/
 outputs/

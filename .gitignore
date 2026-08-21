@@ -12,3 +12,4 @@ __pycache__/
 htmlcov/
 artifacts/release_validation_corpus/
 validation_results/
+outputs/

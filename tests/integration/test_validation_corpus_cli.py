@@ -58,6 +58,7 @@ def test_build_cli_rejects_missing_source(tmp_path: Path):
 
 def test_linux_runner_contains_all_release_stages():
     script = (ROOT / "scripts" / "run_validation_linux.sh").read_text("utf-8")
+    ignore = (ROOT / ".gitignore").read_text("utf-8")
 
     assert "set -euo pipefail" in script
     assert "sha256sum -c checksums.sha256" in script
@@ -69,6 +70,10 @@ def test_linux_runner_contains_all_release_stages():
     assert "test_input_matrix.py" in script
     assert "test_long_audio.py" in script
     assert 'LATEST_SUMMARY="$RESULTS_ROOT/summary.json"' in script
+    assert 'RESULTS_ROOT="$PROJECT_ROOT/outputs/release_validation"' in script
+    assert 'FUNASR_TRANSCRIBER_RAMC_OUTPUT="$RESULTS/ramc-summary.json"' in script
+    assert '$CORPUS_ROOT/validation_results' not in script
+    assert "outputs/" in ignore
     assert 'import pytest' in script
     assert '--basetemp "$RESULTS/pytest-ramc"' in script
     assert 'stage_results' in script

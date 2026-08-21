@@ -101,7 +101,7 @@ $PROJECT_ROOT/outputs/release_validation
 ```
 
 脚本的 doctor、RAMC、overlap、输入矩阵、长音频、服务释放检查和最新汇总继续位于
-同一 `<run-id>` 目录下。运行 script 时，RAMC 工具接收该 run 的 `ramc/ramc-summary.json`
+同一 `<run-id>` 目录下。运行 script 时，RAMC 工具接收该 run 的 `ramc-summary.json`
 作为输出参数，并直接把录音导出到 `<run-id>/ramc/<stem>/`，所以不会再创建临时的
 `ramc-e2e-*` 输出目录。
 

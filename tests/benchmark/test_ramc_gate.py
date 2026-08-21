@@ -31,7 +31,9 @@ def test_ramc_release_gate_is_run_explicitly(tmp_path: Path):
     tsv_value = os.getenv("FUNASR_TRANSCRIBER_RAMC_TSV")
     candidates = list(root.rglob("*test*.tsv")) if not tsv_value else []
     test_tsv = Path(tsv_value) if tsv_value else candidates[0]
-    output = tmp_path / "ramc-summary.json"
+    output = Path(
+        os.getenv("FUNASR_TRANSCRIBER_RAMC_OUTPUT", tmp_path / "ramc-summary.json")
+    )
     command = [
         sys.executable,
         str(Path(__file__).parents[2] / "tools" / "benchmark_ramc_e2e.py"),

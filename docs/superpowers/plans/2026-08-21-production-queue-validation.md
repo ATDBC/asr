@@ -241,7 +241,7 @@ git commit -m "feat: persist RAMC queue progress per recording"
 
 - [ ] **Step 1: Write failing runner/ignore tests**
 
-Add assertions that `.gitignore` contains `outputs/`, the runner assigns `RESULTS_ROOT="$PROJECT_ROOT/outputs/release_validation"`, and its RAMC invocation produces `$RESULTS/ramc/ramc-summary.json`. Assert the script contains no assignment to `$CORPUS_ROOT/validation_results`.
+Add assertions that `.gitignore` contains `outputs/`, the runner assigns `RESULTS_ROOT="$PROJECT_ROOT/outputs/release_validation"`, and its RAMC invocation produces `$RESULTS/ramc-summary.json`. Assert the script contains no assignment to `$CORPUS_ROOT/validation_results`.
 
 - [ ] **Step 2: Run the new tests to prove RED**
 
@@ -255,7 +255,7 @@ Expected: FAIL because the script currently writes under the input corpus and th
 
 - [ ] **Step 3: Implement dedicated output wiring**
 
-Add `outputs/` to `.gitignore`. Change the runner’s root assignment exactly to `RESULTS_ROOT="$PROJECT_ROOT/outputs/release_validation"`. Before the RAMC pytest call, export `FUNASR_TRANSCRIBER_RAMC_OUTPUT="$RESULTS/ramc/ramc-summary.json"`; make `tests/benchmark/test_ramc_gate.py` use this explicit path if set, otherwise retain its `tmp_path` default for isolated test execution. The script continues to pass all other stage outputs through `$RESULTS`.
+Add `outputs/` to `.gitignore`. Change the runner’s root assignment exactly to `RESULTS_ROOT="$PROJECT_ROOT/outputs/release_validation"`. Before the RAMC pytest call, export `FUNASR_TRANSCRIBER_RAMC_OUTPUT="$RESULTS/ramc-summary.json"`; make `tests/benchmark/test_ramc_gate.py` use this explicit path if set, otherwise retain its `tmp_path` default for isolated test execution. The script continues to pass all other stage outputs through `$RESULTS`.
 
 - [ ] **Step 4: Re-run the integration runner tests**
 
@@ -325,7 +325,7 @@ FUNASR_TRANSCRIBER_CONFIG="$PWD/artifacts/release_validation_corpus/.service-wor
   --dataset "$PWD/artifacts/release_validation_corpus/ramc_core" \
   --test-tsv "$PWD/artifacts/release_validation_corpus/ramc_core/test.tsv" \
   --config "$PWD/artifacts/release_validation_corpus/.service-work/local-validation.toml" \
-  --output "$PWD/outputs/release_validation/<run-id>/ramc/ramc-summary.json" \
+  --output "$PWD/outputs/release_validation/<run-id>/ramc-summary.json" \
   --count 20 --preclipped
 ```
 

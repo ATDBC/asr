@@ -54,3 +54,30 @@ def test_export_diagnostics_includes_runtime_and_config(tmp_path: Path):
     assert payload["speaker_count"] == 2
     assert payload["asr"]["languages"]["primary"] == "zh mandarin"
     assert payload["gpu_stages"]["primary_asr"]["released"] is True
+
+
+def test_export_diagnostics_marks_disabled_resource_profile(tmp_path: Path):
+    diagnostics = Diagnostics(resource_profile={"enabled": False})
+
+    export_diagnostics(diagnostics, tmp_path, overwrite=False)
+
+    payload = json.loads(
+        (tmp_path / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert payload["resource_profile"] == {"enabled": False}
+
+
+def test_export_diagnostics_sanitizes_resource_profile(tmp_path: Path):
+    diagnostics = Diagnostics(
+        resource_profile={
+            "enabled": True,
+            "service": {"pid": 123, "HF_TOKEN": "secret"},
+        }
+    )
+
+    export_diagnostics(diagnostics, tmp_path, overwrite=False)
+
+    payload = json.loads(
+        (tmp_path / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert payload["resource_profile"]["service"]["HF_TOKEN"] == "<redacted>"

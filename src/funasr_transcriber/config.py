@@ -48,8 +48,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "nearest_gap_ms": 300,
     },
     "turns": {"merge_gap_seconds": 1.0},
+    "service": {
+        "queue_limit": 16,
+        "startup_timeout_seconds": 180,
+        "profile_sampling_interval_ms": 200,
+        "minimum_total_mib": 23 * 1024,
+        "minimum_free_mib": 13 * 1024,
+    },
     "overlap": {
-        "enabled": True,
+        "enabled": False,
         "detector_model": "pyannote/speaker-diarization-3.1",
         "hf_token_env": "HF_TOKEN",
         "worker_python": "/opt/funasr-transcriber/.venv-overlap/bin/python",
@@ -113,6 +120,15 @@ class TurnConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ServiceConfig:
+    queue_limit: int
+    startup_timeout_seconds: int
+    profile_sampling_interval_ms: int
+    minimum_total_mib: int
+    minimum_free_mib: int
+
+
+@dataclass(frozen=True, slots=True)
 class OverlapConfig:
     enabled: bool
     detector_model: str
@@ -133,6 +149,7 @@ class AppConfig:
     vad: VadConfig
     alignment: AlignmentConfig
     turns: TurnConfig
+    service: ServiceConfig
     overlap: OverlapConfig
 
 
@@ -237,6 +254,17 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
         ),
         alignment=AlignmentConfig(**values["alignment"]),
         turns=TurnConfig(**values["turns"]),
+        service=ServiceConfig(
+            queue_limit=int(values["service"]["queue_limit"]),
+            startup_timeout_seconds=int(
+                values["service"]["startup_timeout_seconds"]
+            ),
+            profile_sampling_interval_ms=int(
+                values["service"]["profile_sampling_interval_ms"]
+            ),
+            minimum_total_mib=int(values["service"]["minimum_total_mib"]),
+            minimum_free_mib=int(values["service"]["minimum_free_mib"]),
+        ),
         overlap=OverlapConfig(
             enabled=bool(values["overlap"]["enabled"]),
             detector_model=str(values["overlap"]["detector_model"]),
@@ -273,6 +301,19 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("speaker_count must stay within min_speakers/max_speakers")
     if config.turns.merge_gap_seconds != 1.0:
         raise ValueError("merge_gap_seconds must be 1.0 in version 1")
+    service = config.service
+    if service.queue_limit <= 0:
+        raise ValueError("service queue_limit must be positive")
+    if service.startup_timeout_seconds <= 0:
+        raise ValueError("service startup_timeout_seconds must be positive")
+    if not 50 <= service.profile_sampling_interval_ms <= 5000:
+        raise ValueError(
+            "service profile_sampling_interval_ms must stay within 50..5000"
+        )
+    if service.minimum_total_mib < 23 * 1024:
+        raise ValueError("service minimum_total_mib must be at least 23552")
+    if not 0 < service.minimum_free_mib <= service.minimum_total_mib:
+        raise ValueError("service minimum_free_mib is invalid")
     if not (
         0.0
         < config.alignment.medium_coverage_ratio

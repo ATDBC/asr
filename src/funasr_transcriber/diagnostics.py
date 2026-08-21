@@ -24,6 +24,9 @@ class Diagnostics:
     config: dict[str, Any] = field(default_factory=dict)
     asr: dict[str, Any] = field(default_factory=dict)
     gpu_stages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    resource_profile: dict[str, Any] = field(
+        default_factory=lambda: {"enabled": False}
+    )
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
@@ -108,6 +111,7 @@ def export_diagnostics(
         "config": sanitize_mapping(diagnostics.config),
         "asr": diagnostics.asr,
         "gpu_stages": diagnostics.gpu_stages,
+        "resource_profile": sanitize_mapping(diagnostics.resource_profile),
     }
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as stream:

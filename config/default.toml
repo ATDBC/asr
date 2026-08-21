@@ -35,8 +35,15 @@ nearest_gap_ms = 300
 [turns]
 merge_gap_seconds = 1.0
 
+[service]
+queue_limit = 16
+startup_timeout_seconds = 180
+profile_sampling_interval_ms = 200
+minimum_total_mib = 23552
+minimum_free_mib = 13312
+
 [overlap]
-enabled = true
+enabled = false
 detector_model = "pyannote/speaker-diarization-3.1"
 hf_token_env = "HF_TOKEN"
 worker_python = "/opt/funasr-transcriber/.venv-overlap/bin/python"

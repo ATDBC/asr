@@ -72,6 +72,25 @@ def test_default_overlap_detector_uses_pyannote_3_pipeline():
     assert config.overlap.detector_model == "pyannote/speaker-diarization-3.1"
 
 
+def test_default_service_configuration_disables_overlap_and_profiles():
+    config = load_config()
+
+    assert config.overlap.enabled is False
+    assert config.service.queue_limit == 16
+    assert config.service.startup_timeout_seconds == 180
+    assert config.service.profile_sampling_interval_ms == 200
+    assert config.service.minimum_total_mib == 23 * 1024
+    assert config.service.minimum_free_mib == 13 * 1024
+
+
+def test_config_rejects_invalid_service_limits(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("[service]\nqueue_limit = 0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="service queue_limit"):
+        load_config(path)
+
+
 def test_default_asr_worker_configuration():
     config = load_config()
 

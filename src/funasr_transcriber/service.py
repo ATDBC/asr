@@ -248,6 +248,7 @@ class DaemonService:
         self._queue: queue.Queue[_QueuedJob] = queue.Queue(maxsize=queue_limit)
         self._run_job = run_job
         self._futures: dict[str, Future[dict[str, object]]] = {}
+        self._pending_count = 0
         self._lock = threading.Lock()
         self._draining = False
         self._started = False
@@ -275,10 +276,16 @@ class DaemonService:
             self._consumer.start()
 
     def submit(self, request: ServiceRequest) -> Future[dict[str, object]]:
+        future, _ = self.accept(request)
+        return future
+
+    def accept(self, request: ServiceRequest) -> tuple[Future[dict[str, object]], int]:
+        """Accept one FIFO job and return its future plus current work depth."""
+
         with self._lock:
             existing = self._futures.get(request.identifier)
             if existing is not None:
-                return existing
+                return existing, self._pending_count
             if self._draining:
                 raise ServiceBusyError("service is draining and accepts no new jobs")
             if not self._started:
@@ -289,7 +296,15 @@ class DaemonService:
             except queue.Full as exc:
                 raise ServiceBusyError("service queue is full") from exc
             self._futures[request.identifier] = future
-            return future
+            self._pending_count += 1
+            return future, self._pending_count
+
+    def result_for(self, job_id: str) -> Future[dict[str, object]]:
+        with self._lock:
+            future = self._futures.get(job_id)
+        if future is None:
+            raise ServiceProtocolError(f"unknown service job: {job_id}")
+        return future
 
     def request_stop(self) -> None:
         """Reject new jobs, then let the sole consumer finish accepted work."""
@@ -320,6 +335,8 @@ class DaemonService:
                     self.completed_ids.append(queued.request.identifier)
                     queued.future.set_result(result)
                 finally:
+                    with self._lock:
+                        self._pending_count -= 1
                     self._queue.task_done()
         finally:
             self._stopped.set()
@@ -351,14 +368,28 @@ class _ServiceRequestHandler(socketserver.StreamRequestHandler):
                     raise ServiceProtocolError(
                         "service configuration is incompatible; stop it first"
                     )
-                result = host.daemon.submit(request).result()
+                _, queue_depth = host.daemon.accept(request)
+                payload = {
+                    "id": identifier,
+                    "ok": True,
+                    "terminal": False,
+                    "status": "accepted",
+                    "job_id": request.identifier,
+                    "queue_depth": queue_depth,
+                }
+            elif request.action == "wait":
+                if request.job_id is None:
+                    raise ServiceProtocolError("wait job_id must not be empty")
+                result = host.daemon.result_for(request.job_id).result()
                 payload = {
                     "id": identifier,
                     "ok": True,
                     "terminal": True,
+                    "status": "completed",
+                    "job_id": request.job_id,
                     "result": result,
                 }
-            else:
+            elif request.action == "stop":
                 host.daemon.request_stop()
                 payload = {
                     "id": identifier,
@@ -367,6 +398,10 @@ class _ServiceRequestHandler(socketserver.StreamRequestHandler):
                     "status": "draining",
                 }
                 host.watch_for_stop()
+            else:
+                raise ServiceProtocolError(
+                    f"unsupported service action: {request.action}"
+                )
         except Exception as exc:
             payload = {
                 "id": identifier,

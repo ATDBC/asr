@@ -220,9 +220,13 @@ def test_transcribe_client_starts_service_only_when_health_is_unavailable(
                 raise ServiceProtocolError("not running")
             return {"status": "ready"}
 
-        def submit_and_wait(self, request):
+        def submit(self, request):
             calls.append(f"submit:{request.identifier}")
-            return {"ok": True, "result": {"output_dir": str(request.output_dir)}}
+            return {"ok": True, "job_id": request.identifier}
+
+        def wait(self, job_id, identifier):
+            calls.append(f"wait:{job_id}:{identifier}")
+            return {"ok": True, "result": {"output_dir": str(tmp_path / "output")}}
 
     class FakeStartupLock:
         def __init__(self, directory):
@@ -263,6 +267,7 @@ def test_transcribe_client_starts_service_only_when_health_is_unavailable(
     assert calls.count("unlock") == 1
     assert any(item.startswith("launch:") for item in calls)
     assert any(item.startswith("submit:") for item in calls)
+    assert any(item.startswith("wait:") for item in calls)
 
 
 def test_transcribe_route_submits_to_persistent_service(monkeypatch, tmp_path: Path):

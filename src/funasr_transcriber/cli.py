@@ -87,15 +87,9 @@ def _wait_for_service_ready(config, paths: ServicePaths) -> ServiceClient:
     )
 
 
-def submit_to_service(args: argparse.Namespace, config) -> dict[str, object]:
-    """Submit one CLI request, auto-starting a compatible local daemon."""
+def _connected_service(args: argparse.Namespace, config) -> ServiceClient:
+    """Return an auto-started compatible client for one local daemon."""
 
-    input_audio = Path(args.input_audio).expanduser().resolve()
-    output_dir = Path(
-        args.output_dir or default_output_dir(input_audio)
-    ).expanduser().resolve()
-    if not args.overwrite and output_dir.exists():
-        raise OutputError(f"output already exists: {output_dir}")
     paths = ServicePaths.from_work_dir(config.paths.work_dir)
     client = _service_client(config, paths)
     try:
@@ -108,6 +102,16 @@ def submit_to_service(args: argparse.Namespace, config) -> dict[str, object]:
             except ServiceProtocolError:
                 launch_service(config, paths, getattr(args, "config", None))
                 client = _wait_for_service_ready(config, paths)
+    return client
+
+
+def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
+    input_audio = Path(args.input_audio).expanduser().resolve()
+    output_dir = Path(
+        args.output_dir or default_output_dir(input_audio)
+    ).expanduser().resolve()
+    if not args.overwrite and output_dir.exists():
+        raise OutputError(f"output already exists: {output_dir}")
     overlap_enabled = (
         True
         if getattr(args, "enable_overlap", False)
@@ -115,7 +119,7 @@ def submit_to_service(args: argparse.Namespace, config) -> dict[str, object]:
         if getattr(args, "disable_overlap", False)
         else config.overlap.enabled
     )
-    request = ServiceRequest(
+    return ServiceRequest(
         identifier=uuid.uuid4().hex,
         action="submit",
         input_audio=input_audio,
@@ -126,7 +130,27 @@ def submit_to_service(args: argparse.Namespace, config) -> dict[str, object]:
         overlap_enabled=overlap_enabled,
         profile_resources=bool(getattr(args, "profile_resources", False)),
     )
-    return client.submit_and_wait(request)
+
+
+def submit_service_job(
+    args: argparse.Namespace,
+    config,
+) -> tuple[ServiceClient, ServiceRequest, dict[str, object]]:
+    """Submit one job without waiting so callers can fill the FIFO queue."""
+
+    client = _connected_service(args, config)
+    request = _service_request(args, config)
+    return client, request, client.submit(request)
+
+
+def submit_to_service(args: argparse.Namespace, config) -> dict[str, object]:
+    """Submit one CLI request, auto-starting a daemon, then wait for it."""
+
+    client, request, accepted = submit_service_job(args, config)
+    job_id = accepted.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise ServiceProtocolError("service did not return an accepted job id")
+    return client.wait(job_id, uuid.uuid4().hex)
 
 
 def require_physical_gpu_zero(device: str) -> None:

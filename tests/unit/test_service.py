@@ -28,6 +28,7 @@ from funasr_transcriber.service_protocol import (
     ServiceBusyError,
     ServiceClient,
     ServicePaths,
+    ServiceProtocolError,
     ServiceRequest,
 )
 from funasr_transcriber.overlap import (
@@ -168,6 +169,16 @@ def _request(identifier: str) -> ServiceRequest:
     return ServiceRequest(identifier=identifier, action="submit")
 
 
+def _socket_request(tmp_path: Path, identifier: str) -> ServiceRequest:
+    return ServiceRequest(
+        identifier=identifier,
+        action="submit",
+        input_audio=(tmp_path / f"{identifier}.wav").resolve(),
+        output_dir=(tmp_path / identifier).resolve(),
+        config_fingerprint="test-fingerprint",
+    )
+
+
 def test_daemon_processes_submissions_in_fifo_order():
     completed: list[str] = []
     daemon = DaemonService(
@@ -241,6 +252,96 @@ def test_socket_server_serves_health_submission_and_graceful_stop(
         assert client.stop_and_wait("stop")["status"] == "draining"
         assert daemon.wait_stopped(timeout=1)
     finally:
+        server.close()
+
+
+def test_socket_submit_acknowledges_before_blocking_job(tmp_path: Path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def run_job(request):
+        started.set()
+        assert release.wait(timeout=1)
+        return {"output_dir": request.identifier}
+
+    paths = ServicePaths.from_work_dir(tmp_path)
+    daemon = DaemonService(queue_limit=2, run_job=run_job)
+    server = ServiceSocketServer(
+        paths,
+        daemon,
+        config_fingerprint="test-fingerprint",
+    )
+    server.start()
+    client = ServiceClient(paths, timeout_seconds=1)
+    try:
+        accepted = client.submit(_socket_request(tmp_path, "job"))
+
+        assert accepted == {
+            "id": "job",
+            "ok": True,
+            "terminal": False,
+            "status": "accepted",
+            "job_id": "job",
+            "queue_depth": 1,
+        }
+        assert started.wait(timeout=1)
+        assert not release.is_set()
+
+        release.set()
+        assert client.wait("job", "wait-job")["result"] == {
+            "output_dir": "job"
+        }
+    finally:
+        release.set()
+        server.close()
+
+
+def test_socket_accepts_full_fifo_batch_before_waiting(tmp_path: Path):
+    started = threading.Event()
+    release = threading.Event()
+    completed: list[str] = []
+
+    def run_job(request):
+        completed.append(request.identifier)
+        if request.identifier == "first":
+            started.set()
+            assert release.wait(timeout=1)
+        return {"output_dir": request.identifier}
+
+    paths = ServicePaths.from_work_dir(tmp_path)
+    daemon = DaemonService(queue_limit=3, run_job=run_job)
+    server = ServiceSocketServer(
+        paths,
+        daemon,
+        config_fingerprint="test-fingerprint",
+    )
+    server.start()
+    client = ServiceClient(paths, timeout_seconds=1)
+    try:
+        first = _socket_request(tmp_path, "first")
+        assert client.submit(first)["job_id"] == "first"
+        assert started.wait(timeout=1)
+        assert client.submit(_socket_request(tmp_path, "second"))["job_id"] == "second"
+        assert client.submit(_socket_request(tmp_path, "third"))["job_id"] == "third"
+        assert client.submit(first)["job_id"] == "first"
+        assert completed == ["first"]
+
+        release.set()
+
+        assert client.wait("first", "wait-first")["result"] == {
+            "output_dir": "first"
+        }
+        assert client.wait("second", "wait-second")["result"] == {
+            "output_dir": "second"
+        }
+        assert client.wait("third", "wait-third")["result"] == {
+            "output_dir": "third"
+        }
+        assert completed == ["first", "second", "third"]
+        with pytest.raises(ServiceProtocolError, match="unknown service job"):
+            client.wait("missing", "wait-missing")
+    finally:
+        release.set()
         server.close()
 
 

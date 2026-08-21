@@ -48,3 +48,17 @@ def test_protocol_rejects_relative_submit_paths():
                 "config_fingerprint": "fingerprint",
             }
         )
+
+
+def test_protocol_parses_wait_request_for_an_accepted_job():
+    request = parse_request(
+        {"id": "wait-1", "action": "wait", "job_id": "job-1"}
+    )
+
+    assert request.action == "wait"
+    assert request.job_id == "job-1"
+
+
+def test_protocol_rejects_wait_without_job_id():
+    with pytest.raises(ServiceProtocolError, match="job_id"):
+        parse_request({"id": "wait-1", "action": "wait"})

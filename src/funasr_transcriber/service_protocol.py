@@ -81,6 +81,7 @@ class ServiceState:
 class ServiceRequest:
     identifier: str
     action: str
+    job_id: str | None = None
     input_audio: Path | None = None
     output_dir: Path | None = None
     config_fingerprint: str | None = None
@@ -130,8 +131,17 @@ def parse_request(payload: Mapping[str, Any]) -> ServiceRequest:
 
     identifier = _required_identifier(payload)
     action = str(payload.get("action") or "")
-    if action not in {"health", "submit", "stop"}:
+    if action not in {"health", "submit", "wait", "stop"}:
         raise ServiceProtocolError(f"unsupported service action: {action}")
+    if action == "wait":
+        job_id = str(payload.get("job_id") or "").strip()
+        if not job_id:
+            raise ServiceProtocolError("wait job_id must not be empty")
+        return ServiceRequest(
+            identifier=identifier,
+            action=action,
+            job_id=job_id,
+        )
     if action != "submit":
         return ServiceRequest(identifier=identifier, action=action)
     fingerprint = str(payload.get("config_fingerprint") or "").strip()
@@ -246,7 +256,7 @@ class ServiceClient:
         self.paths = paths
         self.timeout_seconds = float(timeout_seconds)
 
-    def _exchange(self, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _exchange(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self.timeout_seconds <= 0:
             raise ValueError("service timeout_seconds must be positive")
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -257,12 +267,7 @@ class ServiceClient:
             try:
                 stream.write(encode_message(payload))
                 stream.flush()
-                messages: list[dict[str, Any]] = []
-                while True:
-                    message = read_message(stream)
-                    messages.append(message)
-                    if message.get("terminal") is True:
-                        return messages
+                return read_message(stream)
             finally:
                 stream.close()
         except (OSError, TimeoutError) as exc:
@@ -273,10 +278,7 @@ class ServiceClient:
             client.close()
 
     @staticmethod
-    def _terminal(messages: list[dict[str, Any]], identifier: str) -> dict[str, Any]:
-        if not messages:
-            raise ServiceProtocolError("service returned no response")
-        terminal = messages[-1]
+    def _terminal(terminal: dict[str, Any], identifier: str) -> dict[str, Any]:
         if terminal.get("id") != identifier or terminal.get("terminal") is not True:
             raise ServiceProtocolError("service response id or terminal state is invalid")
         if terminal.get("ok") is not True:
@@ -286,15 +288,11 @@ class ServiceClient:
         return terminal
 
     def health(self, identifier: str) -> dict[str, Any]:
-        return self._terminal(
-            self._exchange({"id": identifier, "action": "health"}),
-            identifier,
-        )
+        return self._terminal(self._exchange({"id": identifier, "action": "health"}), identifier)
 
-    def submit_and_wait(self, request: ServiceRequest) -> dict[str, Any]:
-        if request.action != "submit":
-            raise ValueError("submit_and_wait requires a submit request")
-        payload = {
+    @staticmethod
+    def _submit_payload(request: ServiceRequest) -> dict[str, object]:
+        return {
             "id": request.identifier,
             "action": request.action,
             "input_audio": str(request.input_audio),
@@ -305,10 +303,43 @@ class ServiceClient:
             "overlap_enabled": request.overlap_enabled,
             "profile_resources": request.profile_resources,
         }
-        return self._terminal(self._exchange(payload), request.identifier)
 
-    def stop_and_wait(self, identifier: str) -> dict[str, Any]:
-        return self._terminal(
-            self._exchange({"id": identifier, "action": "stop"}),
+    def submit(self, request: ServiceRequest) -> dict[str, Any]:
+        """Submit a job and return its immediate acceptance acknowledgement."""
+
+        if request.action != "submit":
+            raise ValueError("submit requires a submit request")
+        accepted = self._exchange(self._submit_payload(request))
+        if accepted.get("id") != request.identifier:
+            raise ServiceProtocolError("service response id is invalid")
+        if accepted.get("ok") is not True:
+            raise ServiceProtocolError(
+                str(accepted.get("error") or "service request failed")
+            )
+        if accepted.get("terminal") is not False or accepted.get("status") != "accepted":
+            raise ServiceProtocolError("service submit acknowledgement is invalid")
+        if accepted.get("job_id") != request.identifier:
+            raise ServiceProtocolError("service submit job id is invalid")
+        return accepted
+
+    def wait(self, job_id: str, identifier: str) -> dict[str, Any]:
+        """Wait for one accepted job without re-submitting it."""
+
+        response = self._terminal(
+            self._exchange(
+                {"id": identifier, "action": "wait", "job_id": str(job_id)}
+            ),
             identifier,
         )
+        if response.get("job_id") != job_id:
+            raise ServiceProtocolError("service wait job id is invalid")
+        return response
+
+    def submit_and_wait(self, request: ServiceRequest) -> dict[str, Any]:
+        if request.action != "submit":
+            raise ValueError("submit_and_wait requires a submit request")
+        self.submit(request)
+        return self.wait(request.identifier, request.identifier)
+
+    def stop_and_wait(self, identifier: str) -> dict[str, Any]:
+        return self._terminal(self._exchange({"id": identifier, "action": "stop"}), identifier)

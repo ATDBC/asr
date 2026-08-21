@@ -41,6 +41,21 @@ def test_architecture_describes_current_worker_lifecycle():
         assert legacy_name not in architecture
 
 
+def test_architecture_documents_hot_parallel_service():
+    architecture = (
+        ROOT / "docs" / "architecture" / "current-transcription-pipeline.md"
+    ).read_text(encoding="utf-8")
+
+    for required in (
+        "Unix socket",
+        "ASR 与 diarization 并行",
+        "--profile-resources",
+        "--enable-overlap",
+        "service stop",
+    ):
+        assert required in architecture
+
+
 def test_release_checklist_requires_firered_and_gpu_evidence():
     checklist = (ROOT / "RELEASE_CHECKLIST.md").read_text(encoding="utf-8")
 

@@ -40,6 +40,7 @@ def test_overlap_gate_requires_manifest(tmp_path: Path):
                 config,
                 "--output-dir",
                 str(output),
+                "--enable-overlap",
             ],
             check=False,
         )

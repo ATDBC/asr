@@ -29,10 +29,15 @@ SUMMARY_TEXT="$RESULTS/summary.txt"
 LATEST_SUMMARY="$RESULTS_ROOT/summary.json"
 LATEST_SUMMARY_TEXT="$RESULTS_ROOT/summary.txt"
 CURRENT_STAGE="startup"
+SERVICE_STARTED=0
 mkdir -p "$RESULTS"
 
 finish() {
     local status="$1"
+    if [ "$SERVICE_STARTED" -eq 1 ]; then
+        "$TRANSCRIBE_BIN" service stop --config "$CONFIG" \
+            > "$RESULTS/service-stop.json" 2>&1 || true
+    fi
     "$CORE_PYTHON" - "$SUMMARY" "$SUMMARY_TEXT" "$LATEST_SUMMARY" \
         "$LATEST_SUMMARY_TEXT" "$status" "$CURRENT_STAGE" "$SKIP_STRESS" <<'PY'
 import json, pathlib, sys
@@ -148,10 +153,12 @@ CURRENT_STAGE="models"
 
 CURRENT_STAGE="doctor"
 "$TRANSCRIBE_BIN" doctor --config "$CONFIG" | tee "$RESULTS/doctor-checks.txt"
+SERVICE_STARTED=1
 "$TRANSCRIBE_BIN" "$CORPUS_ROOT/seeds/doctor_smoke.wav" \
     --config "$CONFIG" \
     --output-dir "$RESULTS/doctor-smoke" \
     --disable-overlap \
+    --profile-resources \
     --overwrite
 "$CORE_PYTHON" - "$RESULTS/doctor-smoke/transcript.json" \
     "$RESULTS/doctor-smoke/diagnostics.json" \
@@ -159,6 +166,7 @@ CURRENT_STAGE="doctor"
 import hashlib, json, pathlib, sys
 transcript = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 diagnostics = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+profile = diagnostics.get("resource_profile") or {}
 checks = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 turns = transcript.get("turns") or []
 sentences = (diagnostics.get("asr") or {}).get("sentences") or []
@@ -214,6 +222,13 @@ payload = {
     ).hexdigest(),
     "release_evidence": release_evidence,
 }
+if profile.get("enabled") is not True:
+    raise SystemExit("service profile was not written")
+unknown_owners = set((profile.get("process_peak_mib") or {})) - {
+    "service", "firered", "overlap"
+}
+if unknown_owners:
+    raise SystemExit(f"profile exposed unexpected owners: {sorted(unknown_owners)}")
 pathlib.Path(sys.argv[4]).write_text(
     json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
     encoding="utf-8",
@@ -221,6 +236,15 @@ pathlib.Path(sys.argv[4]).write_text(
 if not payload["passed"]:
     raise SystemExit("doctor smoke release evidence is incomplete")
 PY
+
+CURRENT_STAGE="service_reuse"
+"$TRANSCRIBE_BIN" "$CORPUS_ROOT/seeds/doctor_smoke.wav" \
+    --config "$CONFIG" \
+    --output-dir "$RESULTS/doctor-smoke-reuse" \
+    --disable-overlap \
+    --overwrite
+"$TRANSCRIBE_BIN" service status --config "$CONFIG" \
+    > "$RESULTS/service-status.json"
 
 export FUNASR_TRANSCRIBER_RUN_BENCHMARKS=1
 export FUNASR_TRANSCRIBER_RAMC_ROOT="$CORPUS_ROOT/ramc_core"

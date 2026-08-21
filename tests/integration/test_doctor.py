@@ -20,6 +20,7 @@ def _write_config(
     *,
     create_asr_python: bool = True,
     create_overlap_python: bool = True,
+    overlap_enabled: bool = False,
 ):
     asr_python = tmp_path / "asr" / "bin" / "python"
     overlap_python = tmp_path / "overlap" / "bin" / "python"
@@ -41,6 +42,7 @@ def _write_config(
                 f'worker_python = "{asr_python.as_posix()}"',
                 "[overlap]",
                 f'worker_python = "{overlap_python.as_posix()}"',
+                f"enabled = {str(overlap_enabled).lower()}",
             ]
         ),
         encoding="utf-8",
@@ -81,7 +83,11 @@ def test_doctor_fails_when_ffmpeg_is_missing(monkeypatch, tmp_path: Path):
 
 
 def test_doctor_checks_overlap_virtual_environment(monkeypatch, tmp_path: Path):
-    config = _write_config(tmp_path, create_overlap_python=False)
+    config = _write_config(
+        tmp_path,
+        create_overlap_python=False,
+        overlap_enabled=True,
+    )
     _patch_environment(monkeypatch)
 
     with pytest.raises(EnvironmentError, match="overlap worker Python"):
@@ -109,7 +115,7 @@ def test_doctor_rejects_invalid_firered_assets(
     missing,
     message,
 ):
-    config = _write_config(tmp_path)
+    config = _write_config(tmp_path, overlap_enabled=True)
     _patch_environment(monkeypatch)
     monkeypatch.setattr(
         "funasr_transcriber.doctor.verify_models",
@@ -148,7 +154,7 @@ def test_doctor_runs_complete_firered_then_speaker_then_overlap_sequence(
     monkeypatch,
     tmp_path: Path,
 ):
-    config = _write_config(tmp_path)
+    config = _write_config(tmp_path, overlap_enabled=True)
     _patch_environment(monkeypatch)
     events: list[str] = []
     before = GpuSample(0, "GPU", 24_576, 22_000, "600.0")

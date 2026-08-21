@@ -6,7 +6,8 @@
 - [ ] FireRedVAD / FireRedLID / FireRedASR2-AED / FireRedPunc assets verified
 - [ ] funasr-transcribe models download completed
 - [ ] funasr-transcribe models verify passed
-- [ ] GPU 0 reports at least 23 GiB total and 12 GiB free before every model phase
+- [ ] GPU 0 reports at least 23 GiB total and 13,312 MiB free before the service hot-load
+- [ ] Historical serial-stage evidence records the former 12 GiB free threshold separately from the service budget
 - [ ] funasr-transcribe doctor full model smoke passed without `--skip-cuda`
 - [ ] GPU release evidence is present for FireRed, Speaker, and overlap doctor phases
 - [ ] Unit and integration tests passed
@@ -18,6 +19,10 @@
 - [ ] 30/60/120-minute stress runs completed without OOM
 - [ ] Repeated-output determinism passed
 - [ ] No-overlap run loads FireRed once; overlap run loads FireRed at most twice
+- [ ] Two sequential default jobs reuse one hot FireRed/3D-Speaker service owner
+- [ ] Profile-enabled job has `diagnostics.json.resource_profile.enabled == true` and contains only named project owners
+- [ ] `funasr-transcribe service status` reports ready before validation shutdown
+- [ ] `funasr-transcribe service stop` drains accepted work, removes this project's socket/state, and releases its FireRed PID
 - [ ] Main FireRed failure has no legacy ASR fallback; overlap failures degrade per window
 - [ ] TXT, JSON and diagnostics manually inspected
 - [ ] No model, audio, token or business-data files are staged

@@ -28,10 +28,6 @@ Historical migration specifications remain historical records and are not rewrit
 - Modify: `src/funasr_transcriber/model_registry.py:18-112,254-387,401-449`
 - Modify: `tests/unit/test_model_registry.py:13-77`
 - Modify: `tests/unit/test_firered_model_registry.py:17-117`
-- Modify: `tests/integration/test_corpus_builder.py:192-216`
-- Modify: `tools/build_release_validation_corpus.py:16-35`
-- Modify: `src/funasr_transcriber/corpus_builder.py:600-617`
-- Modify: `src/funasr_transcriber/corpus_verifier.py:512-545`
 
 - [ ] **Step 1: Write the failing no-LID model-layout tests.**
 
@@ -55,7 +51,7 @@ Historical migration specifications remain historical records and are not rewrit
   Run:
 
   ```bash
-  pytest tests/unit/test_model_registry.py tests/unit/test_firered_model_registry.py tests/integration/test_corpus_builder.py -v
+  pytest tests/unit/test_model_registry.py tests/unit/test_firered_model_registry.py -v
   ```
 
   Expected: failures identify `paths.lid`, `firered_lid`, or an LID download expectation.
@@ -68,14 +64,14 @@ Historical migration specifications remain historical records and are not rewrit
   FIRERED_MODULES = ("vad", "aed", "punc")
   ```
 
-  Keep the VAD-specific `VAD/model.pth.tar` validation and the existing atomic-download safeguards unchanged. Import `FIRERED_MODULES` from `release_validation` only if doing so would not introduce an import cycle; otherwise define a local immutable `FIRERED_MODEL_NAMES` and keep the release constant equal to that tuple. Update corpus manifest generation and verification to emit the three names.
+  Keep the VAD-specific `VAD/model.pth.tar` validation and the existing atomic-download safeguards unchanged. Define a local immutable `FIRERED_MODEL_NAMES = ("vad", "aed", "punc")`; release evidence and corpus metadata will adopt the same tuple in Task 4.
 
 - [ ] **Step 4: Re-run the focused tests.**
 
   Run:
 
   ```bash
-  pytest tests/unit/test_model_registry.py tests/unit/test_firered_model_registry.py tests/integration/test_corpus_builder.py -v
+  pytest tests/unit/test_model_registry.py tests/unit/test_firered_model_registry.py -v
   ```
 
   Expected: PASS; a complete layout has no LID directory, and no downloader receives an LID model ID.
@@ -83,7 +79,7 @@ Historical migration specifications remain historical records and are not rewrit
 - [ ] **Step 5: Commit the model-registry change.**
 
   ```bash
-  git add src/funasr_transcriber/model_registry.py src/funasr_transcriber/corpus_builder.py src/funasr_transcriber/corpus_verifier.py tools/build_release_validation_corpus.py tests/unit/test_model_registry.py tests/unit/test_firered_model_registry.py tests/integration/test_corpus_builder.py
+  git add src/funasr_transcriber/model_registry.py tests/unit/test_model_registry.py tests/unit/test_firered_model_registry.py
   git commit -m "refactor: remove FireRed LID model dependency"
   ```
 
@@ -279,6 +275,10 @@ Historical migration specifications remain historical records and are not rewrit
 - Modify: `tests/benchmark/test_input_matrix.py`
 - Modify: `tests/benchmark/test_overlap_gate.py`
 - Modify: `tests/integration/test_validation_corpus_cli.py`
+- Modify: `tests/integration/test_corpus_builder.py`
+- Modify: `src/funasr_transcriber/corpus_builder.py:600-617`
+- Modify: `src/funasr_transcriber/corpus_verifier.py:512-545`
+- Modify: `tools/build_release_validation_corpus.py:16-35`
 - Modify: `tests/integration/test_firered_documentation.py`
 - Modify: `README.md`
 - Modify: `RELEASE_CHECKLIST.md`
@@ -299,7 +299,7 @@ Historical migration specifications remain historical records and are not rewrit
   Run:
 
   ```bash
-  pytest tests/benchmark/test_ramc_gate.py tests/benchmark/test_long_audio.py tests/benchmark/test_input_matrix.py tests/benchmark/test_overlap_gate.py tests/integration/test_validation_corpus_cli.py tests/integration/test_firered_documentation.py -v
+  pytest tests/benchmark/test_ramc_gate.py tests/benchmark/test_long_audio.py tests/benchmark/test_input_matrix.py tests/benchmark/test_overlap_gate.py tests/integration/test_validation_corpus_cli.py tests/integration/test_corpus_builder.py tests/integration/test_firered_documentation.py -v
   ```
 
   Expected: failures identify LID coverage and four-module assumptions.
@@ -317,7 +317,7 @@ Historical migration specifications remain historical records and are not rewrit
   Run:
 
   ```bash
-  pytest tests/benchmark/test_ramc_gate.py tests/benchmark/test_long_audio.py tests/benchmark/test_input_matrix.py tests/benchmark/test_overlap_gate.py tests/integration/test_validation_corpus_cli.py tests/integration/test_firered_documentation.py -v
+  pytest tests/benchmark/test_ramc_gate.py tests/benchmark/test_long_audio.py tests/benchmark/test_input_matrix.py tests/benchmark/test_overlap_gate.py tests/integration/test_validation_corpus_cli.py tests/integration/test_corpus_builder.py tests/integration/test_firered_documentation.py -v
   ```
 
   Expected: PASS; no current release gate or documentation test requires LID.
@@ -325,7 +325,7 @@ Historical migration specifications remain historical records and are not rewrit
 - [ ] **Step 6: Commit release and documentation updates.**
 
   ```bash
-  git add src/funasr_transcriber/release_validation.py tools/benchmark_ramc_e2e.py tools/stress_long_audio.py scripts/run_validation_linux.sh tests/benchmark/test_ramc_gate.py tests/benchmark/test_long_audio.py tests/benchmark/test_input_matrix.py tests/benchmark/test_overlap_gate.py tests/integration/test_validation_corpus_cli.py tests/integration/test_firered_documentation.py README.md RELEASE_CHECKLIST.md docs/architecture/current-transcription-pipeline.md
+  git add src/funasr_transcriber/release_validation.py src/funasr_transcriber/corpus_builder.py src/funasr_transcriber/corpus_verifier.py tools/build_release_validation_corpus.py tools/benchmark_ramc_e2e.py tools/stress_long_audio.py scripts/run_validation_linux.sh tests/benchmark/test_ramc_gate.py tests/benchmark/test_long_audio.py tests/benchmark/test_input_matrix.py tests/benchmark/test_overlap_gate.py tests/integration/test_validation_corpus_cli.py tests/integration/test_corpus_builder.py tests/integration/test_firered_documentation.py README.md RELEASE_CHECKLIST.md docs/architecture/current-transcription-pipeline.md
   git commit -m "refactor: remove LID release validation evidence"
   ```
 

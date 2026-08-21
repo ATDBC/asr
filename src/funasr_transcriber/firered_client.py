@@ -79,6 +79,9 @@ class FireRedWorkerClient:
         segment_frame_budget: int = 8000,
         segment_memory_limit_mib: int = 10000,
         segment_memory_safety_mib: int = 512,
+        enable_vad: bool = True,
+        enable_punc: bool = True,
+        warmup_audio: Path | None = None,
     ):
         self.worker_python = Path(worker_python)
         self.model_root = Path(model_root)
@@ -93,6 +96,11 @@ class FireRedWorkerClient:
         self.segment_frame_budget = int(segment_frame_budget)
         self.segment_memory_limit_mib = int(segment_memory_limit_mib)
         self.segment_memory_safety_mib = int(segment_memory_safety_mib)
+        self.enable_vad = bool(enable_vad)
+        self.enable_punc = bool(enable_punc)
+        self.warmup_audio = (
+            None if warmup_audio is None else Path(warmup_audio)
+        )
         self._process: subprocess.Popen[str] | None = None
         self._selector: selectors.BaseSelector | None = None
         self._stderr: IO[str] | None = None
@@ -127,6 +135,10 @@ class FireRedWorkerClient:
         ]
         if self.use_half:
             command.append("--use-half")
+        if not self.enable_vad:
+            command.append("--disable-vad")
+        if not self.enable_punc:
+            command.append("--disable-punc")
         return command
 
     def start(self) -> "FireRedWorkerClient":
@@ -233,6 +245,7 @@ class FireRedWorkerClient:
         action: str,
         audio_path: Path | None = None,
         vad_segments_ms: list[list[int]] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, object]:
         self.start()
         process = self._process
@@ -250,6 +263,8 @@ class FireRedWorkerClient:
                 [int(start_ms), int(end_ms)]
                 for start_ms, end_ms in vad_segments_ms
             ]
+        if extra:
+            request.update(extra)
         try:
             process.stdin.write(
                 json.dumps(
@@ -269,6 +284,56 @@ class FireRedWorkerClient:
         if action != "shutdown":
             self.last_response = response
         return response
+
+    def refine_vad(
+        self,
+        audio_path: Path,
+        vad_segments_ms: list[list[int]],
+    ) -> list[list[int]]:
+        response = self._request(
+            "refine_vad",
+            Path(audio_path),
+            vad_segments_ms,
+        )
+        segments = response.get("vad_segments_ms")
+        if not isinstance(segments, list):
+            raise TranscriptionError("FireRed worker returned invalid refined VAD")
+        return [
+            [int(item[0]), int(item[1])]
+            for item in segments
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        ]
+
+    def run_aed_plan(
+        self,
+        audio_path: Path,
+        batch_plan: list[list[dict[str, int]]],
+        vad_segments_ms: list[list[int]] | None = None,
+    ) -> dict[str, object]:
+        return self._request(
+            "aed_plan",
+            Path(audio_path),
+            vad_segments_ms,
+            extra={"batch_plan": batch_plan},
+        )
+
+    def punctuate(
+        self,
+        audio_path: Path,
+        aed_results: list[dict[str, object]],
+        duration_ms: int,
+        vad_segments_ms: list[list[int]],
+    ) -> AsrResult:
+        response = self._request(
+            "punctuate",
+            Path(audio_path),
+            vad_segments_ms,
+            extra={
+                "aed_results": aed_results,
+                "duration_ms": int(duration_ms),
+            },
+        )
+        return parse_worker_response(response)
 
     def transcribe(
         self,
@@ -290,6 +355,16 @@ class FireRedWorkerClient:
         if not isinstance(status, dict):
             raise TranscriptionError("FireRed worker returned invalid status")
         return status
+
+    def warmup(self, audio_path: Path | None = None) -> dict[str, object]:
+        path = Path(audio_path) if audio_path is not None else self.warmup_audio
+        if path is None:
+            raise ValueError("warmup audio path is required")
+        response = self._request("warmup", path)
+        return {
+            "seconds": float(response.get("warmup_seconds") or 0.0),
+            "excluded": bool(response.get("warmup_excluded")),
+        }
 
     def close(self) -> None:
         process = self._process

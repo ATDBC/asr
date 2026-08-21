@@ -12,6 +12,7 @@ work_dir = "/var/tmp/funasr-transcriber"
 worker_python = "/opt/funasr-transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
 use_half = true
+aed_worker_count = 2
 segment_batch_size = 8
 segment_frame_budget = 8000
 segment_memory_limit_mib = 10000

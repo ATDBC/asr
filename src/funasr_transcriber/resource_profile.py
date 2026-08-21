@@ -112,6 +112,8 @@ class ResourceSampler:
         self._sample_count = 0
         self._minimum_free_mib: int | None = None
         self._total_mib: int | None = None
+        self._other_project_baseline_mib: int | None = None
+        self._peak_total_used_mib: int | None = None
         self._process_peak_mib: dict[str, int] = {}
         self._cpu_rss_peak_kib: dict[str, int] = {}
         self._pid_observed = {name: False for name in self._pid_getters}
@@ -191,6 +193,22 @@ class ResourceSampler:
                     if self._minimum_free_mib is None
                     else min(self._minimum_free_mib, free)
                 )
+                if isinstance(total, int):
+                    used = max(0, total - free)
+                    self._peak_total_used_mib = max(
+                        self._peak_total_used_mib or 0,
+                        used,
+                    )
+                    known_project_mib = sum(
+                        int(value)
+                        for pid, value in process_memory.items()
+                        if pid in set(registered.values())
+                    )
+                    if self._other_project_baseline_mib is None:
+                        self._other_project_baseline_mib = max(
+                            0,
+                            used - known_project_mib,
+                        )
             for name, pid in registered.items():
                 memory_mib = process_memory.get(pid)
                 if memory_mib is not None:
@@ -247,6 +265,18 @@ class ResourceSampler:
                     "total_mib": self._total_mib,
                     "minimum_free_mib": self._minimum_free_mib,
                 },
+                "other_project_baseline_mib": self._other_project_baseline_mib,
+                "peak_total_used_mib": self._peak_total_used_mib,
+                "net_service_peak_mib": (
+                    None
+                    if self._peak_total_used_mib is None
+                    or self._other_project_baseline_mib is None
+                    else max(
+                        0,
+                        self._peak_total_used_mib
+                        - self._other_project_baseline_mib,
+                    )
+                ),
                 "process_peak_mib": dict(self._process_peak_mib),
                 "cpu_rss_peak_kib": dict(self._cpu_rss_peak_kib),
                 "pid_observed": dict(self._pid_observed),

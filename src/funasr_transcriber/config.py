@@ -27,6 +27,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
         "timeout_seconds": 1800,
         "use_half": True,
+        "aed_worker_count": 2,
         "segment_batch_size": 8,
         "segment_frame_budget": 8000,
         "segment_memory_limit_mib": 10000,
@@ -93,6 +94,7 @@ class AsrConfig:
     worker_python: Path
     timeout_seconds: int
     use_half: bool
+    aed_worker_count: int
     segment_batch_size: int
     segment_frame_budget: int
     segment_memory_limit_mib: int
@@ -241,6 +243,7 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             ).expanduser(),
             timeout_seconds=int(values["asr"]["timeout_seconds"]),
             use_half=bool(values["asr"]["use_half"]),
+            aed_worker_count=int(values["asr"]["aed_worker_count"]),
             segment_batch_size=int(values["asr"]["segment_batch_size"]),
             segment_frame_budget=int(values["asr"]["segment_frame_budget"]),
             segment_memory_limit_mib=int(
@@ -312,6 +315,8 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("ASR timeout_seconds must be positive")
     if config.asr.segment_batch_size <= 0:
         raise ValueError("ASR segment_batch_size must be positive")
+    if config.asr.aed_worker_count not in (1, 2):
+        raise ValueError("ASR aed_worker_count must be 1 or 2")
     if config.asr.segment_frame_budget <= 0:
         raise ValueError("ASR segment_frame_budget must be positive")
     if config.asr.segment_memory_limit_mib <= 0:

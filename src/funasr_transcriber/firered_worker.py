@@ -313,6 +313,141 @@ def _scheduled_process(
     }
 
 
+def _explicit_aed_process(
+    system: FireRedSystem,
+    wav_path: str,
+    uttid: str,
+    batch_plan: list[list[dict[str, object]]],
+    vad_segments: list[tuple[float, float]],
+    clock: Callable[[], float] = time.perf_counter,
+) -> dict[str, object]:
+    """Execute a caller-owned immutable batch plan without VAD or Punc."""
+
+    import soundfile as sf
+
+    wav_np, sample_rate = sf.read(wav_path, dtype="int16")
+    duration_s = wav_np.shape[0] / sample_rate
+    records: list[dict[str, object]] = []
+    for raw_batch in batch_plan:
+        batch_uttid: list[str] = []
+        batch_wav: list[tuple[int, object]] = []
+        batch_items: list[dict[str, object]] = []
+        for raw_item in raw_batch:
+            if not isinstance(raw_item, dict):
+                raise ValueError("batch_plan items must be objects")
+            index = int(raw_item["index"])
+            start_ms = int(raw_item["start_ms"])
+            end_ms = int(raw_item["end_ms"])
+            if start_ms < 0 or end_ms <= start_ms:
+                raise ValueError("batch_plan item bounds are invalid")
+            start = int(start_ms * sample_rate / 1000)
+            end = int(end_ms * sample_rate / 1000)
+            item_uttid = f"{uttid}_s{start_ms}_e{end_ms}"
+            batch_uttid.append(item_uttid)
+            batch_wav.append((sample_rate, wav_np[start:end]))
+            batch_items.append({"index": index, "uttid": item_uttid})
+        if not batch_uttid:
+            continue
+        _reset_cuda_peak_memory()
+        started = clock()
+        results = system.asr.transcribe(batch_uttid, batch_wav)
+        _synchronize_cuda()
+        returned = {str(result.get("uttid")): result for result in results}
+        for item in batch_items:
+            result = returned.get(str(item["uttid"]))
+            if result is None:
+                continue
+            text = str(result.get("text", "")).strip()
+            if not text or re.search(r"(<blank>)|(<sil>)", text):
+                continue
+            records.append({"index": item["index"], "result": result})
+        LOGGER.debug("explicit AED batch completed in %.3fs", clock() - started)
+
+    records.sort(key=lambda item: int(item["index"]))
+    return {
+        "uttid": uttid,
+        "duration_ms": int(round(duration_s * 1000)),
+        "vad_segments_ms": [
+            [int(round(start * 1000)), int(round(end * 1000))]
+            for start, end in vad_segments
+        ],
+        "aed_results": records,
+    }
+
+
+def _punctuate_aed_results(
+    system: FireRedSystem,
+    request_id: str,
+    aed_results: list[dict[str, object]],
+    duration_ms: int,
+    vad_segments_ms: list[list[int]],
+    batch_size: int,
+) -> dict[str, object]:
+    """Apply one shared Punc model and produce the normal raw result shape."""
+
+    ordered = sorted(aed_results, key=lambda item: int(item["index"]))
+    results = [item["result"] for item in ordered]
+    sentences: list[dict[str, object]] = []
+    words: list[dict[str, object]] = []
+    for offset in range(0, len(results), max(1, batch_size)):
+        group = results[offset:offset + max(1, batch_size)]
+        punctuated = system.punc.process_with_timestamp(
+            [result.get("timestamp", []) for result in group],
+            [str(result["uttid"]) for result in group],
+        )
+        for asr_result, punc_result in zip(group, punctuated):
+            start_ms, end_ms = str(asr_result["uttid"]).split("_")[-2:]
+            start_ms = int(start_ms[1:])
+            end_ms = int(end_ms[1:])
+            for index, sentence in enumerate(punc_result["punc_sentences"]):
+                start = start_ms + int(float(sentence["start_s"]) * 1000)
+                end = end_ms if index == len(punc_result["punc_sentences"]) - 1 else start_ms + int(float(sentence["end_s"]) * 1000)
+                if index == 0:
+                    start = start_ms
+                sentences.append({
+                    "start_ms": start,
+                    "end_ms": end,
+                    "text": sentence["punc_text"],
+                    "asr_confidence": asr_result["confidence"],
+                })
+            for word, start, end in asr_result.get("timestamp", []):
+                words.append({
+                    "start_ms": int(float(start) * 1000 + start_ms),
+                    "end_ms": int(float(end) * 1000 + start_ms),
+                    "text": word,
+                })
+    text = "".join(str(sentence["text"]) for sentence in sentences)
+    text = re.sub(r"([.,!?])\s*([a-zA-Z])", r"\1 \2", text)
+    return {
+        "uttid": request_id,
+        "text": text,
+        "sentences": sentences,
+        "vad_segments_ms": vad_segments_ms,
+        "dur_s": duration_ms / 1000.0,
+        "words": words,
+    }
+
+
+def _warmup_process(system: FireRedSystem, wav_path: str) -> None:
+    """Exercise the resident AED/Punc CUDA paths before production timing."""
+
+    import soundfile as sf
+
+    wav_np, sample_rate = sf.read(wav_path, dtype="int16")
+    if getattr(system, "asr", None) is not None:
+        uttid = "__firered_warmup__"
+        asr_results = system.asr.transcribe(
+            [uttid], [(sample_rate, wav_np)]
+        )
+        punc = getattr(system, "punc", None)
+        if punc is not None and asr_results:
+            punc.process_with_timestamp(
+                [asr_results[0].get("timestamp", [])],
+                [uttid],
+            )
+    _synchronize_cuda()
+
+
 class FireRedSystem(Protocol):
     def process(self, path: str, uttid: str) -> dict[str, object]:
         """Run the complete VAD, AED, and punctuation path."""
@@ -566,6 +701,20 @@ def serve(
                     {"id": identifier, "ok": True, "shutdown": True},
                 )
                 return
+            if action == "warmup":
+                path = _validate_audio(request.get("audio_path"), audio_info)
+                warmup_started = clock()
+                _warmup_process(system, str(path))
+                _write_response(
+                    protocol_output,
+                    {
+                        "id": identifier,
+                        "ok": True,
+                        "warmup_seconds": clock() - warmup_started,
+                        "warmup_excluded": True,
+                    },
+                )
+                continue
             if action == "status":
                 _write_response(
                     protocol_output,
@@ -580,7 +729,9 @@ def serve(
                     },
                 )
                 continue
-            if action not in {"transcribe", "verify"}:
+            if action not in {
+                "transcribe", "verify", "refine_vad", "aed_plan", "punctuate"
+            }:
                 raise ValueError(f"unsupported worker action: {action}")
             path = _validate_audio(request.get("audio_path"), audio_info)
             raw_segments = request.get("vad_segments_ms")
@@ -589,6 +740,66 @@ def serve(
                 if raw_segments is None
                 else _parse_scripted_segments(raw_segments)
             )
+            if action == "refine_vad":
+                if scripted_segments is None:
+                    raise ValueError("refine_vad requires vad_segments_ms")
+                original_vad = getattr(system, "vad", None)
+                if original_vad is None:
+                    raise ValueError("worker was started without VAD")
+                refined, _ = ScriptedVad(scripted_segments, original_vad).detect(str(path))
+                _write_response(
+                    protocol_output,
+                    {
+                        "id": identifier,
+                        "ok": True,
+                        "vad_segments_ms": [
+                            [int(round(start * 1000)), int(round(end * 1000))]
+                            for start, end in refined["timestamps"]
+                        ],
+                    },
+                )
+                continue
+            if action == "aed_plan":
+                if scripted_segments is None:
+                    raise ValueError("aed_plan requires vad_segments_ms")
+                raw_plan = request.get("batch_plan")
+                if not isinstance(raw_plan, list):
+                    raise ValueError("aed_plan requires batch_plan")
+                response = _explicit_aed_process(
+                    system,
+                    str(path),
+                    identifier,
+                    raw_plan,
+                    scripted_segments,
+                )
+                _write_response(
+                    protocol_output,
+                    {"id": identifier, "ok": True, **response},
+                )
+                continue
+            if action == "punctuate":
+                raw_results = request.get("aed_results")
+                if not isinstance(raw_results, list):
+                    raise ValueError("punctuate requires aed_results")
+                raw_vad_ms = request.get("vad_segments_ms")
+                if not isinstance(raw_vad_ms, list):
+                    raise ValueError("punctuate requires vad_segments_ms")
+                duration_ms = int(request.get("duration_ms") or 0)
+                if duration_ms <= 0:
+                    raise ValueError("punctuate requires positive duration_ms")
+                response = _punctuate_aed_results(
+                    system,
+                    identifier,
+                    raw_results,
+                    duration_ms,
+                    raw_vad_ms,
+                    int(getattr(system.config, "punc_batch_size", 1)),
+                )
+                _write_response(
+                    protocol_output,
+                    normalize_official_result(identifier, response),
+                )
+                continue
             inference_started = clock()
             if scripted_segments is None:
                 raw = system.process(str(path), uttid=identifier)
@@ -645,6 +856,8 @@ def build_firered_system(
     segment_memory_limit_mib: int = 10_000,
     segment_memory_safety_mib: int = 512,
     use_half: bool = False,
+    enable_vad: bool = True,
+    enable_punc: bool = True,
 ) -> FireRedSystem:
     """Construct the AED/Punc worker and its hosted speaker-VAD helper."""
 
@@ -703,15 +916,16 @@ def build_firered_system(
         punc_config=FireRedPuncConfig(use_gpu=True),
         asr_batch_size=segment_batch_size,
         punc_batch_size=segment_batch_size,
-        enable_vad=True,
+        enable_vad=enable_vad,
         enable_lid=False,
-        enable_punc=True,
+        enable_punc=enable_punc,
     )
     system = FireRedAsr2System(config)
     system.config.segment_frame_budget = segment_frame_budget
     system.config.segment_memory_limit_mib = segment_memory_limit_mib
     system.config.segment_memory_safety_mib = segment_memory_safety_mib
-    system.vad = GuardedVad(system.vad)
+    if system.vad is not None:
+        system.vad = GuardedVad(system.vad)
     return system
 
 
@@ -724,6 +938,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--segment-memory-limit-mib", type=_positive_int, default=10_000)
     parser.add_argument("--segment-memory-safety-mib", type=_nonnegative_int, default=512)
     parser.add_argument("--use-half", action="store_true")
+    parser.add_argument("--disable-vad", action="store_true")
+    parser.add_argument("--disable-punc", action="store_true")
     return parser
 
 
@@ -760,6 +976,8 @@ def main(argv: list[str] | None = None) -> int:
             args.segment_memory_limit_mib,
             args.segment_memory_safety_mib,
             args.use_half,
+            not args.disable_vad,
+            not args.disable_punc,
         ),
         peak_sampler=_peak_gpu_bytes,
     )

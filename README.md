@@ -89,6 +89,7 @@ work_dir = "/var/tmp/funasr-transcriber"
 worker_python = "/path/to/standalone_transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
 use_half = true                 # GPU 支持时由 FireRed 选择 BF16
+aed_worker_count = 2            # 两个 AED；worker-0 独占 VAD/Punc
 segment_batch_size = 8
 segment_frame_budget = 8000
 segment_memory_limit_mib = 10000
@@ -119,6 +120,17 @@ GPU 1 重映射成逻辑 `cuda:0`。配置优先级为：
 VAD 段仍按原时间顺序导出，完整计划、实际观测和预测超限记录写入
 `diagnostics.json.scheduler`。默认 8 是速度与显存校准后的取值，注意 batch 8 的转写与 batch 1/4
 不完全逐字一致（batch 间浮点差异），但同一 batch 重复运行结果稳定。
+
+生产默认常驻两个 AED worker，但只加载一个 Punc 模型。说话人分离完成后，worker-0 对全部
+speaker 区间执行一次全局 FireRedVAD；主进程随后生成一份完整 batch 计划，并按预测耗时用
+LPT 将完整 batch 分到两个 AED。两个 worker 不重新分组，结果按原始片段索引合并后再交给
+worker-0 的单个 Punc 模型。`aed_worker_count = 1` 可回退到单 worker；当前 24 GiB GPU
+必须通过现有 GPU 空间准入检查后才会启动两路 AED。
+
+服务启动完成模型加载后会用短音频预热 AED/Punc；预热不计入作业耗时。启用
+`--profile-resources` 时，`diagnostics.json` 的 `stage_seconds` 会记录预热后的 diarization、
+VAD、AED 计划/推理、Punc、对齐和端到端耗时；`resource_profile` 还记录 GPU 总占用峰值、
+本服务登记 PID 峰值，以及减去作业开始时其他项目基线后的 `net_service_peak_mib`。
 
 生产默认 `use_half = true`。FireRed 上游在 GPU 支持 BF16 时将该选项解析为
 `torch.bfloat16`；不支持 BF16 的设备才会退化到上游的 FP16 路径。设为 `false` 可恢复

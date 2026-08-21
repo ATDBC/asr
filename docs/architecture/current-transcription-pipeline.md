@@ -1,7 +1,7 @@
 # 当前录音转录流程
 
 生产转录由本机常驻服务执行。客户端通过 Unix socket 提交作业；服务只使用物理 GPU 0，
-长期持有一个 FireRedWorkerClient 和一个 SpeakerDiarizer。除非收到 `service stop` 或
+长期持有两个 AED FireRedWorkerClient、一个共享 Punc/VAD owner 和一个 SpeakerDiarizer。除非收到 `service stop` 或
 执行显式 overlap 作业，模型不会在每次 CLI 调用后卸载。
 
 ## 服务生命周期与普通作业
@@ -17,8 +17,11 @@ funasr-transcribe recording.wav
        │
        ├─ SpeakerDiarizer.diarize(normalized.wav)
        │        ↓ 长 speaker 段共享一次全局 FireRedVAD，再与各段求交
-       └─ FireRedWorkerClient.transcribe(normalized.wav, vad_segments_ms)
-                （FireRedASR2-AED + FireRedPunc）
+       └─ worker-0 全局 FireRedVAD → 主进程固定 batch 计划
+             ┌─ FireRed AED worker-0 ─┐
+             └─ FireRed AED worker-1 ─┘
+                    ↓ 按原始 index 合并
+                worker-0 的单个 FireRedPunc
               ↑
        diarization 先行完成；ASR 只使用 diarization 段落；超过 10 秒的长 turn
        触发一次全局 FireRedVAD，结果与每个 speaker 区间求交后再进入 AED/Punc；
@@ -26,11 +29,12 @@ funasr-transcribe recording.wav
               │
        token 按所在段直接归属说话人、轮次构建、原子导出 TXT / JSON / diagnostics
               │
-       两个热模型继续常驻，供 FIFO 中的下一个作业复用
+       所有热模型继续常驻，供 FIFO 中的下一个作业复用
 ```
 
-服务启动会先只读检查 GPU 0 的并行预算，然后并发加载 FireRed AED/Punc worker 和 3D-Speaker。
-FireRed 的首个 `status` 请求是加载握手，不执行音频推理。FireRed 仍在独立的
+服务启动会先只读检查 GPU 0 的并行预算，然后并发加载两个 FireRed AED 和 3D-Speaker；
+worker-0 独占 Punc 与 FireRedVAD，worker-1 不加载这两个模块。两个 worker 的首个 `status`
+请求完成后，服务用短音频预热 AED/Punc；预热不计入后续作业耗时。FireRed 仍在独立的
 `.venv-asr` 子进程；主服务进程不导入 FireRed 运行时。服务停止时会先进入 draining，
 拒绝新的提交、完成已经接受的作业，再关闭热模型；因此 `funasr-transcribe service stop`
 是释放本项目常驻显存的唯一正常操作。
@@ -58,34 +62,35 @@ funasr-transcribe service stop --config /etc/funasr-transcriber.toml
 
 ## FireRed worker 边界与功能归类
 
-本文中“FireRed worker”专指 FireRedASR2-AED 与 FireRedPunc 的隔离常驻 worker。
+本文中“FireRed worker”专指隔离常驻的 FireRed AED owner；生产部署为两个 AED worker，
+worker-0 额外持有唯一的 FireRedPunc。
 FireRedVAD 在功能上归属于说话人分离阶段：它只负责把超过 10 秒的 speaker 区间细分为
 可供 AED 解码的语音区间。由于官方运行时和模型依赖，FireRedVAD 目前仍由同一个
 `.venv-asr` 子进程承载；这属于进程部署方式，不改变它在流程和指标中的说话人分离角色。
 
-服务通过严格 JSON Lines 调用 `.venv-asr` 中的 FireRed AED/Punc worker。每个请求都有唯一 ID，
-支持 `transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
+服务通过严格 JSON Lines 调用 `.venv-asr` 中的 FireRed worker。每个请求都有唯一 ID，
+支持 `warmup`、`refine_vad`、固定 `aed_plan`、`punctuate`、`transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
 超时或 worker 提前退出都会成为转录错误，不会切换旧 ASR。
 
-生产 `transcribe` 请求携带 `vad_segments_ms`（diarization 段落原样发送）；worker 进程中的
+生产流程先由 worker-0 对 `vad_segments_ms`（diarization 段落原样发送）执行一次全局 VAD；
+主进程按预测耗时将完整 batch 计划分到两个 AED worker。worker 进程中的
 说话人分离 VAD helper 用脚本化 VAD 重放这些段落，其中超过 10 秒的长 turn 触发一次全局
 神经 FireRedVAD，随后
 只保留落在各 speaker 段内部的交集（无交集时退化为 10 秒硬切分）。官方 AED/Punc 批处理与 uttid
 时间戳路径保持不变，响应回显细分后的段落。未携带该字段的请求（doctor 的 `verify`、
 overlap 临时 worker 对分离轨道的重解码）仍运行 FireRedVAD。
 
-worker 固定加载 FireRedASR2S 提交
-`4e7d9aaf4482a47cec1724807026b9b151926eb5` 的 FireRedASR2-AED 和 FireRedPunc；同一
-隔离进程还承载说话人分离阶段使用的 FireRedVAD helper。语言识别模型不加载。生产段落在
-AED/Punc worker 内按时长排序后分 batch，完成 AED 后按
+worker-0 固定加载 FireRedASR2S 提交 `4e7d9aaf4482a47cec1724807026b9b151926eb5` 的
+FireRedASR2-AED、FireRedPunc 和 FireRedVAD；worker-1 只加载 FireRedASR2-AED。语言识别
+模型不加载。主进程按时长排序后分 batch，完成两路 AED 后由 worker-0 执行一次 Punc，再按
 原始时间索引恢复，因此响应顺序和 speaker 归属不变；`[asr].segment_batch_size` 是 batch
 上限，`[asr].segment_frame_budget`（默认 8000，约 80 秒特征帧）同时限制动态 batch 的总帧数。
-在第一个 AED batch 开始前，worker 按时长排序并基于初始成本模型一次性生成完整批次计划；
+在第一个 AED batch 开始前，主进程按时长排序并基于初始成本模型一次性生成完整批次计划；
 此时只读取一次 GPU 0 空闲显存，并让所有批次共同遵守
 `[asr].segment_memory_limit_mib=10000` 与 `[asr].segment_memory_safety_mib=512`。
-后续 batch 严格按该固定计划执行；batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，
+两个 worker 后续 batch 严格按各自固定计划执行；batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，
 不会重新排序或改变后续批次。该读取只调用 CUDA 只读接口，不枚举、暂停或操作其他项目进程。
-完整计划、实际观测和预测超限记录会写入 `diagnostics.json.scheduler`。
+完整计划、两路分配、实际观测和预测超限记录会写入 `diagnostics.json.scheduler`。
 doctor/overlap 请求仍保持 FireRedVAD 输出顺序。2026-08-21 在本机 GPU 0
 以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次：batch 1/4 共享稳定
 fingerprint，中位端到端 28.50 秒（batch 4），进程峰值 5,690 MiB；batch 2/8 的
@@ -137,8 +142,9 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
   无法满足释放容差时不会继续 overlap 重型阶段。
 
 启用 `--profile-resources` 后，作业的 `diagnostics.json` 额外写入：采样间隔和次数、
-服务/FireRed/临时 overlap worker 的峰值显存、服务 RSS 峰值、FireRed 与 Speaker 的模型
-inventory、以及 ASR 和 diarization 的开始/结束单调时间与耗时。采样器只接受这些明确登记
+服务/两个 FireRed/临时 overlap worker 的峰值显存、服务 RSS 峰值、FireRed 与 Speaker 的模型
+inventory、GPU 总占用峰值、初始其他项目显存基线、净服务峰值，以及预热后 ASR 和 diarization
+的开始/结束单调时间与耗时。采样器只接受这些明确登记
 的本项目 owner 名称，不会写入其他 PID、命令行或显存行。
 
 ## 对齐与输出

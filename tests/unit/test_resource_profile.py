@@ -52,3 +52,6 @@ def test_sampler_only_emits_registered_project_processes():
     assert snapshot["cpu_rss_peak_kib"] == {"service": 1000, "firered": 3000}
     assert snapshot["pid_observed"] == {"service": True, "firered": True}
     assert snapshot["sample_count"] == 1
+    assert snapshot["other_project_baseline_mib"] == 14572
+    assert snapshot["peak_total_used_mib"] == 14576
+    assert snapshot["net_service_peak_mib"] == 4

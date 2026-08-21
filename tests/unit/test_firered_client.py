@@ -213,3 +213,41 @@ def test_client_omits_vad_segments_by_default(tmp_path: Path):
         result = client.transcribe(_audio(tmp_path, "one"))
 
     assert result.vad_segments_ms == ((0, 600),)
+
+
+def test_client_serializes_parallel_actions_and_optional_modules(tmp_path: Path):
+    script = tmp_path / "parallel_worker.py"
+    script.write_text(
+        """
+import json
+for line in __import__('sys').stdin:
+    request = json.loads(line)
+    action = request['action']
+    if action == 'shutdown':
+        print(json.dumps({'id': request['id'], 'ok': True, 'shutdown': True}), flush=True)
+    elif action == 'refine_vad':
+        print(json.dumps({'id': request['id'], 'ok': True, 'vad_segments_ms': [[0, 500]]}), flush=True)
+    elif action == 'aed_plan':
+        print(json.dumps({'id': request['id'], 'ok': True, 'aed_results': [], 'vad_segments_ms': [[0, 500]], 'duration_ms': 500}), flush=True)
+    elif action == 'punctuate':
+        print(json.dumps({'id': request['id'], 'ok': True, 'text': '一。', 'tokens': [{'text': '一。', 'start_ms': 0, 'end_ms': 500, 'confidence': 0.9}], 'sentences': [{'text': '一。', 'start_ms': 0, 'end_ms': 500, 'asr_confidence': 0.9}], 'vad_segments_ms': [[0, 500]], 'duration_ms': 500}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable), model_root=tmp_path / "models",
+        device="cuda:0", timeout_seconds=1.0, stderr_log_path=tmp_path / "p.log",
+        worker_script=script, enable_vad=False, enable_punc=False,
+    )
+    wav = _audio(tmp_path, "one")
+    with client:
+        assert client.refine_vad(wav, [[0, 600]]) == [[0, 500]]
+        assert client.run_aed_plan(wav, [[{"index": 0, "start_ms": 0, "end_ms": 500}]])["aed_results"] == []
+        assert client.punctuate(wav, [], 500, [[0, 500]]).text == "一。"
+    command_client = FireRedWorkerClient(
+        worker_python=Path(sys.executable), model_root=tmp_path / "models",
+        device="cuda:0", timeout_seconds=1.0, stderr_log_path=tmp_path / "q.log",
+        enable_vad=False, enable_punc=False,
+    )
+    assert "--disable-vad" in command_client._command()
+    assert "--disable-punc" in command_client._command()

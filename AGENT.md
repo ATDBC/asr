@@ -9,7 +9,8 @@ user explicitly requests it.
 ## Production architecture
 
 - Production is pinned to physical GPU 0 (`cuda:0`).
-- The resident FireRed worker functionally means FireRedASR2-AED plus FireRedPunc.
+- Production defaults to two resident FireRed AED workers and one shared FireRedPunc model.
+  Worker 0 also hosts the single FireRedVAD helper; worker 1 loads AED only.
 - FireRedVAD is functionally part of speaker separation. It is currently hosted by the
   same `.venv-asr` subprocess for dependency and lifecycle isolation, but it must not be
   described as the AED/Punc worker's functional stage.
@@ -22,6 +23,8 @@ user explicitly requests it.
   fallback; do not silently change the default back to FP32.
 - Overlap is opt-in. When enabled, close the resident FireRed/3D-Speaker owners before
   starting pyannote/ClearVoice and reload the resident owners before the next queued job.
+- Resident workers are warmed up after loading. Job timing starts after warm-up; resource
+  profiling records total GPU peak and subtracts the initial other-project baseline.
 
 ## Safety constraints
 

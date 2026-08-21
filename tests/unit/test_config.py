@@ -100,6 +100,7 @@ def test_default_asr_worker_configuration():
     assert config.asr.timeout_seconds == 1800
     assert config.asr.use_half is True
     assert config.asr.segment_batch_size == 8
+    assert config.asr.aed_worker_count == 2
     assert config.asr.segment_frame_budget == 8000
     assert config.asr.segment_memory_limit_mib == 10000
     assert config.asr.segment_memory_safety_mib == 512
@@ -118,6 +119,8 @@ def test_asr_half_precision_can_be_disabled(tmp_path: Path):
         ("timeout_seconds = 0", "ASR timeout_seconds"),
         ("segment_batch_size = 0", "ASR segment_batch_size"),
         ("segment_batch_size = -1", "ASR segment_batch_size"),
+        ("aed_worker_count = 0", "ASR aed_worker_count"),
+        ("aed_worker_count = 3", "ASR aed_worker_count"),
         ("segment_frame_budget = -1", "ASR segment_frame_budget"),
         ("segment_memory_limit_mib = -1", "ASR segment_memory_limit_mib"),
         ("segment_memory_safety_mib = -1", "ASR segment_memory_safety_mib"),

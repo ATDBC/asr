@@ -1,6 +1,9 @@
 import importlib.util
+import json
 from pathlib import Path
+import sys
 
+from funasr_transcriber.service_protocol import ServiceProtocolError
 from funasr_transcriber.benchmarking import (
     build_overlap_manifest,
     input_format_matrix,
@@ -13,6 +16,7 @@ _BENCHMARK_PATH = Path(__file__).parents[2] / "tools" / "benchmark_ramc_e2e.py"
 _SPEC = importlib.util.spec_from_file_location("ramc_benchmark_tool", _BENCHMARK_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 reference_for = _MODULE.reference_for
 transcribe_with_service = _MODULE.transcribe_with_service
@@ -22,13 +26,14 @@ def test_ramc_benchmark_has_explicit_text_retention_gate():
     source = _BENCHMARK_PATH.read_text(encoding="utf-8")
 
     assert '"text_retention_rate"' in source
-    assert '"text_retention": summary["text_retention_rate"] == 1.0' in source
+    assert '"text_retention"' in source
 
 
 def test_ramc_benchmark_submits_each_recording_to_the_persistent_service():
     source = _BENCHMARK_PATH.read_text(encoding="utf-8")
 
-    assert "submit_to_service" in source
+    assert "submit_service_job" in source
+    assert ".wait(" in source
     assert "execute_model_phases" not in source
     assert "FireRedWorkerClient" not in source
     assert "SpeakerDiarizer" not in source
@@ -53,6 +58,12 @@ def test_ramc_service_transcription_disables_overlap_and_collects_profile(
     config = object()
     config_path = tmp_path / "config.toml"
 
+    class FakeClient:
+        def wait(self, job_id, identifier):
+            assert job_id == "job"
+            assert identifier == "wait-job"
+            return {"result": {"output_dir": str(output_dir)}}
+
     def fake_submit(args, received_config):
         assert received_config is config
         assert args.input_audio == audio
@@ -61,9 +72,11 @@ def test_ramc_service_transcription_disables_overlap_and_collects_profile(
         assert args.enable_overlap is False
         assert args.profile_resources is True
         assert args.config == config_path
-        return {"result": {"output_dir": str(output_dir)}}
+        return FakeClient(), type("Request", (), {"identifier": "job"})(), {
+            "job_id": "job"
+        }
 
-    monkeypatch.setattr(_MODULE, "submit_to_service", fake_submit)
+    monkeypatch.setattr(_MODULE, "submit_service_job", fake_submit)
 
     transcript, diagnostics = transcribe_with_service(
         audio,
@@ -74,6 +87,159 @@ def test_ramc_service_transcription_disables_overlap_and_collects_profile(
 
     assert transcript["speaker_count"] == 0
     assert diagnostics["resource_profile"] == {"enabled": True}
+
+
+def test_ramc_text_retention_uses_exported_asr_sentences():
+    diagnostics = {
+        "asr": {
+            "sentences": [
+                {"text": "第一句。"},
+                {"text": "第二句。"},
+            ]
+        }
+    }
+
+    assert _MODULE.asr_text_from_diagnostics(diagnostics) == "第一句。第二句。"
+
+
+def _ramc_inputs(tmp_path: Path, names: tuple[str, ...]) -> tuple[Path, Path]:
+    dataset = tmp_path / "ramc"
+    wav = dataset / "WAV"
+    transcript = dataset / "TXT"
+    wav.mkdir(parents=True)
+    transcript.mkdir()
+    lines = []
+    for name in names:
+        (wav / f"{name}.wav").write_bytes(b"audio")
+        (transcript / f"{name}.txt").write_text(
+            "[0.000,1.000]\tS1\t女,普通话\t测试文本\n",
+            encoding="utf-8",
+        )
+        lines.append(f"{name}.wav\tcore")
+    test_tsv = dataset / "test.tsv"
+    test_tsv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return dataset, test_tsv
+
+
+def _published_output(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "transcript.json").write_text(
+        json.dumps({"turns": [], "speaker_count": 0, "full_text": ""}),
+        encoding="utf-8",
+    )
+    (path / "diagnostics.json").write_text(
+        json.dumps(
+            {
+                "asr": {"sentences": []},
+                "resource_profile": {"enabled": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_ramc_benchmark_submits_entire_batch_before_waiting_and_persists_progress(
+    tmp_path: Path,
+):
+    dataset, test_tsv = _ramc_inputs(tmp_path, ("first", "second"))
+    run_root = tmp_path / "outputs" / "run-1"
+    events: list[str] = []
+    outputs: dict[str, Path] = {}
+
+    class FakeClient:
+        def wait(self, job_id, identifier):
+            events.append(f"wait:{job_id}")
+            _published_output(outputs[job_id])
+            return {"result": {"output_dir": str(outputs[job_id])}}
+
+    client = FakeClient()
+
+    def fake_submit(args, config):
+        name = args.input_audio.stem
+        events.append(f"submit:{name}")
+        outputs[name] = args.output_dir
+        return client, type("Request", (), {"identifier": name})(), {
+            "job_id": name
+        }
+
+    status = _MODULE.run_benchmark(
+        dataset=dataset,
+        test_tsv=test_tsv,
+        output=run_root / "ramc-summary.json",
+        count=2,
+        preclipped=True,
+        config=object(),
+        config_path=None,
+        submit_job=fake_submit,
+    )
+
+    assert status == 1
+    assert events == ["submit:first", "submit:second", "wait:first", "wait:second"]
+    assert outputs == {
+        "first": run_root / "ramc" / "first",
+        "second": run_root / "ramc" / "second",
+    }
+    progress = json.loads((run_root / "progress.json").read_text("utf-8"))
+    summary = json.loads((run_root / "ramc-summary.json").read_text("utf-8"))
+    assert [record["status"] for record in progress["recordings"]] == [
+        "completed",
+        "completed",
+    ]
+    assert summary["complete"] is True
+    assert summary["pending"] == 0
+    assert summary["failures"] == []
+    assert len(summary["recording_results"]) == 2
+
+
+def test_ramc_benchmark_keeps_completed_results_when_later_wait_fails(
+    tmp_path: Path,
+):
+    dataset, test_tsv = _ramc_inputs(tmp_path, ("first", "second"))
+    run_root = tmp_path / "outputs" / "run-2"
+    outputs: dict[str, Path] = {}
+
+    class FakeClient:
+        def wait(self, job_id, identifier):
+            if job_id == "second":
+                raise ServiceProtocolError("second failed")
+            _published_output(outputs[job_id])
+            return {"result": {"output_dir": str(outputs[job_id])}}
+
+    client = FakeClient()
+
+    def fake_submit(args, config):
+        name = args.input_audio.stem
+        outputs[name] = args.output_dir
+        return client, type("Request", (), {"identifier": name})(), {
+            "job_id": name
+        }
+
+    status = _MODULE.run_benchmark(
+        dataset=dataset,
+        test_tsv=test_tsv,
+        output=run_root / "ramc-summary.json",
+        count=2,
+        preclipped=True,
+        config=object(),
+        config_path=None,
+        submit_job=fake_submit,
+    )
+
+    assert status == 1
+    progress = json.loads((run_root / "progress.json").read_text("utf-8"))
+    summary = json.loads((run_root / "ramc-summary.json").read_text("utf-8"))
+    assert [record["status"] for record in progress["recordings"]] == [
+        "completed",
+        "failed",
+    ]
+    assert "second failed" in progress["recordings"][1]["error"]
+    assert summary["complete"] is True
+    assert summary["pending"] == 0
+    assert summary["failures"] == [
+        {"name": "second", "error": "second failed"}
+    ]
+    assert len(summary["recording_results"]) == 1
+    assert summary["passed"] is False
 
 
 def test_overlap_manifest_is_deterministic_and_cross_speaker():

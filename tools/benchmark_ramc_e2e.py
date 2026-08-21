@@ -491,6 +491,7 @@ def run_benchmark(
             {
                 "name": recording.name,
                 "job_id": None,
+                "queue_depth": None,
                 "status": "prepared",
                 "output_dir": str(recording.output_dir),
                 "submitted_at": None,
@@ -505,7 +506,7 @@ def run_benchmark(
             atomic_write_json(summary_path, payload)
             return payload
 
-        persist()
+        payload = persist()
         accepted: list[tuple[PreparedRecording, dict[str, object], object, str]] = []
         submit_error: str | None = None
         for index, recording in enumerate(prepared):
@@ -513,6 +514,8 @@ def run_benchmark(
             if submit_error is not None:
                 entry["status"] = "not_submitted"
                 entry["error"] = submit_error
+                entry["completed_at"] = time()
+                payload = persist()
                 continue
             try:
                 client, request, acknowledgement = submit_job(
@@ -522,7 +525,13 @@ def run_benchmark(
                 job_id = acknowledgement.get("job_id")
                 if not isinstance(job_id, str) or not job_id:
                     raise ServiceProtocolError("service did not return an accepted job id")
+                queue_depth = acknowledgement.get("queue_depth")
+                if not isinstance(queue_depth, int) or isinstance(queue_depth, bool):
+                    raise ServiceProtocolError(
+                        "service did not return an accepted queue depth"
+                    )
                 entry["job_id"] = job_id
+                entry["queue_depth"] = queue_depth
                 entry["status"] = "accepted"
                 entry["submitted_at"] = time()
                 accepted.append((recording, entry, client, job_id))

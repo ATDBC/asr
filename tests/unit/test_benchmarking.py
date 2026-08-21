@@ -159,7 +159,8 @@ def test_ramc_benchmark_submits_entire_batch_before_waiting_and_persists_progres
         events.append(f"submit:{name}")
         outputs[name] = args.output_dir
         return client, type("Request", (), {"identifier": name})(), {
-            "job_id": name
+            "job_id": name,
+            "queue_depth": len(outputs),
         }
 
     status = _MODULE.run_benchmark(
@@ -185,6 +186,7 @@ def test_ramc_benchmark_submits_entire_batch_before_waiting_and_persists_progres
         "completed",
         "completed",
     ]
+    assert [record["queue_depth"] for record in progress["recordings"]] == [1, 2]
     assert summary["complete"] is True
     assert summary["pending"] == 0
     assert summary["failures"] == []
@@ -211,7 +213,8 @@ def test_ramc_benchmark_keeps_completed_results_when_later_wait_fails(
         name = args.input_audio.stem
         outputs[name] = args.output_dir
         return client, type("Request", (), {"identifier": name})(), {
-            "job_id": name
+            "job_id": name,
+            "queue_depth": len(outputs),
         }
 
     status = _MODULE.run_benchmark(
@@ -240,6 +243,41 @@ def test_ramc_benchmark_keeps_completed_results_when_later_wait_fails(
     ]
     assert len(summary["recording_results"]) == 1
     assert summary["passed"] is False
+
+
+def test_ramc_benchmark_persists_submit_failure_and_unsubmitted_remainder(
+    tmp_path: Path,
+):
+    dataset, test_tsv = _ramc_inputs(tmp_path, ("first", "second"))
+    run_root = tmp_path / "outputs" / "run-3"
+
+    def rejected_submit(args, config):
+        raise ServiceProtocolError("queue capacity exhausted")
+
+    status = _MODULE.run_benchmark(
+        dataset=dataset,
+        test_tsv=test_tsv,
+        output=run_root / "ramc-summary.json",
+        count=2,
+        preclipped=True,
+        config=object(),
+        config_path=None,
+        submit_job=rejected_submit,
+    )
+
+    assert status == 1
+    progress = json.loads((run_root / "progress.json").read_text("utf-8"))
+    summary = json.loads((run_root / "ramc-summary.json").read_text("utf-8"))
+    assert [record["status"] for record in progress["recordings"]] == [
+        "failed",
+        "not_submitted",
+    ]
+    assert summary["complete"] is True
+    assert summary["pending"] == 0
+    assert summary["failures"] == [
+        {"name": "first", "error": "queue capacity exhausted"},
+        {"name": "second", "error": "queue capacity exhausted"},
+    ]
 
 
 def test_overlap_manifest_is_deterministic_and_cross_speaker():

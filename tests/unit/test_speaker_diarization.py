@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 from funasr_transcriber.speaker_diarization import (
     SpeakerDiarizer,
@@ -91,3 +92,14 @@ def test_close_releases_owned_cuda_models_and_is_idempotent():
     assert diarizer.embedding_model is None
     assert diarizer.vad_model is None
     assert calls == ["empty_cache"]
+
+
+def test_speaker_inventory_reports_embedding_and_uninspectable_vad():
+    diarizer = object.__new__(SpeakerDiarizer)
+    diarizer.embedding_model = torch.nn.Linear(2, 1)
+    diarizer.vad_model = object()
+
+    inventory = diarizer.resource_inventory()
+
+    assert inventory["embedding"]["parameter_count"] == 3
+    assert inventory["vad"] == {"available": False}

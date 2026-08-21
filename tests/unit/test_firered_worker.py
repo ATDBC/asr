@@ -148,6 +148,29 @@ def test_verify_runs_the_full_system(tmp_path: Path):
     assert system.calls == [(str(wav), "doctor")]
 
 
+def test_worker_status_returns_loaded_inventory_without_audio():
+    system = FakeSystem({})
+    target = StringIO()
+    times = iter((1.0, 3.5))
+
+    serve(
+        StringIO(_request("status", "status")),
+        target,
+        lambda: system,
+        clock=lambda: next(times),
+        peak_sampler=lambda: 456,
+        inventory_provider=lambda _: {"models": ["vad"]},
+    )
+
+    assert json.loads(target.getvalue()) == {
+        "id": "status",
+        "ok": True,
+        "status": {"models": ["vad"]},
+        "metrics": {"load_seconds": 2.5, "peak_gpu_bytes": 456},
+    }
+    assert system.calls == []
+
+
 def test_invalid_json_does_not_pollute_following_response(tmp_path: Path):
     wav = (tmp_path / "normalized.wav").resolve()
     wav.write_bytes(b"fake")

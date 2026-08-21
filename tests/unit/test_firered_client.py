@@ -26,6 +26,13 @@ def _fake_worker(tmp_path: Path, mode: str = "normal") -> Path:
                 if request["action"] == "shutdown":
                     print(json.dumps({{"id": request["id"], "ok": True, "shutdown": True}}), flush=True)
                     break
+                if request["action"] == "status":
+                    print(json.dumps({{
+                        "id": request["id"], "ok": True,
+                        "status": {{"models": ["vad"]}},
+                        "metrics": {{"load_seconds": 1.0, "peak_gpu_bytes": 2}}
+                    }}), flush=True)
+                    continue
                 if MODE == "crash":
                     raise SystemExit(7)
                 if MODE == "timeout":
@@ -100,6 +107,17 @@ def test_client_verify_uses_same_stable_result(tmp_path: Path):
 
     assert result.text == "一。"
     assert client.last_response["text"] == "一。"
+
+
+def test_client_status_reuses_existing_worker(tmp_path: Path):
+    with _client(tmp_path) as client:
+        first_pid = client.pid
+        status = client.status()
+
+        assert client.pid == first_pid
+
+    assert first_pid is not None
+    assert status == {"models": ["vad"]}
 
 
 @pytest.mark.parametrize(

@@ -117,6 +117,42 @@ def _peak_gpu_bytes() -> int | None:
     return int(torch.cuda.max_memory_allocated())
 
 
+def firered_inventory(system: FireRedSystem) -> dict[str, object]:
+    """Return concrete module facts after the official system has loaded."""
+
+    from .resource_profile import module_inventory
+
+    owners = (
+        ("vad", "vad_model"),
+        ("lid", "model"),
+        ("asr", "model"),
+        ("punc", "model"),
+    )
+    modules: dict[str, object] = {}
+    for owner_name, model_name in owners:
+        owner = getattr(system, owner_name, None)
+        model = getattr(owner, model_name, None)
+        if model is None:
+            modules[owner_name] = {"available": False}
+        else:
+            modules[owner_name] = module_inventory(owner_name, model)
+    memory: dict[str, int | None] = {
+        "allocated_bytes": None,
+        "reserved_bytes": None,
+    }
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            memory = {
+                "allocated_bytes": int(torch.cuda.memory_allocated()),
+                "reserved_bytes": int(torch.cuda.memory_reserved()),
+            }
+    except ImportError:
+        pass
+    return {"modules": modules, "memory": memory}
+
+
 def serve(
     input_stream: IO[str],
     protocol_output: IO[str],
@@ -124,6 +160,9 @@ def serve(
     audio_info: Callable[[Path], AudioInfo] = read_audio_info,
     clock: Callable[[], float] = time.perf_counter,
     peak_sampler: Callable[[], int | None] = _no_peak_sample,
+    inventory_provider: Callable[[FireRedSystem], dict[str, object]] = (
+        firered_inventory
+    ),
 ) -> None:
     """Load FireRed once, then serve requests until shutdown or EOF."""
 
@@ -153,6 +192,20 @@ def serve(
                     {"id": identifier, "ok": True, "shutdown": True},
                 )
                 return
+            if action == "status":
+                _write_response(
+                    protocol_output,
+                    {
+                        "id": identifier,
+                        "ok": True,
+                        "status": inventory_provider(system),
+                        "metrics": {
+                            "load_seconds": load_seconds,
+                            "peak_gpu_bytes": peak_sampler(),
+                        },
+                    },
+                )
+                continue
             if action not in {"transcribe", "verify"}:
                 raise ValueError(f"unsupported worker action: {action}")
             path = _validate_audio(request.get("audio_path"), audio_info)

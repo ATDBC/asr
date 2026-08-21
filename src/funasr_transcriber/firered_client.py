@@ -241,6 +241,13 @@ class FireRedWorkerClient:
             self._request("verify", Path(audio_path))
         )
 
+    def status(self) -> dict[str, object]:
+        response = self._request("status")
+        status = response.get("status")
+        if not isinstance(status, dict):
+            raise TranscriptionError("FireRed worker returned invalid status")
+        return status
+
     def close(self) -> None:
         process = self._process
         if process is None:

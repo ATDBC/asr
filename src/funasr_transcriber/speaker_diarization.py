@@ -425,6 +425,54 @@ class SpeakerDiarizer:
         embedding = self._extract_embeddings([(0.0, duration)], wav)[0]
         return embedding / (np.linalg.norm(embedding) + 1e-8)
 
+    def resource_inventory(self) -> dict[str, object]:
+        """Describe inspectable 3D-Speaker modules without running inference."""
+
+        from .resource_profile import module_inventory
+
+        embedding = module_inventory("embedding", self.embedding_model)
+        vad_candidate = getattr(self.vad_model, "model", None)
+        if (
+            vad_candidate is None
+            or not hasattr(vad_candidate, "parameters")
+            or not hasattr(vad_candidate, "buffers")
+        ):
+            vad: dict[str, object] = {"available": False}
+        else:
+            vad = module_inventory("vad", vad_candidate)
+        return {"embedding": embedding, "vad": vad}
+
+    def diarize_with_resource_metrics(
+        self,
+        wav_path: Path,
+    ) -> tuple[tuple[SpeakerSegment, ...], dict[str, int | None]]:
+        """Run diarization and capture PyTorch memory only for opt-in profiling."""
+
+        torch = self.torch
+        if not torch.cuda.is_available():
+            return self.diarize(wav_path), {
+                "allocated_before_bytes": None,
+                "reserved_before_bytes": None,
+                "allocated_after_bytes": None,
+                "reserved_after_bytes": None,
+                "peak_allocated_bytes": None,
+                "peak_reserved_bytes": None,
+            }
+        torch.cuda.synchronize()
+        before_allocated = int(torch.cuda.memory_allocated())
+        before_reserved = int(torch.cuda.memory_reserved())
+        torch.cuda.reset_peak_memory_stats()
+        segments = self.diarize(wav_path)
+        torch.cuda.synchronize()
+        return segments, {
+            "allocated_before_bytes": before_allocated,
+            "reserved_before_bytes": before_reserved,
+            "allocated_after_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_after_bytes": int(torch.cuda.memory_reserved()),
+            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+        }
+
     def close(self) -> None:
         if getattr(self, "_closed", False):
             return

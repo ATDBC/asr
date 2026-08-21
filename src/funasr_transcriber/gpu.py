@@ -105,6 +105,52 @@ def require_gpu_capacity(
     return sample
 
 
+def require_concurrent_gpu_capacity(
+    device: str,
+    minimum_total_mib: int,
+    required_free_mib: int,
+    runner: Callable[..., Any] = subprocess.run,
+) -> GpuSample:
+    """Require the pre-calibrated free-memory budget for concurrent owners."""
+
+    return require_gpu_capacity(
+        device,
+        runner=runner,
+        minimum_total_mib=minimum_total_mib,
+        minimum_free_mib=required_free_mib,
+    )
+
+
+def query_gpu_process_memory(
+    device: str,
+    allowed_pids: set[int],
+    runner: Callable[..., Any] = subprocess.run,
+) -> dict[int, int]:
+    """Read memory only for the explicitly registered project PIDs."""
+
+    _device_index(device)
+    completed = runner(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=pid,used_memory",
+            "--format=csv,noheader,nounits",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise TranscriberEnvironmentError(
+            "nvidia-smi process monitoring failed: "
+            f"{str(completed.stderr).strip()}"
+        )
+    from .resource_profile import parse_process_memory_mib
+
+    return parse_process_memory_mib(str(completed.stdout), allowed_pids)
+
+
 def build_gpu_stage_record(
     before: GpuSample,
     after: GpuSample,

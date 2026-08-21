@@ -7,6 +7,7 @@ from funasr_transcriber.gpu import (
     GpuSample,
     build_gpu_stage_record,
     query_gpu,
+    require_concurrent_gpu_capacity,
     require_gpu_capacity,
 )
 
@@ -62,6 +63,16 @@ def test_capacity_accepts_exact_total_and_free_thresholds():
 def test_capacity_rejects_insufficient_memory(output: str, message: str):
     with pytest.raises(EnvironmentError, match=message):
         require_gpu_capacity("cuda:0", runner=_runner(output))
+
+
+def test_concurrent_capacity_requires_configured_total_budget():
+    with pytest.raises(EnvironmentError, match="free memory"):
+        require_concurrent_gpu_capacity(
+            "cuda:0",
+            runner=_runner("0, RTX 3090, 24576, 13311, 580.142"),
+            minimum_total_mib=23 * 1024,
+            required_free_mib=13 * 1024,
+        )
 
 
 @pytest.mark.parametrize("device", ("cpu", "cuda", "cuda:x", "cuda:-1"))

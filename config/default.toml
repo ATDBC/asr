@@ -19,7 +19,9 @@ min_speakers = 1
 max_speakers = 10
 chunk_seconds = 1.0
 chunk_step_seconds = 0.5
-merge_cosine = 0.5
+merge_cosine = 0.23
+merge_min_fraction = 0.6
+merge_relative_ratio = 0.55
 
 [vad]
 speech_noise_thres = 0.45

@@ -48,7 +48,19 @@ def merge_oversegmented_clusters(
     embeddings: np.ndarray,
     cluster_labels: np.ndarray | list[int],
     threshold: float,
+    min_fraction: float = 0.6,
+    relative_ratio: float = 0.55,
 ) -> list[int]:
+    """Merge over-split clusters whose similarity is high AND stable.
+
+    A bare mean threshold is fragile: recordings with two similar speakers
+    sit just above the line, while genuine over-segmentation shows broad
+    support across all cross-cluster pairs.  A candidate pair therefore
+    must additionally show that at least ``min_fraction`` of its cross
+    pairs reach ``threshold`` and that the cross mean is at least
+    ``relative_ratio`` of the clusters' own within-cluster means.
+    """
+
     normalized = _normalized_embeddings(embeddings)
     labels = [int(label) for label in cluster_labels]
     members: dict[int, list[int]] = {}
@@ -61,16 +73,25 @@ def merge_oversegmented_clusters(
         best_value = -1.0
         for left_index, left in enumerate(ids):
             for right in ids[left_index + 1:]:
-                value = float(
-                    (
-                        normalized[groups[left]]
-                        @ normalized[groups[right]].T
-                    ).mean()
-                )
+                cross = normalized[groups[left]] @ normalized[groups[right]].T
+                value = float(cross.mean())
+                if value < threshold:
+                    continue
+                if float((cross >= threshold).mean()) < min_fraction:
+                    continue
+                within = []
+                for group in (groups[left], groups[right]):
+                    if len(group) > 1:
+                        matrix = normalized[group] @ normalized[group].T
+                        within.append(
+                            float(matrix[np.triu_indices(len(group), 1)].mean())
+                        )
+                if within and value < relative_ratio * min(within):
+                    continue
                 if value > best_value:
                     best_value = value
                     best_pair = (left, right)
-        if best_pair is None or best_value < threshold:
+        if best_pair is None:
             break
         keep, drop = best_pair
         groups[keep].extend(groups.pop(drop))
@@ -374,6 +395,8 @@ class SpeakerDiarizer:
                 embeddings,
                 labels,
                 self.config.diarization.merge_cosine,
+                self.config.diarization.merge_min_fraction,
+                self.config.diarization.merge_relative_ratio,
             )
             labels = relabel_by_first_appearance(labels)
             raw_segments = [

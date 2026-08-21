@@ -34,7 +34,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "max_speakers": 10,
         "chunk_seconds": 1.0,
         "chunk_step_seconds": 0.5,
-        "merge_cosine": 0.5,
+        "merge_cosine": 0.23,
+        "merge_min_fraction": 0.6,
+        "merge_relative_ratio": 0.55,
     },
     "vad": {
         "speech_noise_thres": 0.45,
@@ -97,6 +99,8 @@ class DiarizationConfig:
     chunk_seconds: float
     chunk_step_seconds: float
     merge_cosine: float
+    merge_min_fraction: float
+    merge_relative_ratio: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +241,10 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             chunk_seconds=float(values["diarization"]["chunk_seconds"]),
             chunk_step_seconds=float(values["diarization"]["chunk_step_seconds"]),
             merge_cosine=float(values["diarization"]["merge_cosine"]),
+            merge_min_fraction=float(values["diarization"]["merge_min_fraction"]),
+            merge_relative_ratio=float(
+                values["diarization"]["merge_relative_ratio"]
+            ),
         ),
         vad=VadConfig(
             speech_noise_thres=float(values["vad"]["speech_noise_thres"]),
@@ -297,6 +305,12 @@ def validate(config: AppConfig) -> AppConfig:
         <= diarization.max_speakers
     ):
         raise ValueError("speaker_count must stay within min_speakers/max_speakers")
+    if not 0.0 < diarization.merge_cosine <= 1.0:
+        raise ValueError("merge_cosine must stay within 0..1")
+    if not 0.0 < diarization.merge_min_fraction <= 1.0:
+        raise ValueError("merge_min_fraction must stay within 0..1")
+    if not 0.0 < diarization.merge_relative_ratio <= 1.0:
+        raise ValueError("merge_relative_ratio must stay within 0..1")
     if config.turns.merge_gap_seconds != 1.0:
         raise ValueError("merge_gap_seconds must be 1.0 in version 1")
     service = config.service

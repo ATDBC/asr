@@ -95,17 +95,38 @@ def run_matrix(
             )
             fingerprint = _fingerprint(output_dir)
             previous = fingerprints.setdefault(fraction, fingerprint)
+            profile = diagnostics.get("resource_profile", {})
+            minimum_free = (
+                profile.get("gpu", {}).get("minimum_free_mib")
+                if isinstance(profile, dict)
+                else None
+            )
+            safety_margin = int(config.asr.gpu_safety_margin_mib)
+            safety_ok = (
+                isinstance(minimum_free, (int, float))
+                and int(minimum_free) >= safety_margin
+            )
+            trace_summary = (
+                profile.get("aed_memory_trace", {}).get("summary", {})
+                if isinstance(profile, dict)
+                else {}
+            )
+            budget_ok = not (
+                isinstance(trace_summary, dict)
+                and isinstance(trace_summary.get("budget_utilization_pct"), (int, float))
+                and float(trace_summary["budget_utilization_pct"]) > 100.0
+            )
             record.update(
                 {
                     "status": "completed",
                     "wall_seconds": perf_counter() - started,
                     "fingerprint": fingerprint,
                     "fingerprint_stable": previous == fingerprint,
+                    "safety_ok": safety_ok,
+                    "budget_ok": budget_ok,
                     "result": terminal.get("result"),
                     "stage_seconds": diagnostics.get("stage_seconds", {}),
-                    "resource_profile": diagnostics.get(
-                        "resource_profile", {}
-                    ),
+                    "resource_profile": profile,
                     "precision": diagnostics.get("config", {})
                     .get("asr", {})
                     .get("use_half"),

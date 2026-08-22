@@ -262,6 +262,25 @@ Punc 与临时 overlap owner 的资源峰值；`--diagnostics deep` 还会写出
 事件 trace。旧的 `--profile-resources` 等价于 `--diagnostics resources`。所有资源采样只包含本项目
 登记的 PID，不包含其他项目进程。
 
+### AED 预算矩阵
+
+需要比较同一常驻服务下不同瞬时预算比例时，使用专用工具。它通过请求级比例控制 AED
+transient budget，不修改安全余量，也不管理其他项目进程：
+
+```bash
+.venv/bin/python tools/benchmark_aed_budget_matrix.py \
+  audio_test/刘洋洋.wav \
+  --config outputs/measurements/20260822T-memory-first-aed-liuyangyang/config.toml \
+  --output-root outputs/measurements/aed-budget-matrix \
+  --fractions 0.60 0.70 0.80 0.90 0.95 \
+  --repeats 3 \
+  --diagnostics deep
+```
+
+矩阵记录每次的 AED/端到端耗时、输出 fingerprint、显存峰值、预算利用率、安全余量和失败原因。
+安全余量不足、预算利用率超过 100%、OOM 或协议失败的候选不能作为生产默认值。由于 CUDA
+allocator 可能跨作业增长，正式比较应在新鲜常驻服务和代表性预热状态下进行。
+
 ## 退出码
 
 | 退出码 | 含义 |

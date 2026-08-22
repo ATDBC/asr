@@ -11,7 +11,12 @@ work_dir = "/var/tmp/funasr-transcriber"
 [asr]
 worker_python = "/opt/funasr-transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
-segment_batch_size = 4
+use_half = true
+aed_worker_count = 2
+# Free GPU 0 after warm-up minus this margin is the shared AED transient budget.
+gpu_safety_margin_mib = 1536
+punc_token_budget = 256
+punc_max_items = 16
 
 [diarization]
 speaker_count = "auto"
@@ -20,6 +25,8 @@ max_speakers = 10
 chunk_seconds = 1.0
 chunk_step_seconds = 0.5
 merge_cosine = 0.23
+merge_min_fraction = 0.6
+merge_relative_ratio = 0.55
 
 [vad]
 speech_noise_thres = 0.45
@@ -41,6 +48,12 @@ startup_timeout_seconds = 180
 profile_sampling_interval_ms = 200
 minimum_total_mib = 23552
 minimum_free_mib = 13312
+
+[diagnostics]
+level = "basic"
+sampling_interval_ms = 200
+include_model_inventory = false
+write_batch_trace = false
 
 [overlap]
 enabled = false

@@ -70,3 +70,40 @@ def test_token_preserves_text_when_diarization_has_an_unbounded_gap():
     assert result[0].speaker_id == 1
     assert result[0].confidence is AlignmentConfidence.LOW
     assert result[0].source == "nearest_speaker_fallback"
+
+
+def test_attribute_by_segment_uses_containing_segment():
+    from funasr_transcriber.alignment import attribute_by_segment
+
+    result = attribute_by_segment(
+        tokens=(
+            TimedToken("你好。", 100, 500),
+            TimedToken("再见。", 800, 1100),
+        ),
+        segments=(SpeakerSegment(1, 0, 600), SpeakerSegment(2, 700, 1200)),
+    )
+
+    assert [item.speaker_id for item in result] == [1, 2]
+    assert all(
+        item.confidence is AlignmentConfidence.HIGH for item in result
+    )
+    assert all(item.source == "primary_asr" for item in result)
+
+
+def test_attribute_by_segment_falls_back_to_nearest_in_gap():
+    from funasr_transcriber.alignment import attribute_by_segment
+
+    result = attribute_by_segment(
+        tokens=(TimedToken("嗯。", 620, 680),),
+        segments=(SpeakerSegment(1, 0, 600), SpeakerSegment(2, 700, 1200)),
+    )
+
+    assert result[0].speaker_id == 1
+    assert result[0].source == "nearest_speaker_fallback"
+
+
+def test_attribute_by_segment_rejects_empty_segments():
+    from funasr_transcriber.alignment import attribute_by_segment
+
+    with pytest.raises(TranscriptionError, match="no segments"):
+        attribute_by_segment(tokens=(TimedToken("嗯。", 0, 100),), segments=())

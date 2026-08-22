@@ -26,7 +26,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "asr": {
         "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
         "timeout_seconds": 1800,
-        "segment_batch_size": 4,
+        "use_half": True,
+        "aed_worker_count": 2,
+        "gpu_safety_margin_mib": 1536,
+        "punc_token_budget": 256,
+        "punc_max_items": 16,
     },
     "diarization": {
         "speaker_count": "auto",
@@ -35,6 +39,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "chunk_seconds": 1.0,
         "chunk_step_seconds": 0.5,
         "merge_cosine": 0.23,
+        "merge_min_fraction": 0.6,
+        "merge_relative_ratio": 0.55,
     },
     "vad": {
         "speech_noise_thres": 0.45,
@@ -54,6 +60,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "profile_sampling_interval_ms": 200,
         "minimum_total_mib": 23 * 1024,
         "minimum_free_mib": 13 * 1024,
+    },
+    "diagnostics": {
+        "level": "basic",
+        "sampling_interval_ms": 200,
+        "include_model_inventory": False,
+        "write_batch_trace": False,
     },
     "overlap": {
         "enabled": False,
@@ -86,7 +98,11 @@ class PathConfig:
 class AsrConfig:
     worker_python: Path
     timeout_seconds: int
-    segment_batch_size: int
+    use_half: bool
+    aed_worker_count: int
+    gpu_safety_margin_mib: int
+    punc_token_budget: int
+    punc_max_items: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +113,8 @@ class DiarizationConfig:
     chunk_seconds: float
     chunk_step_seconds: float
     merge_cosine: float
+    merge_min_fraction: float
+    merge_relative_ratio: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +147,14 @@ class ServiceConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosticsConfig:
+    level: str
+    sampling_interval_ms: int
+    include_model_inventory: bool
+    write_batch_trace: bool
+
+
+@dataclass(frozen=True, slots=True)
 class OverlapConfig:
     enabled: bool
     detector_model: str
@@ -150,6 +176,7 @@ class AppConfig:
     alignment: AlignmentConfig
     turns: TurnConfig
     service: ServiceConfig
+    diagnostics: DiagnosticsConfig
     overlap: OverlapConfig
 
 
@@ -228,7 +255,11 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
                 values["asr"]["worker_python"]
             ).expanduser(),
             timeout_seconds=int(values["asr"]["timeout_seconds"]),
-            segment_batch_size=int(values["asr"]["segment_batch_size"]),
+            use_half=bool(values["asr"]["use_half"]),
+            aed_worker_count=int(values["asr"]["aed_worker_count"]),
+            gpu_safety_margin_mib=int(values["asr"]["gpu_safety_margin_mib"]),
+            punc_token_budget=int(values["asr"]["punc_token_budget"]),
+            punc_max_items=int(values["asr"]["punc_max_items"]),
         ),
         diarization=DiarizationConfig(
             speaker_count=speaker_count,
@@ -237,6 +268,10 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             chunk_seconds=float(values["diarization"]["chunk_seconds"]),
             chunk_step_seconds=float(values["diarization"]["chunk_step_seconds"]),
             merge_cosine=float(values["diarization"]["merge_cosine"]),
+            merge_min_fraction=float(values["diarization"]["merge_min_fraction"]),
+            merge_relative_ratio=float(
+                values["diarization"]["merge_relative_ratio"]
+            ),
         ),
         vad=VadConfig(
             speech_noise_thres=float(values["vad"]["speech_noise_thres"]),
@@ -263,6 +298,16 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             minimum_total_mib=int(values["service"]["minimum_total_mib"]),
             minimum_free_mib=int(values["service"]["minimum_free_mib"]),
         ),
+        diagnostics=DiagnosticsConfig(
+            level=str(values["diagnostics"]["level"]).lower(),
+            sampling_interval_ms=int(
+                values["diagnostics"]["sampling_interval_ms"]
+            ),
+            include_model_inventory=bool(
+                values["diagnostics"]["include_model_inventory"]
+            ),
+            write_batch_trace=bool(values["diagnostics"]["write_batch_trace"]),
+        ),
         overlap=OverlapConfig(
             enabled=bool(values["overlap"]["enabled"]),
             detector_model=str(values["overlap"]["detector_model"]),
@@ -286,8 +331,14 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("max_audio_seconds must be 7200 in version 1")
     if config.asr.timeout_seconds <= 0:
         raise ValueError("ASR timeout_seconds must be positive")
-    if config.asr.segment_batch_size <= 0:
-        raise ValueError("ASR segment_batch_size must be positive")
+    if config.asr.aed_worker_count not in (1, 2):
+        raise ValueError("ASR aed_worker_count must be 1 or 2")
+    if config.asr.gpu_safety_margin_mib <= 0:
+        raise ValueError("ASR gpu_safety_margin_mib must be positive")
+    if config.asr.punc_token_budget <= 0:
+        raise ValueError("ASR punc_token_budget must be positive")
+    if config.asr.punc_max_items <= 0:
+        raise ValueError("ASR punc_max_items must be positive")
     diarization = config.diarization
     if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
         raise ValueError("min_speakers/max_speakers must stay within 1..10")
@@ -297,6 +348,12 @@ def validate(config: AppConfig) -> AppConfig:
         <= diarization.max_speakers
     ):
         raise ValueError("speaker_count must stay within min_speakers/max_speakers")
+    if not 0.0 < diarization.merge_cosine <= 1.0:
+        raise ValueError("merge_cosine must stay within 0..1")
+    if not 0.0 < diarization.merge_min_fraction <= 1.0:
+        raise ValueError("merge_min_fraction must stay within 0..1")
+    if not 0.0 < diarization.merge_relative_ratio <= 1.0:
+        raise ValueError("merge_relative_ratio must stay within 0..1")
     if config.turns.merge_gap_seconds != 1.0:
         raise ValueError("merge_gap_seconds must be 1.0 in version 1")
     service = config.service
@@ -307,6 +364,13 @@ def validate(config: AppConfig) -> AppConfig:
     if not 50 <= service.profile_sampling_interval_ms <= 5000:
         raise ValueError(
             "service profile_sampling_interval_ms must stay within 50..5000"
+        )
+    diagnostics = config.diagnostics
+    if diagnostics.level not in {"off", "basic", "resources", "deep"}:
+        raise ValueError("diagnostics level must be off, basic, resources, or deep")
+    if not 50 <= diagnostics.sampling_interval_ms <= 5000:
+        raise ValueError(
+            "diagnostics sampling_interval_ms must stay within 50..5000"
         )
     if service.minimum_total_mib < 23 * 1024:
         raise ValueError("service minimum_total_mib must be at least 23552")

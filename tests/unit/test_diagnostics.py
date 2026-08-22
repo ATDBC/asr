@@ -57,7 +57,10 @@ def test_export_diagnostics_includes_runtime_and_config(tmp_path: Path):
 
 
 def test_export_diagnostics_marks_disabled_resource_profile(tmp_path: Path):
-    diagnostics = Diagnostics(resource_profile={"enabled": False})
+    diagnostics = Diagnostics(
+        resource_profile={"enabled": False},
+        scheduler={"batches": 2, "model": {"API_KEY": "hidden"}},
+    )
 
     export_diagnostics(diagnostics, tmp_path, overwrite=False)
 
@@ -65,6 +68,8 @@ def test_export_diagnostics_marks_disabled_resource_profile(tmp_path: Path):
         (tmp_path / "diagnostics.json").read_text(encoding="utf-8")
     )
     assert payload["resource_profile"] == {"enabled": False}
+    assert payload["scheduler"]["batches"] == 2
+    assert payload["scheduler"]["model"]["API_KEY"] == "<redacted>"
 
 
 def test_export_diagnostics_sanitizes_resource_profile(tmp_path: Path):

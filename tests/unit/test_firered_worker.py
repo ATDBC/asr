@@ -5,14 +5,20 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from funasr_transcriber.firered_worker import (
     AudioInfo,
     GuardedVad,
+    _explicit_aed_process,
+    _scheduled_process,
     firered_inventory,
     serve,
+    _parser,
 )
+import funasr_transcriber.firered_worker as worker_module
 
 
 def _official(path: Path) -> dict[str, object]:
@@ -66,6 +72,206 @@ def test_firered_inventory_excludes_lid_module():
     inventory = firered_inventory(system)
 
     assert set(inventory["modules"]) == {"vad", "asr", "punc"}
+
+
+def test_worker_half_precision_switch_defaults_off_and_can_be_enabled(tmp_path: Path):
+    parser = _parser()
+
+    assert parser.parse_args(["--model-root", str(tmp_path)]).use_half is False
+    assert parser.parse_args(
+        ["--model-root", str(tmp_path), "--use-half"]
+    ).use_half is True
+
+
+def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, monkeypatch):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def transcribe(self, uttids, wavs):
+            return [
+                {
+                    "uttid": uttids[0],
+                    "text": "测试",
+                    "confidence": 0.9,
+                    "timestamp": [("测试", 0.0, 1.0)],
+                }
+            ]
+
+    monkeypatch.setattr(worker_module, "_reset_cuda_peak_memory", lambda: None)
+    monkeypatch.setattr(worker_module, "_synchronize_cuda", lambda: None)
+    monkeypatch.setattr(worker_module, "_cuda_peak_memory_mib", lambda: 3_000)
+    monkeypatch.setattr(worker_module, "_cuda_peak_reserved_mib", lambda: 3_200)
+    monkeypatch.setattr(worker_module, "_cuda_memory_allocated_mib", lambda: 2_900)
+    times = iter((10.0, 10.5))
+
+    response = _explicit_aed_process(
+        SimpleNamespace(asr=Asr()),
+        str(wav),
+        "job",
+        [[{"index": 0, "start_ms": 0, "end_ms": 1000}]],
+        [(0.0, 1.0)],
+        clock=lambda: next(times),
+    )
+
+    assert response["batch_metrics"] == [
+        {
+            "batch_index": 0,
+            "item_count": 1,
+            "indices": [0],
+            "actual_seconds": 0.5,
+            "peak_allocated_mib": 3_000,
+            "peak_reserved_mib": 3_200,
+            "resident_allocated_mib": 2_900,
+        }
+    ]
+
+
+def test_explicit_aed_process_emits_completed_batch_event(tmp_path: Path, monkeypatch):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def transcribe(self, uttids, wavs):
+            return [{
+                "uttid": uttids[0],
+                "text": "测试",
+                "confidence": 0.9,
+                "timestamp": [("测试", 0.0, 1.0)],
+            }]
+
+    monkeypatch.setattr(worker_module, "_reset_cuda_peak_memory", lambda: None)
+    monkeypatch.setattr(worker_module, "_synchronize_cuda", lambda: None)
+    monkeypatch.setattr(worker_module, "_cuda_peak_memory_mib", lambda: 3_000)
+    monkeypatch.setattr(worker_module, "_cuda_peak_reserved_mib", lambda: 3_200)
+    monkeypatch.setattr(worker_module, "_cuda_memory_allocated_mib", lambda: 2_900)
+
+    events = []
+    _explicit_aed_process(
+        SimpleNamespace(asr=Asr()),
+        str(wav),
+        "job",
+        [[{"index": 0, "start_ms": 0, "end_ms": 1000}]],
+        [(0.0, 1.0)],
+        on_batch=events.append,
+    )
+
+    assert events[0]["batch_index"] == 0
+    assert events[0]["aed_results"][0]["index"] == 0
+
+
+def test_scheduled_process_restores_original_result_order(tmp_path: Path):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(7 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def __init__(self):
+            self.batches: list[list[str]] = []
+
+        def transcribe(self, uttids, wavs):
+            self.batches.append(list(uttids))
+            results = []
+            for uttid in uttids:
+                start_ms = int(uttid.split("_s", 1)[1].split("_e", 1)[0])
+                end_ms = int(uttid.rsplit("_e", 1)[1])
+                results.append(
+                    {
+                        "uttid": uttid,
+                        "text": str(start_ms),
+                        "confidence": 0.9,
+                        "timestamp": [(str(start_ms), 0.0, (end_ms - start_ms) / 1000)],
+                    }
+                )
+            return results
+
+    class Punc:
+        def process_with_timestamp(self, timestamps, uttids):
+            return [
+                {
+                    "uttid": uttid,
+                    "punc_sentences": [
+                        {"punc_text": uttid.split("_s", 1)[1], "start_s": 0, "end_s": 1}
+                    ],
+                }
+                for uttid in uttids
+            ]
+
+    asr = Asr()
+    system = SimpleNamespace(
+        asr=asr,
+        punc=Punc(),
+        config=SimpleNamespace(
+            enable_lid=False,
+            enable_punc=True,
+            asr_config=SimpleNamespace(return_timestamp=True),
+        ),
+    )
+    raw = _scheduled_process(
+        system,
+        str(wav),
+        "job",
+        [(0.0, 3.0), (3.0, 4.0), (4.0, 6.0), (6.0, 7.0)],
+    )
+
+    assert [batch[0].split("_s", 1)[1].split("_e", 1)[0] for batch in asr.batches] == [
+        "3000",
+    ]
+    assert [sentence["start_ms"] for sentence in raw["sentences"]] == [
+        0,
+        3000,
+        4000,
+        6000,
+    ]
+
+
+def test_scheduled_process_matches_dropped_aed_items_by_uttid(tmp_path: Path):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(4 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def transcribe(self, uttids, wavs):
+            # Simulate the pinned feature extractor dropping the first item.
+            uttid = uttids[-1]
+            start_ms = int(uttid.split("_s", 1)[1].split("_e", 1)[0])
+            end_ms = int(uttid.rsplit("_e", 1)[1])
+            return [
+                {
+                    "uttid": uttid,
+                    "text": "保留",
+                    "confidence": 0.9,
+                    "timestamp": [("保", 0.0, (end_ms - start_ms) / 1000)],
+                }
+            ]
+
+    class Punc:
+        def process_with_timestamp(self, timestamps, uttids):
+            return [
+                {
+                    "uttid": uttid,
+                    "punc_sentences": [
+                        {"punc_text": "保留。", "start_s": 0, "end_s": 1}
+                    ],
+                }
+                for uttid in uttids
+            ]
+
+    system = SimpleNamespace(
+        asr=Asr(),
+        punc=Punc(),
+        config=SimpleNamespace(
+            enable_lid=False,
+            enable_punc=True,
+            asr_config=SimpleNamespace(return_timestamp=True),
+        ),
+    )
+    raw = _scheduled_process(
+        system,
+        str(wav),
+        "job",
+        [(0.0, 1.0), (1.0, 5.0), (5.0, 6.0)],
+    )
+
+    assert [sentence["start_ms"] for sentence in raw["sentences"]] == [1000]
 
 
 def _request(identifier: str, action: str, path: Path | None = None) -> str:
@@ -317,3 +523,159 @@ def test_guarded_vad_rejects_unsafe_segment_before_aed():
 
     with pytest.raises(ValueError, match="60 second"):
         GuardedVad(UnsafeVad()).detect("normalized.wav")
+
+
+class ScriptedVadSystem:
+    def __init__(self, result: dict[str, object]):
+        self.result = result
+        self.seen_timestamps: list[tuple[float, float]] | None = None
+
+    def process(self, path: str, uttid: str):
+        vad_result, _ = self.vad.detect(path)
+        self.seen_timestamps = list(vad_result["timestamps"])
+        return self.result
+
+
+def _segment_request(identifier: str, path: Path, segments_ms) -> str:
+    payload = {
+        "id": identifier,
+        "action": "transcribe",
+        "audio_path": str(path),
+        "vad_segments_ms": segments_ms,
+    }
+    return json.dumps(payload) + "\n"
+
+
+def test_worker_scripts_vad_segments_for_one_request(tmp_path: Path):
+    wav = (tmp_path / "normalized.wav").resolve()
+    wav.write_bytes(b"fake")
+    system = ScriptedVadSystem(_official(wav))
+    target = StringIO()
+
+    serve(
+        StringIO(_segment_request("seg", wav, [[0, 500], [700, 1200]])),
+        target,
+        lambda: system,
+        _valid_info,
+    )
+
+    payload = json.loads(target.getvalue())
+    assert payload["ok"] is True
+    assert system.seen_timestamps == [(0.0, 0.5), (0.7, 1.2)]
+    assert system.vad is None
+
+
+def test_worker_subdivides_long_scripted_segment_with_neural_vad(
+    tmp_path: Path,
+):
+    wav = (tmp_path / "normalized.wav").resolve()
+    sf.write(wav, np.zeros(30 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class NeuralVad:
+        def detect(self, audio):
+            assert audio == str(wav)
+            return {"timestamps": [(0.0, 10.0), (15.0, 20.0)]}, None
+
+    neural = NeuralVad()
+    system = ScriptedVadSystem(_official(wav))
+    system.vad = neural
+    target = StringIO()
+
+    serve(
+        StringIO(
+            _segment_request("long", wav, [[0, 5_000], [10_000, 30_000]])
+        ),
+        target,
+        lambda: system,
+        _valid_info,
+    )
+
+    payload = json.loads(target.getvalue())
+    assert payload["ok"] is True
+    assert system.seen_timestamps == [(0.0, 5.0), (15.0, 20.0)]
+    assert system.vad is neural
+
+
+def test_worker_runs_neural_vad_once_and_intersects_long_speaker_segments(
+    tmp_path: Path,
+):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(35 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class NeuralVad:
+        def __init__(self):
+            self.calls = []
+
+        def detect(self, audio):
+            self.calls.append(audio)
+            assert audio == str(wav)
+            return {"timestamps": [(2.0, 14.0), (18.0, 32.0)]}, None
+
+    neural = NeuralVad()
+    system = ScriptedVadSystem(_official(wav))
+    system.vad = neural
+    target = StringIO()
+
+    serve(
+        StringIO(
+            _segment_request(
+                "global-vad",
+                wav,
+                [[0, 5_000], [10_000, 21_000], [25_000, 36_000]],
+            )
+        ),
+        target,
+        lambda: system,
+        _valid_info,
+    )
+
+    payload = json.loads(target.getvalue())
+    assert payload["ok"] is True
+    assert len(neural.calls) == 1
+    assert system.seen_timestamps == [
+        (0.0, 5.0),
+        (10.0, 14.0),
+        (18.0, 21.0),
+        (25.0, 32.0),
+    ]
+
+
+def test_worker_hard_splits_long_segment_without_fallback_vad(tmp_path: Path):
+    wav = (tmp_path / "normalized.wav").resolve()
+    wav.write_bytes(b"fake")
+    system = ScriptedVadSystem(_official(wav))
+    target = StringIO()
+
+    serve(
+        StringIO(_segment_request("long", wav, [[0, 121_000]])),
+        target,
+        lambda: system,
+        _valid_info,
+    )
+
+    payload = json.loads(target.getvalue())
+    assert payload["ok"] is True
+    assert system.seen_timestamps == [
+        (float(start), float(min(start + 10, 121)))
+        for start in range(0, 121, 10)
+    ]
+    assert system.vad is None
+
+
+def test_worker_rejects_non_monotonic_scripted_segments(tmp_path: Path):
+    wav = (tmp_path / "normalized.wav").resolve()
+    wav.write_bytes(b"fake")
+    system = ScriptedVadSystem(_official(wav))
+    target = StringIO()
+
+    serve(
+        StringIO(_segment_request("unordered", wav, [[700, 1200], [0, 500]])),
+        target,
+        lambda: system,
+        _valid_info,
+    )
+
+    response = json.loads(target.getvalue())
+    assert response["ok"] is False
+    assert "monotonic" in response["error"]["message"]
+    assert system.seen_timestamps is None

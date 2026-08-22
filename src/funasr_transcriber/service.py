@@ -1,4 +1,4 @@
-"""Persistent local owners and parallel normal-model execution."""
+"""Persistent local owners and diarization-first normal-model execution."""
 
 from __future__ import annotations
 
@@ -15,9 +15,11 @@ import threading
 from time import perf_counter
 from typing import Any, Callable
 
+from .alignment import attribute_by_segment
 from .audio import normalize_audio, probe_audio
 from .config import AppConfig, load_config
 from .diagnostics import export_diagnostics
+from .diagnostic_traces import compact_scheduler_summary, write_deep_traces
 from .errors import (
     EnvironmentError as TranscriberEnvironmentError,
     OutputError,
@@ -37,7 +39,7 @@ from .overlap import (
     SubprocessOverlapPreparer,
     apply_prepared_overlap,
 )
-from .pipeline import TranscriptionPipeline, attribute_primary
+from .pipeline import TranscriptionPipeline
 from .resource_profile import ResourceSampler
 from .service_protocol import (
     ServiceBusyError,
@@ -72,7 +74,7 @@ def _close_owner(owner: Any) -> None:
 
 
 class HotModelHost:
-    """Own one hot FireRed client and one hot 3D-Speaker diarizer."""
+    """Own the hot FireRed AED owner and one 3D-Speaker diarizer."""
 
     def __init__(
         self,
@@ -86,6 +88,10 @@ class HotModelHost:
         self.asr_owner: Any | None = None
         self.speaker_owner: Any | None = None
         self.inventories: dict[str, object] = {}
+        self.warmup_metrics: dict[str, object] = {
+            "performed": False,
+            "excluded_from_job_timing": True,
+        }
 
     @property
     def started(self) -> bool:
@@ -114,6 +120,17 @@ class HotModelHost:
             status = getattr(asr_owner, "status", None)
             if callable(status):
                 self.inventories["firered"] = status()
+            warmup = getattr(asr_owner, "warmup", None)
+            if callable(warmup):
+                warmup_result = warmup()
+                if isinstance(warmup_result, dict):
+                    self.warmup_metrics = {
+                        "performed": True,
+                        "excluded_from_job_timing": bool(
+                            warmup_result.get("excluded", False)
+                        ),
+                        **warmup_result,
+                    }
             inventory = getattr(speaker_owner, "resource_inventory", None)
             if callable(inventory):
                 self.inventories["speaker"] = inventory()
@@ -130,6 +147,10 @@ class HotModelHost:
         self.asr_owner = None
         self.speaker_owner = None
         self.inventories = {}
+        self.warmup_metrics = {
+            "performed": False,
+            "excluded_from_job_timing": True,
+        }
         try:
             _close_owner(asr_owner)
         finally:
@@ -162,10 +183,9 @@ def run_normal_branches(
     speaker_owner: Any,
     profile_enabled: bool = False,
 ) -> NormalBranchResult:
-    """Start ASR and diarization before waiting for either result."""
+    """Run diarization first, then transcribe each speaker segment as a VAD segment."""
 
     branch_metrics: dict[str, dict[str, object]] = {}
-    metrics_lock = threading.Lock()
 
     def measure(name: str, operation: Callable[..., Any], *args: Any) -> Any:
         started_at = perf_counter()
@@ -173,49 +193,35 @@ def run_normal_branches(
             return operation(*args)
         finally:
             ended_at = perf_counter()
-            with metrics_lock:
-                branch_metrics[name] = {
-                    "started_at_monotonic": started_at,
-                    "ended_at_monotonic": ended_at,
-                    "seconds": ended_at - started_at,
-                }
+            branch_metrics[name] = {
+                "started_at_monotonic": started_at,
+                "ended_at_monotonic": ended_at,
+                "seconds": ended_at - started_at,
+            }
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        asr_future = executor.submit(
-            measure,
-            "asr",
-            asr_owner.transcribe,
-            Path(normalized),
-        )
-        speaker_future = executor.submit(
-            measure,
-            "diarization",
-            _run_speaker,
-            speaker_owner,
-            Path(normalized),
-            profile_enabled,
-        )
-        asr_result: AsrResult | None = None
-        speaker_result: tuple[tuple[SpeakerSegment, ...], dict[str, object]] | None = None
-        asr_error: Exception | None = None
-        speaker_error: Exception | None = None
-        try:
-            asr_result = asr_future.result()
-        except Exception as exc:
-            asr_error = exc
-        try:
-            speaker_result = speaker_future.result()
-        except Exception as exc:
-            speaker_error = exc
-    if asr_error is not None:
-        raise asr_error
-    if speaker_error is not None:
-        raise speaker_error
-    if asr_result is None or speaker_result is None:
-        raise RuntimeError("normal model branches returned no result")
-    speaker_segments, speaker_metrics = speaker_result
+    speaker_segments, speaker_metrics = measure(
+        "diarization",
+        _run_speaker,
+        speaker_owner,
+        Path(normalized),
+        profile_enabled,
+    )
     if speaker_metrics:
         branch_metrics["diarization"]["memory"] = speaker_metrics
+    asr_result: AsrResult = measure(
+        "asr",
+        asr_owner.transcribe,
+        Path(normalized),
+        [[segment.start_ms, segment.end_ms] for segment in speaker_segments],
+    )
+    asr_response = getattr(asr_owner, "last_response", {})
+    if isinstance(asr_response, dict):
+        metrics = asr_response.get("metrics")
+        if isinstance(metrics, dict):
+            if isinstance(metrics.get("scheduler"), dict):
+                branch_metrics["asr"]["scheduler"] = metrics["scheduler"]
+            if isinstance(metrics.get("parallel"), dict):
+                branch_metrics["asr"]["parallel"] = metrics["parallel"]
     return NormalBranchResult(
         asr_result=asr_result,
         speaker_segments=speaker_segments,
@@ -577,28 +583,69 @@ class ServiceJobRunner:
             device="cuda:0",
             timeout_seconds=self.config.asr.timeout_seconds,
             stderr_log_path=job_dir / "overlap-firered-worker.log",
-            segment_batch_size=self.config.asr.segment_batch_size,
+            use_half=self.config.asr.use_half,
+            warmup_audio=(
+                Path(self.config.paths.model_dir)
+                / "fireredasr2s"
+                / "source"
+                / "assets"
+                / "hello_zh.wav"
+            ),
         )
 
     def _owned_pid_getters(self) -> dict[str, Callable[[], int | None]]:
-        def firered_pid() -> int | None:
+        def service_pid() -> int:
+            return os.getpid()
+
+        def speaker_pid() -> int:
+            # SpeakerDiarizer is hosted by the service process.
+            return os.getpid()
+
+        def aed_pid(index: int) -> int | None:
             owner = self.hot_host.asr_owner
-            pid = getattr(owner, "pid", None)
+            pids = getattr(owner, "pids", ())
+            if index < len(pids):
+                pid = pids[index]
+            else:
+                pid = getattr(owner, "pid", None) if index == 0 else None
+            return pid if isinstance(pid, int) and pid > 0 else None
+
+        def punc_pid() -> int | None:
+            owner = self.hot_host.asr_owner
+            punc_owner = getattr(owner, "punc_owner", None)
+            pid = getattr(punc_owner, "pid", None)
+            if pid is None and punc_owner is None:
+                pid = getattr(owner, "pid", None)
             return pid if isinstance(pid, int) and pid > 0 else None
 
         return {
-            "service": os.getpid,
-            "firered": firered_pid,
-            "overlap": lambda: self._active_overlap_pid,
+            "service": service_pid,
+            "speaker": speaker_pid,
+            "aed_worker_0": lambda: aed_pid(0),
+            "aed_worker_1": lambda: aed_pid(1),
+            "punc_worker": punc_pid,
+            "overlap_worker": lambda: self._active_overlap_pid,
         }
 
-    def _start_resource_sampler(self, request: ServiceRequest) -> Any | None:
-        if not request.profile_resources:
+    @staticmethod
+    def _diagnostics_level(request: ServiceRequest) -> str:
+        level = str(getattr(request, "diagnostics_level", "basic")).lower()
+        if request.profile_resources and level == "basic":
+            return "resources"
+        return level
+
+    def _start_resource_sampler(
+        self,
+        request: ServiceRequest,
+        diagnostics_level: str,
+    ) -> Any | None:
+        if diagnostics_level not in {"resources", "deep"}:
             return None
         sampler = self._sampler_factory(
             "cuda:0",
-            self.config.service.profile_sampling_interval_ms,
+            self.config.diagnostics.sampling_interval_ms,
             self._owned_pid_getters(),
+            trace_enabled=diagnostics_level == "deep",
         )
         sampler.start()
         return sampler
@@ -608,18 +655,36 @@ class ServiceJobRunner:
         sampler: Any,
         branches: NormalBranchResult,
         diagnostics: Any,
+        *,
+        include_model_inventory: bool,
+        include_memory_trace: bool = False,
     ) -> None:
         snapshot = dict(sampler.stop())
         diagnostics.resource_profile = {
             "enabled": True,
             **snapshot,
-            "inventories": dict(getattr(self.hot_host, "inventories", {})),
-            "branches": dict(branches.branch_metrics),
+            "branches": compact_scheduler_summary(branches.branch_metrics),
             "uncertainty": {
                 "driver_memory_unit": "MiB",
                 "pid_observed": dict(snapshot.get("pid_observed") or {}),
             },
         }
+        if include_memory_trace:
+            parallel = branches.branch_metrics.get("asr", {}).get("parallel")
+            trace_stage = getattr(sampler, "trace_stage", None)
+            if callable(trace_stage) and isinstance(parallel, dict):
+                started = parallel.get("aed_started_at_monotonic")
+                ended = parallel.get("aed_ended_at_monotonic")
+                if isinstance(started, (int, float)) and isinstance(
+                    ended, (int, float)
+                ):
+                    diagnostics.resource_profile["aed_memory_trace"] = (
+                        trace_stage(float(started), float(ended))
+                    )
+        if include_model_inventory:
+            diagnostics.resource_profile["inventories"] = dict(
+                getattr(self.hot_host, "inventories", {})
+            )
 
     def _run_overlap_enhancement(
         self,
@@ -707,9 +772,14 @@ class ServiceJobRunner:
         if job_dir.exists():
             raise OutputError(f"service job directory already exists: {job_dir}")
         job_dir.mkdir(parents=True, exist_ok=False)
-        sampler = self._start_resource_sampler(request)
+        sampler: Any | None = None
         profile_finished = False
-        self._capture_overlap_pid = request.profile_resources
+        diagnostics_level = self._diagnostics_level(request)
+        self._capture_overlap_pid = diagnostics_level in {"resources", "deep"}
+        if not self.hot_host.started:
+            self.hot_host.start()
+        measurement_started = perf_counter()
+        sampler = self._start_resource_sampler(request, diagnostics_level)
         try:
             input_info = self._probe(
                 input_audio,
@@ -721,28 +791,65 @@ class ServiceJobRunner:
                 normalized,
                 self.config.general.max_audio_seconds,
             )
-            if not self.hot_host.started:
-                self.hot_host.start()
             asr_owner = self.hot_host.asr_owner
             speaker_owner = self.hot_host.speaker_owner
             if asr_owner is None or speaker_owner is None:
                 raise TranscriptionError("resident model owners are unavailable")
             pipeline = TranscriptionPipeline(self.config)
             diagnostics = pipeline.new_diagnostics()
+            diagnostics.runtime["warmup"] = dict(
+                getattr(self.hot_host, "warmup_metrics", {})
+            )
+            diagnostics.runtime["diagnostics_level"] = diagnostics_level
             with diagnostics.stage("normal_model_branches"):
                 branches = run_normal_branches(
                     normalized,
                     asr_owner,
                     speaker_owner,
-                    profile_enabled=request.profile_resources,
+                    profile_enabled=diagnostics_level in {"resources", "deep"},
                 )
+            for branch_name, branch in branches.branch_metrics.items():
+                seconds = branch.get("seconds")
+                if isinstance(seconds, (int, float)):
+                    diagnostics.stage_seconds[f"normal.{branch_name}"] = float(seconds)
+                parallel = branch.get("parallel")
+                if isinstance(parallel, dict):
+                    for stage_name, stage_seconds in parallel.items():
+                        if stage_name == "aed_worker_seconds" and isinstance(
+                            stage_seconds, list
+                        ):
+                            for worker_index, worker_seconds in enumerate(
+                                stage_seconds
+                            ):
+                                if isinstance(worker_seconds, (int, float)):
+                                    diagnostics.stage_seconds[
+                                        f"normal.asr.aed_worker_{worker_index}"
+                                    ] = float(worker_seconds)
+                            continue
+                        if stage_name.endswith("_seconds") and isinstance(
+                            stage_seconds, (int, float)
+                        ):
+                            diagnostics.stage_seconds[
+                                f"normal.asr.{stage_name.removesuffix('_seconds')}"
+                            ] = float(stage_seconds)
+            scheduler = branches.branch_metrics.get("asr", {}).get("scheduler")
+            if isinstance(scheduler, dict):
+                diagnostics.scheduler = scheduler
+            parallel_metrics = branches.branch_metrics.get("asr", {}).get("parallel")
+            if isinstance(parallel_metrics, dict):
+                diagnostics.scheduler["parallel"] = parallel_metrics
+            if diagnostics_level == "deep":
+                write_deep_traces(
+                    staging_dir / "diagnostics",
+                    diagnostics.scheduler,
+                )
+            diagnostics.scheduler = compact_scheduler_summary(diagnostics.scheduler)
             if not branches.speaker_segments:
                 raise TranscriptionError("speaker diarization returned no segments")
             with diagnostics.stage("alignment"):
-                attributed = attribute_primary(
-                    branches.asr_result,
+                attributed = attribute_by_segment(
+                    branches.asr_result.tokens,
                     branches.speaker_segments,
-                    self.config,
                 )
             enhancement = (
                 self._run_overlap_enhancement(
@@ -762,9 +869,26 @@ class ServiceJobRunner:
                 diagnostics,
                 overlap_enhancement=enhancement,
             )
+            diagnostics.stage_seconds["end_to_end_after_warmup"] = (
+                perf_counter() - measurement_started
+            )
             if sampler is not None:
-                self._finish_resource_profile(sampler, branches, diagnostics)
+                self._finish_resource_profile(
+                    sampler,
+                    branches,
+                    diagnostics,
+                    include_model_inventory=(
+                        diagnostics_level == "deep"
+                        or self.config.diagnostics.include_model_inventory
+                    ),
+                    include_memory_trace=diagnostics_level == "deep",
+                )
                 profile_finished = True
+            if diagnostics_level == "off":
+                diagnostics.stage_seconds.clear()
+                diagnostics.scheduler.clear()
+                diagnostics.asr.clear()
+                diagnostics.gpu_stages.clear()
             export_transcript(
                 result.transcript,
                 staging_dir,
@@ -809,19 +933,59 @@ def _require_physical_gpu_zero(config: AppConfig) -> None:
 
 
 def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost:
-    """Construct the only persistent FireRed and 3D-Speaker owners."""
+    """Construct the persistent AED owner and 3D-Speaker owner."""
 
     from .firered_client import FireRedWorkerClient
+    from .firered_parallel import ParallelFireRedWorkerClient
     from .speaker_diarization import SpeakerDiarizer
+    warmup_audio = (
+        Path(config.paths.model_dir)
+        / "fireredasr2s"
+        / "source"
+        / "assets"
+        / "hello_zh.wav"
+    )
 
-    def asr_factory() -> FireRedWorkerClient:
+    def client(
+        stderr_name: str,
+        *,
+        enable_vad: bool,
+        enable_punc: bool,
+        punc_only: bool = False,
+    ) -> FireRedWorkerClient:
         return FireRedWorkerClient(
             worker_python=config.asr.worker_python,
             model_root=config.paths.model_dir,
             device="cuda:0",
             timeout_seconds=config.asr.timeout_seconds,
-            stderr_log_path=paths.directory / "firered-worker.log",
-            segment_batch_size=config.asr.segment_batch_size,
+            stderr_log_path=paths.directory / stderr_name,
+            use_half=config.asr.use_half,
+            enable_vad=enable_vad,
+            enable_punc=enable_punc,
+            punc_only=punc_only,
+            punc_token_budget=config.asr.punc_token_budget,
+            punc_max_items=config.asr.punc_max_items,
+            warmup_audio=warmup_audio,
+        )
+
+    def asr_factory() -> Any:
+        worker_count = int(getattr(config.asr, "aed_worker_count", 1))
+        if worker_count == 1:
+            return client("firered-worker.log", enable_vad=True, enable_punc=True)
+        if worker_count != 2:
+            raise ValueError("aed_worker_count must be 1 or 2")
+        return ParallelFireRedWorkerClient(
+            client("firered-worker-0.log", enable_vad=True, enable_punc=False),
+            client("firered-worker-1.log", enable_vad=False, enable_punc=False),
+            punc_owner=client(
+                "firered-punc.log",
+                enable_vad=False,
+                enable_punc=True,
+                punc_only=True,
+            ),
+            punc_token_budget=config.asr.punc_token_budget,
+            punc_max_items=config.asr.punc_max_items,
+            gpu_safety_margin_mib=config.asr.gpu_safety_margin_mib,
         )
 
     def gpu_check() -> None:

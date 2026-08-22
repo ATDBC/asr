@@ -112,6 +112,48 @@ def attribute_tokens(
     return tuple(output)
 
 
+def attribute_by_segment(
+    tokens: tuple[TimedToken, ...],
+    segments: tuple[SpeakerSegment, ...],
+) -> tuple[AttributedToken, ...]:
+    """Assign each token the speaker of the ASR segment that produced it."""
+
+    if tokens and not segments:
+        raise TranscriptionError("speaker diarization returned no segments")
+
+    output: list[AttributedToken] = []
+    for token in sorted(tokens, key=lambda item: (item.start_ms, item.end_ms)):
+        containing = [
+            segment
+            for segment in segments
+            if _midpoint_inside(token, segment)
+        ]
+        if containing:
+            speaker_id = containing[0].speaker_id
+            source = "primary_asr"
+        else:
+            nearest = min(
+                segments,
+                key=lambda segment: (
+                    _distance_ms(token, segment),
+                    segment.speaker_id,
+                ),
+            )
+            speaker_id = nearest.speaker_id
+            source = "nearest_speaker_fallback"
+        output.append(
+            AttributedToken(
+                text=token.text,
+                start_ms=token.start_ms,
+                end_ms=token.end_ms,
+                speaker_id=speaker_id,
+                confidence=AlignmentConfidence.HIGH,
+                source=source,
+            )
+        )
+    return tuple(output)
+
+
 class RedecodeAsrEngine(Protocol):
     def transcribe(self, path: Path) -> AsrResult:
         """Transcribe one locally sliced sentence fragment."""

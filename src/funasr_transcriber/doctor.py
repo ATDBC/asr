@@ -51,7 +51,7 @@ def _default_asr_client(config: AppConfig) -> FireRedWorkerClient:
         device="cuda:0",
         timeout_seconds=config.asr.timeout_seconds,
         stderr_log_path=config.paths.work_dir / "doctor-firered-worker.log",
-        segment_batch_size=config.asr.segment_batch_size,
+        use_half=config.asr.use_half,
     )
 
 

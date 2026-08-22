@@ -33,24 +33,27 @@ def test_architecture_describes_current_worker_lifecycle():
     ).read_text(encoding="utf-8")
 
     assert "FireRedWorkerClient" in architecture
-    assert "FireRed worker 关闭" in architecture
+    assert "两个 FireRed AED worker 和独立 Punc owner" in architecture
     assert "SpeakerDiarizer 关闭" in architecture
-    assert "segment_batch_size" in architecture
+    assert "memory-first" in architecture
+    assert "segment_batch_size" not in architecture
     assert "FireRedLID" not in architecture
     assert "GPU 0" in architecture
     for legacy_name in ("FunASR AutoModel", "Para" + "former"):
         assert legacy_name not in architecture
 
 
-def test_architecture_documents_hot_parallel_service():
+def test_architecture_documents_hot_diarization_first_service():
     architecture = (
         ROOT / "docs" / "architecture" / "current-transcription-pipeline.md"
     ).read_text(encoding="utf-8")
 
     for required in (
         "Unix socket",
-        "ASR 与 diarization 并行",
+        "diarization 先行完成",
+        "vad_segments_ms",
         "--profile-resources",
+        "--diagnostics resources",
         "--enable-overlap",
         "service stop",
     ):

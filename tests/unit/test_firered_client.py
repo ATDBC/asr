@@ -46,6 +46,9 @@ def _fake_worker(tmp_path: Path, mode: str = "normal") -> Path:
                 identifier = "wrong-id" if MODE == "wrong_id" else request["id"]
                 stem = Path(request["audio_path"]).stem
                 text = "一。" if stem == "one" else "二。"
+                vad_segments = [[0, 500]]
+                if MODE == "echo":
+                    vad_segments = request.get("vad_segments_ms") or [[0, 600]]
                 response = {{
                     "id": identifier,
                     "ok": True,
@@ -57,9 +60,16 @@ def _fake_worker(tmp_path: Path, mode: str = "normal") -> Path:
                         "end_ms": 500,
                         "asr_confidence": 0.9
                     }}],
-                    "vad_segments_ms": [[0, 500]],
+                    "vad_segments_ms": vad_segments,
                     "duration_ms": 600
                 }}
+                if MODE == "stream" and request["action"] == "aed_plan":
+                    print(json.dumps({{
+                        "id": request["id"], "ok": True,
+                        "event": "aed_batch",
+                        "batch_index": 0,
+                        "aed_results": [{{"index": 0, "result": {{"uttid": "job_s0_e500", "timestamp": [["一", 0.0, 0.5]], "confidence": 0.9}}}}]
+                    }}), flush=True)
                 print(json.dumps(response, ensure_ascii=False), flush=True)
                 if MODE == "duplicate":
                     print(json.dumps(response, ensure_ascii=False), flush=True)
@@ -119,17 +129,57 @@ def test_client_status_reuses_existing_worker(tmp_path: Path):
     assert status == {"models": ["vad"]}
 
 
-def test_client_passes_segment_batch_size_to_worker(tmp_path: Path):
+def test_client_does_not_pass_obsolete_batch_or_memory_flags_to_worker(tmp_path: Path):
     client = FireRedWorkerClient(
         worker_python=Path(sys.executable),
         model_root=tmp_path / "models",
         device="cuda:0",
         timeout_seconds=1.0,
         stderr_log_path=tmp_path / "worker.log",
-        segment_batch_size=4,
+        use_half=True,
     )
 
-    assert client._command()[-2:] == ["--segment-batch-size", "4"]
+    command = client._command()
+    assert "--use-half" in command
+    assert not any("segment-batch" in item for item in command)
+    assert not any("segment-frame" in item for item in command)
+    assert not any("segment-memory" in item for item in command)
+
+
+def test_client_can_start_a_punc_only_worker(tmp_path: Path):
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable),
+        model_root=tmp_path / "models",
+        device="cuda:0",
+        timeout_seconds=1.0,
+        stderr_log_path=tmp_path / "punc.log",
+        punc_only=True,
+    )
+
+    command = client._command()
+
+    assert "--punc-only" in command
+    assert "--disable-punc" not in command
+
+
+def test_client_passes_punc_microbatch_controls(tmp_path: Path):
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable),
+        model_root=tmp_path / "models",
+        device="cuda:0",
+        timeout_seconds=1.0,
+        stderr_log_path=tmp_path / "punc.log",
+        punc_only=True,
+        punc_token_budget=512,
+        punc_max_items=32,
+    )
+
+    command = client._command()
+
+    assert "--punc-token-budget" in command
+    assert "512" in command
+    assert "--punc-max-items" in command
+    assert "32" in command
 
 
 @pytest.mark.parametrize(
@@ -179,3 +229,107 @@ def test_client_close_is_idempotent(tmp_path: Path):
     client.close()
 
     assert client.pid is None
+
+
+def test_client_sends_vad_segments_when_provided(tmp_path: Path):
+    with _client(tmp_path, "echo") as client:
+        result = client.transcribe(
+            _audio(tmp_path, "one"),
+            vad_segments_ms=[[0, 500], [500, 600]],
+        )
+
+    assert result.vad_segments_ms == ((0, 500), (500, 600))
+
+
+def test_client_omits_vad_segments_by_default(tmp_path: Path):
+    with _client(tmp_path, "echo") as client:
+        result = client.transcribe(_audio(tmp_path, "one"))
+
+    assert result.vad_segments_ms == ((0, 600),)
+
+
+def test_client_streams_aed_batch_events_before_final_response(tmp_path: Path):
+    events = []
+    with _client(tmp_path, "stream") as client:
+        response = client.run_aed_plan_stream(
+            _audio(tmp_path, "one"),
+            [[{"index": 0, "start_ms": 0, "end_ms": 500}]],
+            [[0, 500]],
+            events.append,
+        )
+
+    assert events == [{
+        "id": events[0]["id"],
+        "ok": True,
+        "event": "aed_batch",
+        "batch_index": 0,
+        "aed_results": [{
+            "index": 0,
+            "result": {
+                "uttid": "job_s0_e500",
+                "timestamp": [["一", 0.0, 0.5]],
+                "confidence": 0.9,
+            },
+        }],
+    }]
+    assert response["ok"] is True
+
+
+def test_client_reuses_stream_worker_for_multiple_requests(tmp_path: Path):
+    """A completed stream must not leave a competing stdout reader behind."""
+
+    with _client(tmp_path, "stream", timeout=0.5) as client:
+        first_events: list[dict[str, object]] = []
+        second_events: list[dict[str, object]] = []
+        plan = [[{"index": 0, "start_ms": 0, "end_ms": 500}]]
+        vad = [[0, 500]]
+
+        first = client.run_aed_plan_stream(
+            _audio(tmp_path, "one"), plan, vad, first_events.append
+        )
+        second = client.run_aed_plan_stream(
+            _audio(tmp_path, "two"), plan, vad, second_events.append
+        )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert len(first_events) == 1
+    assert len(second_events) == 1
+
+
+def test_client_serializes_parallel_actions_and_optional_modules(tmp_path: Path):
+    script = tmp_path / "parallel_worker.py"
+    script.write_text(
+        """
+import json
+for line in __import__('sys').stdin:
+    request = json.loads(line)
+    action = request['action']
+    if action == 'shutdown':
+        print(json.dumps({'id': request['id'], 'ok': True, 'shutdown': True}), flush=True)
+    elif action == 'refine_vad':
+        print(json.dumps({'id': request['id'], 'ok': True, 'vad_segments_ms': [[0, 500]]}), flush=True)
+    elif action == 'aed_plan':
+        print(json.dumps({'id': request['id'], 'ok': True, 'aed_results': [], 'vad_segments_ms': [[0, 500]], 'duration_ms': 500}), flush=True)
+    elif action == 'punctuate':
+        print(json.dumps({'id': request['id'], 'ok': True, 'text': '一。', 'tokens': [{'text': '一。', 'start_ms': 0, 'end_ms': 500, 'confidence': 0.9}], 'sentences': [{'text': '一。', 'start_ms': 0, 'end_ms': 500, 'asr_confidence': 0.9}], 'vad_segments_ms': [[0, 500]], 'duration_ms': 500}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable), model_root=tmp_path / "models",
+        device="cuda:0", timeout_seconds=1.0, stderr_log_path=tmp_path / "p.log",
+        worker_script=script, enable_vad=False, enable_punc=False,
+    )
+    wav = _audio(tmp_path, "one")
+    with client:
+        assert client.refine_vad(wav, [[0, 600]]) == [[0, 500]]
+        assert client.run_aed_plan(wav, [[{"index": 0, "start_ms": 0, "end_ms": 500}]])["aed_results"] == []
+        assert client.punctuate(wav, [], 500, [[0, 500]]).text == "一。"
+    command_client = FireRedWorkerClient(
+        worker_python=Path(sys.executable), model_root=tmp_path / "models",
+        device="cuda:0", timeout_seconds=1.0, stderr_log_path=tmp_path / "q.log",
+        enable_vad=False, enable_punc=False,
+    )
+    assert "--disable-vad" in command_client._command()
+    assert "--disable-punc" in command_client._command()

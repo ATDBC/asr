@@ -119,6 +119,13 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
         if getattr(args, "disable_overlap", False)
         else config.overlap.enabled
     )
+    diagnostics_level = getattr(args, "diagnostics", None)
+    if diagnostics_level is None:
+        diagnostics_level = (
+            "resources"
+            if getattr(args, "profile_resources", False)
+            else config.diagnostics.level
+        )
     return ServiceRequest(
         identifier=uuid.uuid4().hex,
         action="submit",
@@ -128,7 +135,8 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
         overwrite=bool(args.overwrite),
         keep_intermediate=bool(args.keep_intermediate),
         overlap_enabled=overlap_enabled,
-        profile_resources=bool(getattr(args, "profile_resources", False)),
+        profile_resources=diagnostics_level in {"resources", "deep"},
+        diagnostics_level=diagnostics_level,
     )
 
 
@@ -182,6 +190,11 @@ def _parser() -> argparse.ArgumentParser:
     overlap_group.add_argument("--enable-overlap", action="store_true")
     overlap_group.add_argument("--disable-overlap", action="store_true")
     parser.add_argument("--profile-resources", action="store_true")
+    parser.add_argument(
+        "--diagnostics",
+        choices=("off", "basic", "resources", "deep"),
+        help="diagnostics detail level; overrides config and --profile-resources",
+    )
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),

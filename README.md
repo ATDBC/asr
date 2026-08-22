@@ -10,9 +10,11 @@ FireRedASR2S；不存在旧 FunASR ASR fallback。
 - 固定使用物理 GPU 0（`cuda:0`）。
 - GPU 总显存至少 23 GiB；常驻服务热加载前至少 13,312 MiB 空闲。
 - WAV、MP3、M4A、FLAC、AAC、OGG，最长两小时。
-- 自动估计 1～10 位说话人；服务按 FIFO 串行消费作业，但单个作业的 ASR 与
-  diarization 并行。
-- FireRed 流程固定为 VAD → AED → Punc；不加载语言识别模型。
+- 自动估计 1～10 位说话人；服务按 FIFO 串行消费作业。单个作业先完成说话人分离，
+  其段落直接作为 ASR 切分。
+- 生产转录以说话人分离段落经 FireRed AED → Punc 识别，默认启用 BF16（3090 上为
+  `torch.bfloat16`）；不加载语言识别模型。
+  doctor 与 overlap 重解码仍使用 FireRed VAD。
 
 本工具不依赖 FastAPI、MySQL、原项目 `.env`、讯飞接口或声纹角色识别。
 
@@ -86,7 +88,9 @@ work_dir = "/var/tmp/funasr-transcriber"
 [asr]
 worker_python = "/path/to/standalone_transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
-segment_batch_size = 4
+use_half = true                 # GPU 支持时由 FireRed 选择 BF16
+aed_worker_count = 2            # 两个 AED；worker-0 独占 VAD/Punc
+gpu_safety_margin_mib = 1536       # 预热后空闲显存保留的安全余量
 
 [service]
 queue_limit = 16
@@ -106,9 +110,31 @@ GPU 1 重映射成逻辑 `cuda:0`。配置优先级为：
 命令行 > FUNASR_TRANSCRIBER_* 环境变量 > TOML > 内置默认值
 ~~~
 
-`segment_batch_size` 是 VAD 完成后 AED 与 Punc 的官方批处理大小。每个 VAD 段仍按
-原时间顺序导出；默认值 1 代表逐段处理，只有在本机 GPU 0 校准证明结果不变且显存满足
-预算后才应提高。
+AED 不再配置固定 batch 数量、帧数或静态显存上限。说话人分离/VAD 完成且两个 AED 已预热后读取
+GPU 0 空闲显存，用 `free_mib - gpu_safety_margin_mib` 得到共享瞬时预算；memory-first 装箱器按
+片段时长、padding 后帧数和实际 worker 常驻基线，逐个决定每个 batch 的具体片段，直到再加入片段会超出预算。
+batch 数量和每个 batch 的 cardinality 都是计算结果。完整计划、实际观测和预测误差写入
+`diagnostics.json`，执行期间不重排或重新分 batch。
+
+生产默认常驻两个 AED worker，但只加载一个 Punc 模型。说话人分离完成后，worker-0 对全部
+speaker 区间执行一次全局 FireRedVAD；主进程随后生成一份完整 batch 计划，并按预测耗时用
+LPT 将完整 batch 分到两个 AED。两个 worker 不重新分组，结果按原始片段索引合并后再交给
+worker-0 的单个 Punc 模型。`aed_worker_count = 1` 可回退到单 worker；当前 24 GiB GPU
+必须通过现有 GPU 空间准入检查后才会启动两路 AED。AED 开始前会再次只读检查 GPU 0：预算足够时并发，
+预算只能容纳单路时按固定计划串行；若连一个计划批次也容纳不下则在 AED 前拒绝该作业，不会触碰其他项目进程。
+
+每个 memory-first 批次都会返回预计/实际耗时、预计/实际增量显存（worker 预热后的 PyTorch allocated 基线）和误差，
+并汇总到 `diagnostics.json`，因此可以直接验证“按音频段长度预测”的准确性。`100 MiB` 不作为默认余量；
+CUDA allocator 和其他用户显存变化需要更大的安全空间，当前默认 `1536 MiB`。
+
+服务启动完成模型加载后会用短音频预热 AED/Punc；预热不计入作业耗时。启用
+`--profile-resources` 时，`diagnostics.json` 的 `stage_seconds` 会记录预热后的 diarization、
+VAD、AED 计划/推理、Punc、对齐和端到端耗时；`resource_profile` 还记录 GPU 总占用峰值、
+本服务登记 PID 峰值，以及减去作业开始时其他项目基线后的 `net_service_peak_mib`。
+
+生产默认 `use_half = true`。FireRed 上游在 GPU 支持 BF16 时将该选项解析为
+`torch.bfloat16`；不支持 BF16 的设备才会退化到上游的 FP16 路径。设为 `false` 可恢复
+FP32。当前物理 GPU 0 为 RTX 3090，生产路径实际使用 BF16。
 
 ## 模型准备
 
@@ -144,7 +170,7 @@ funasr-transcribe doctor --config /etc/funasr-transcriber.toml
 `segmentation-3.0` 与 `speaker-diarization-3.1` 的访问条件。`HF_TOKEN` 只从环境
 读取，不写入配置、日志或 diagnostics。
 
-仅当 ModelScope 无法获取 FireRed 三模型时，才显式使用 Hugging Face fallback：
+仅当 ModelScope 无法获取 FireRed VAD/AED/Punc 资产时，才显式使用 Hugging Face fallback：
 
 ~~~bash
 .venv-asr/bin/python -c \
@@ -154,8 +180,8 @@ funasr-transcribe doctor --config /etc/funasr-transcriber.toml
 fallback 仍会校验三个模型目录，3D-Speaker 相关资产继续由 ModelScope 获取。不要
 混用不完整目录。
 
-`doctor` 对内置 `hello_zh.wav` 依次执行 FireRedVAD、FireRedASR2-AED、FireRedPunc
-全链推理；关闭 worker 后检查显存释放，再按顺序
+`doctor` 对内置 `hello_zh.wav` 依次执行说话人分离阶段的 FireRedVAD、FireRed
+AED/Punc worker 全链推理；关闭 worker 后检查显存释放，再按顺序
 验证 Speaker 和 overlap 环境。`--skip-cuda` 只用于环境型测试，会明确显示模型
 smoke 未运行，不能作为发布通过证据。
 
@@ -188,11 +214,17 @@ funasr-transcribe /data/recording.mp3 \
 funasr-transcribe /data/recording.mp3 \
   --config /etc/funasr-transcriber.toml \
   --profile-resources
+
+# 深度性能诊断：资源采样、完整调度计划和逐 batch trace
+funasr-transcribe /data/recording.mp3 \
+  --config /etc/funasr-transcriber.toml \
+  --diagnostics deep
 ~~~
 
 首次转录会自动启动本机后台服务。服务在 `work_dir/service/` 保存自己的 Unix socket、
-状态和日志，并常驻一个 FireRed worker 与一个 3D-Speaker owner。普通作业让两条分支并行，
-多个 CLI 请求按 FIFO 排队；每次 CLI 返回不会释放热模型。
+状态和日志，并常驻两个 FireRed AED worker、一个独立 FireRedPunc owner 与一个 3D-Speaker owner。FireRedVAD
+功能上属于说话人分离阶段，但目前由同一个 `.venv-asr` worker 进程承载。普通作业先跑说话人分离、
+再以其段落做 ASR，多个 CLI 请求按 FIFO 排队；每次 CLI 返回不会释放热模型。
 
 ```bash
 # 查看本项目服务是否 ready
@@ -224,10 +256,11 @@ TXT 示例：
 [00:00:11] 说话人2：好的，主要有三个方面。
 ~~~
 
-JSON 保留毫秒级起止时间、说话人、来源、对齐置信度与重叠标记。diagnostics
-记录句级 AED/ASR 置信度、VAD 区间、阶段耗时、GPU 准入/释放样本和降级告警。默认
-`resource_profile` 仅为 `{"enabled": false}`；使用 `--profile-resources` 后还会记录服务、
-FireRed 与临时 overlap owner 的资源峰值、模型清单和并行分支时间，绝不包含其他项目 PID。
+JSON 保留毫秒级起止时间、说话人、来源、对齐置信度与重叠标记。diagnostics 默认记录
+低开销阶段耗时和调度摘要；`--diagnostics resources` 额外记录 service、speaker、两个 AED、
+Punc 与临时 overlap owner 的资源峰值；`--diagnostics deep` 还会写出完整 scheduler 和逐 batch
+事件 trace。旧的 `--profile-resources` 等价于 `--diagnostics resources`。所有资源采样只包含本项目
+登记的 PID，不包含其他项目进程。
 
 ## 退出码
 

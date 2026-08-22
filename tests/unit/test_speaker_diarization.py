@@ -53,6 +53,42 @@ def test_merge_keeps_distinct_clusters():
     assert len(set(merged)) == 2
 
 
+def test_merge_rejects_unstable_cross_similarity():
+    # Half the cross pairs are near-orthogonal: the mean passes 0.23
+    # but only 50% of pairs reach it, below the 0.6 stability floor.
+    embeddings = np.array(
+        [[1.0, 0.0], [0.99, 0.141], [1.0, 0.0], [0.0, 1.0]],
+        dtype="float32",
+    )
+    labels = np.array([0, 0, 1, 1])
+
+    blocked = merge_oversegmented_clusters(embeddings, labels, threshold=0.23)
+    assert len(set(blocked)) == 2
+
+    allowed = merge_oversegmented_clusters(
+        embeddings, labels, threshold=0.23, min_fraction=0.4
+    )
+    assert len(set(allowed)) == 1
+
+
+def test_merge_rejects_similarity_below_within_cluster_ratio():
+    # Cross pairs consistently reach 0.31 (fraction 1.0) but each cluster
+    # is internally near-identical, so 0.31 is far below 0.55 x within.
+    embeddings = np.array(
+        [[1.0, 0.0], [1.0, 0.0], [0.309, 0.951], [0.309, 0.951]],
+        dtype="float32",
+    )
+    labels = np.array([0, 0, 1, 1])
+
+    blocked = merge_oversegmented_clusters(embeddings, labels, threshold=0.23)
+    assert len(set(blocked)) == 2
+
+    allowed = merge_oversegmented_clusters(
+        embeddings, labels, threshold=0.23, relative_ratio=0.3
+    )
+    assert len(set(allowed)) == 1
+
+
 def test_smoothing_collapses_short_aba_flicker():
     result = smooth_segments(
         [(0.0, 2.0, 1), (2.0, 2.5, 2), (2.5, 4.0, 1)],

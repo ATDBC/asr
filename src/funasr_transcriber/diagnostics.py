@@ -24,6 +24,7 @@ class Diagnostics:
     config: dict[str, Any] = field(default_factory=dict)
     asr: dict[str, Any] = field(default_factory=dict)
     gpu_stages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scheduler: dict[str, Any] = field(default_factory=dict)
     resource_profile: dict[str, Any] = field(
         default_factory=lambda: {"enabled": False}
     )
@@ -111,6 +112,7 @@ def export_diagnostics(
         "config": sanitize_mapping(diagnostics.config),
         "asr": diagnostics.asr,
         "gpu_stages": diagnostics.gpu_stages,
+        "scheduler": sanitize_mapping(diagnostics.scheduler),
         "resource_profile": sanitize_mapping(diagnostics.resource_profile),
     }
     try:

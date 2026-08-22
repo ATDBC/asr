@@ -790,6 +790,9 @@ class ServiceJobRunner:
             scheduler = branches.branch_metrics.get("asr", {}).get("scheduler")
             if isinstance(scheduler, dict):
                 diagnostics.scheduler = scheduler
+            parallel_metrics = branches.branch_metrics.get("asr", {}).get("parallel")
+            if isinstance(parallel_metrics, dict):
+                diagnostics.scheduler["parallel"] = parallel_metrics
             if not branches.speaker_segments:
                 raise TranscriptionError("speaker diarization returned no segments")
             with diagnostics.stage("alignment"):
@@ -908,6 +911,7 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             frame_budget=config.asr.segment_frame_budget,
             memory_limit_mib=config.asr.segment_memory_limit_mib,
             memory_safety_mib=config.asr.segment_memory_safety_mib,
+            gpu_safety_margin_mib=config.asr.gpu_safety_margin_mib,
         )
 
     def gpu_check() -> None:

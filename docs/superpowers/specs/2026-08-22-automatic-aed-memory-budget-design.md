@@ -47,12 +47,13 @@ never replans output order or batch membership.
 ## Prediction diagnostics
 
 The BF16 cost model predicts each batch from padded feature frames and item
-count. Each worker returns per-batch elapsed time and CUDA peak allocated and
-reserved memory. Diagnostics join observations to the immutable estimates by
+count using the current BF16 calibration (`0.0003 s/frame`, `0.03 MiB/frame`).
+Each worker returns its warmed CUDA allocated baseline plus per-batch
+elapsed time and CUDA peak allocated and reserved memory. Diagnostics join observations to the immutable estimates by
 worker and batch position and report absolute error and percentage error for:
 
 - batch elapsed seconds;
-- incremental reserved memory above the worker's warmed baseline;
+- incremental allocated memory above the worker's warmed allocated baseline;
 - worker total predicted versus actual AED time;
 - planned concurrent increment versus the observed service peak.
 

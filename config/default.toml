@@ -17,6 +17,8 @@ segment_batch_size = 8
 segment_frame_budget = 8000
 segment_memory_limit_mib = 10000
 segment_memory_safety_mib = 512
+# Free GPU 0 after warm-up minus this margin is the shared AED transient budget.
+gpu_safety_margin_mib = 1536
 
 [diarization]
 speaker_count = "auto"

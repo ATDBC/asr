@@ -32,6 +32,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "segment_frame_budget": 8000,
         "segment_memory_limit_mib": 10000,
         "segment_memory_safety_mib": 512,
+        "gpu_safety_margin_mib": 1536,
     },
     "diarization": {
         "speaker_count": "auto",
@@ -99,6 +100,7 @@ class AsrConfig:
     segment_frame_budget: int
     segment_memory_limit_mib: int
     segment_memory_safety_mib: int
+    gpu_safety_margin_mib: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +254,7 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             segment_memory_safety_mib=int(
                 values["asr"]["segment_memory_safety_mib"]
             ),
+            gpu_safety_margin_mib=int(values["asr"]["gpu_safety_margin_mib"]),
         ),
         diarization=DiarizationConfig(
             speaker_count=speaker_count,
@@ -323,6 +326,8 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("ASR segment_memory_limit_mib must be positive")
     if config.asr.segment_memory_safety_mib < 0:
         raise ValueError("ASR segment_memory_safety_mib must not be negative")
+    if config.asr.gpu_safety_margin_mib <= 0:
+        raise ValueError("ASR gpu_safety_margin_mib must be positive")
     diarization = config.diarization
     if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
         raise ValueError("min_speakers/max_speakers must stay within 1..10")

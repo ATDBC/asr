@@ -24,6 +24,7 @@ class BatchEstimate:
     padded_frames: int
     predicted_seconds: float
     predicted_peak_mib: int
+    predicted_incremental_mib: int
 
 
 @dataclass(slots=True)
@@ -32,9 +33,9 @@ class BatchCostModel:
 
     frame_rate: float = 100.0
     base_memory_mib: float = 5_000.0
-    memory_per_padded_frame_mib: float = 0.04
+    memory_per_padded_frame_mib: float = 0.03
     base_seconds: float = 0.05
-    seconds_per_padded_frame: float = 0.004
+    seconds_per_padded_frame: float = 0.0003
     seconds_per_item: float = 0.01
     smoothing: float = 0.25
     observations: int = 0
@@ -63,12 +64,17 @@ class BatchCostModel:
             round(self.base_memory_mib
                   + self.memory_per_padded_frame_mib * padded_frames)
         )
+        predicted_incremental_mib = max(
+            0,
+            predicted_peak_mib - int(round(self.base_memory_mib)),
+        )
         return BatchEstimate(
             item_count=len(normalized),
             total_frames=total_frames,
             padded_frames=padded_frames,
             predicted_seconds=predicted_seconds,
             predicted_peak_mib=predicted_peak_mib,
+            predicted_incremental_mib=predicted_incremental_mib,
         )
 
     def observe(
@@ -125,6 +131,7 @@ class AdaptiveBatchScheduler:
     safety_mib: int = 512
     cost_model: BatchCostModel = field(default_factory=BatchCostModel)
     free_memory_provider: Callable[[], int | None] | None = None
+    transient_memory_limit_mib: int | None = None
     _remaining: list[ScheduledItem] = field(init=False, repr=False)
     _plan: list[BatchDecision] | None = field(default=None, init=False, repr=False)
     _plan_cursor: int = field(default=0, init=False, repr=False)
@@ -146,6 +153,11 @@ class AdaptiveBatchScheduler:
             raise ValueError("memory_limit_mib must be positive when provided")
         if self.safety_mib < 0:
             raise ValueError("safety_mib must not be negative")
+        if (
+            self.transient_memory_limit_mib is not None
+            and self.transient_memory_limit_mib <= 0
+        ):
+            raise ValueError("transient_memory_limit_mib must be positive when provided")
         self._remaining = sorted(
             [
                 ScheduledItem(index, float(start), float(end))
@@ -171,6 +183,10 @@ class AdaptiveBatchScheduler:
                 and estimate.predicted_peak_mib + self.safety_mib
                 > self.memory_limit_mib
             )
+            transient_limit_violation = (
+                self.transient_memory_limit_mib is not None
+                and estimate.predicted_incremental_mib > self.transient_memory_limit_mib
+            )
             transient_mib = max(
                 0,
                 estimate.predicted_peak_mib
@@ -180,12 +196,19 @@ class AdaptiveBatchScheduler:
                 free_memory is not None
                 and transient_mib + self.safety_mib > free_memory
             )
-            if not (frame_violation or memory_violation or free_violation):
+            if not (
+                frame_violation
+                or memory_violation
+                or free_violation
+                or transient_limit_violation
+            ):
                 break
             if free_violation:
                 decision = "free_memory"
             elif memory_violation:
                 decision = "memory_limit"
+            elif transient_limit_violation:
+                decision = "shared_memory_limit"
             else:
                 decision = "frame_budget"
             candidate.pop()
@@ -203,8 +226,13 @@ class AdaptiveBatchScheduler:
                     and estimate.predicted_peak_mib + self.safety_mib
                     > self.memory_limit_mib
                 )
+                or (
+                    self.transient_memory_limit_mib is not None
+                    and estimate.predicted_incremental_mib
+                    > self.transient_memory_limit_mib
+                )
             ):
-                decision = "over_budget"
+                decision = "over_budget" if decision != "shared_memory_limit" else decision
             elif (
                 free_memory is not None
                 and transient_mib + self.safety_mib > free_memory
@@ -281,6 +309,7 @@ class AdaptiveBatchScheduler:
                 {
                     **observation,
                     "predicted_peak_mib": decision.estimate.predicted_peak_mib,
+                    "predicted_incremental_mib": decision.estimate.predicted_incremental_mib,
                 }
             )
         self.cost_model.observe(
@@ -296,6 +325,7 @@ class AdaptiveBatchScheduler:
             "frame_budget": self.frame_budget,
             "memory_limit_mib": self.memory_limit_mib,
             "safety_mib": self.safety_mib,
+            "transient_memory_limit_mib": self.transient_memory_limit_mib,
             "planned_free_memory_mib": self.planned_free_memory_mib,
             "planned_batches": len(self._plan or []),
             "planned_items": sum(len(item.items) for item in (self._plan or [])),
@@ -316,6 +346,7 @@ class AdaptiveBatchScheduler:
                         decision.estimate.predicted_seconds, 6
                     ),
                     "predicted_peak_mib": decision.estimate.predicted_peak_mib,
+                    "predicted_incremental_mib": decision.estimate.predicted_incremental_mib,
                     "decision": decision.decision,
                     "free_memory_mib": decision.free_memory_mib,
                 }

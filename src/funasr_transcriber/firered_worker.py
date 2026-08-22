@@ -125,6 +125,28 @@ def _cuda_peak_memory_mib() -> int | None:
     return None
 
 
+def _cuda_memory_allocated_mib() -> int | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return int(torch.cuda.memory_allocated() / (1024 * 1024))
+    except ImportError:
+        pass
+    return None
+
+
+def _cuda_peak_reserved_mib() -> int | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return int(torch.cuda.max_memory_reserved() / (1024 * 1024))
+    except ImportError:
+        pass
+    return None
+
+
 def _cuda_free_memory_mib() -> int | None:
     try:
         import torch
@@ -328,7 +350,9 @@ def _explicit_aed_process(
     wav_np, sample_rate = sf.read(wav_path, dtype="int16")
     duration_s = wav_np.shape[0] / sample_rate
     records: list[dict[str, object]] = []
-    for raw_batch in batch_plan:
+    batch_metrics: list[dict[str, object]] = []
+    resident_allocated_mib = _cuda_memory_allocated_mib()
+    for batch_index, raw_batch in enumerate(batch_plan):
         batch_uttid: list[str] = []
         batch_wav: list[tuple[int, object]] = []
         batch_items: list[dict[str, object]] = []
@@ -352,6 +376,16 @@ def _explicit_aed_process(
         started = clock()
         results = system.asr.transcribe(batch_uttid, batch_wav)
         _synchronize_cuda()
+        actual_seconds = clock() - started
+        batch_metrics.append({
+            "batch_index": batch_index,
+            "item_count": len(batch_items),
+            "indices": [int(item["index"]) for item in batch_items],
+            "actual_seconds": actual_seconds,
+            "peak_allocated_mib": _cuda_peak_memory_mib(),
+            "peak_reserved_mib": _cuda_peak_reserved_mib(),
+            "resident_allocated_mib": resident_allocated_mib,
+        })
         returned = {str(result.get("uttid")): result for result in results}
         for item in batch_items:
             result = returned.get(str(item["uttid"]))
@@ -361,7 +395,7 @@ def _explicit_aed_process(
             if not text or re.search(r"(<blank>)|(<sil>)", text):
                 continue
             records.append({"index": item["index"], "result": result})
-        LOGGER.debug("explicit AED batch completed in %.3fs", clock() - started)
+        LOGGER.debug("explicit AED batch completed in %.3fs", actual_seconds)
 
     records.sort(key=lambda item: int(item["index"]))
     return {
@@ -372,6 +406,8 @@ def _explicit_aed_process(
             for start, end in vad_segments
         ],
         "aed_results": records,
+        "batch_metrics": batch_metrics,
+        "resident_allocated_mib": resident_allocated_mib,
     }
 
 
@@ -862,6 +898,7 @@ def build_firered_system(
     """Construct the AED/Punc worker and its hosted speaker-VAD helper."""
 
     import torch
+    from .firered_compat import install_bf16_forced_align_compat
     from fireredasr2s import FireRedAsr2System, FireRedAsr2SystemConfig
     from fireredasr2s.fireredasr2 import FireRedAsr2Config
     from fireredasr2s.fireredpunc import FireRedPuncConfig
@@ -884,6 +921,7 @@ def build_firered_system(
     if segment_memory_safety_mib < 0:
         raise ValueError("segment_memory_safety_mib must not be negative")
     torch.cuda.set_device(device_index)
+    install_bf16_forced_align_compat()
 
     root = Path(model_root).expanduser().resolve() / "fireredasr2s"
     config = FireRedAsr2SystemConfig(

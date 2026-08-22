@@ -12,12 +12,14 @@ import soundfile as sf
 from funasr_transcriber.firered_worker import (
     AudioInfo,
     GuardedVad,
+    _explicit_aed_process,
     _scheduled_process,
     firered_inventory,
     duration_ordered_batches,
     serve,
     _parser,
 )
+import funasr_transcriber.firered_worker as worker_module
 
 
 def _official(path: Path) -> dict[str, object]:
@@ -109,6 +111,50 @@ def test_duration_ordered_batches_respect_frame_budget_before_batch_limit():
     batches = duration_ordered_batches(segments, batch_size=8, frame_budget=5_000)
 
     assert [[item.index for item in batch] for batch in batches] == [[1], [2], [0]]
+
+
+def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, monkeypatch):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def transcribe(self, uttids, wavs):
+            return [
+                {
+                    "uttid": uttids[0],
+                    "text": "测试",
+                    "confidence": 0.9,
+                    "timestamp": [("测试", 0.0, 1.0)],
+                }
+            ]
+
+    monkeypatch.setattr(worker_module, "_reset_cuda_peak_memory", lambda: None)
+    monkeypatch.setattr(worker_module, "_synchronize_cuda", lambda: None)
+    monkeypatch.setattr(worker_module, "_cuda_peak_memory_mib", lambda: 3_000)
+    monkeypatch.setattr(worker_module, "_cuda_peak_reserved_mib", lambda: 3_200)
+    monkeypatch.setattr(worker_module, "_cuda_memory_allocated_mib", lambda: 2_900)
+    times = iter((10.0, 10.5))
+
+    response = _explicit_aed_process(
+        SimpleNamespace(asr=Asr()),
+        str(wav),
+        "job",
+        [[{"index": 0, "start_ms": 0, "end_ms": 1000}]],
+        [(0.0, 1.0)],
+        clock=lambda: next(times),
+    )
+
+    assert response["batch_metrics"] == [
+        {
+            "batch_index": 0,
+            "item_count": 1,
+            "indices": [0],
+            "actual_seconds": 0.5,
+            "peak_allocated_mib": 3_000,
+            "peak_reserved_mib": 3_200,
+            "resident_allocated_mib": 2_900,
+        }
+    ]
 
 
 def test_scheduled_process_restores_original_result_order(tmp_path: Path):

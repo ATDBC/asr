@@ -85,12 +85,13 @@ FireRedASR2-AED、FireRedPunc 和 FireRedVAD；worker-1 只加载 FireRedASR2-AE
 模型不加载。主进程按时长排序后分 batch，完成两路 AED 后由 worker-0 执行一次 Punc，再按
 原始时间索引恢复，因此响应顺序和 speaker 归属不变；`[asr].segment_batch_size` 是 batch
 上限，`[asr].segment_frame_budget`（默认 8000，约 80 秒特征帧）同时限制动态 batch 的总帧数。
-在第一个 AED batch 开始前，主进程按时长排序并基于初始成本模型一次性生成完整批次计划；
-此时只读取一次 GPU 0 空闲显存，并让所有批次共同遵守
-`[asr].segment_memory_limit_mib=10000` 与 `[asr].segment_memory_safety_mib=512`。
+在第一个 AED batch 开始前，两个 worker 预热完成、说话人分离/VAD 结束；主进程按时长排序并基于初始成本模型一次性生成完整批次计划。
+计划预算来自预热后 GPU 0 空闲显存减去 `[asr].gpu_safety_margin_mib=1536`，使用每个 worker 的预计瞬时增量显存，
+同时保留 `[asr].segment_memory_limit_mib=10000` 作为单 worker 紧急上限。AED 开始前再次采样：满足两路预计峰值则并发，
+只能容纳一路则按相同固定计划串行，连单个批次都放不下则提前失败；这些门控不会重排或重分批。
 两个 worker 后续 batch 严格按各自固定计划执行；batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，
 不会重新排序或改变后续批次。该读取只调用 CUDA 只读接口，不枚举、暂停或操作其他项目进程。
-完整计划、两路分配、实际观测和预测超限记录会写入 `diagnostics.json.scheduler`。
+完整计划、两路分配、预热基线、实际观测以及逐批时间/增量显存误差会写入 `diagnostics.json.scheduler` 和并行指标。
 doctor/overlap 请求仍保持 FireRedVAD 输出顺序。2026-08-21 在本机 GPU 0
 以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次：batch 1/4 共享稳定
 fingerprint，中位端到端 28.50 秒（batch 4），进程峰值 5,690 MiB；batch 2/8 的

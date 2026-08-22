@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from funasr_transcriber.firered_scheduler import (
     AdaptiveBatchScheduler,
     BatchCostModel,
@@ -66,6 +68,14 @@ def test_cost_model_updates_from_observed_batch():
 
     assert model.memory_per_padded_frame_mib > 0.1
     assert model.seconds_per_padded_frame > 0.001
+
+
+def test_default_bf16_cost_model_predicts_time_and_incremental_memory():
+    estimate = BatchCostModel().estimate([(float(index), float(index + 10)) for index in range(8)])
+
+    assert estimate.predicted_seconds == pytest.approx(2.53)
+    assert estimate.predicted_incremental_mib == 240
+    assert estimate.predicted_peak_mib == 5_000 + estimate.predicted_incremental_mib
 
 
 def test_scheduler_processes_single_over_budget_item_and_marks_it():

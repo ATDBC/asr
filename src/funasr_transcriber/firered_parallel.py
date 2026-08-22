@@ -13,6 +13,71 @@ from .schemas import AsrResult
 
 
 @dataclass(frozen=True, slots=True)
+class GpuMemorySnapshot:
+    total_mib: int
+    free_mib: int
+    process_mib: dict[int, int]
+
+
+def derive_transient_budget_mib(
+    snapshot: GpuMemorySnapshot,
+    *,
+    safety_margin_mib: int,
+) -> int:
+    if safety_margin_mib < 0:
+        raise ValueError("safety_margin_mib must not be negative")
+    return max(0, int(snapshot.free_mib) - int(safety_margin_mib))
+
+
+def required_concurrent_increment_mib(
+    assignments: Sequence[Sequence[BatchDecision]],
+) -> int:
+    return sum(
+        max(
+            (batch.estimate.predicted_incremental_mib for batch in lane),
+            default=0,
+        )
+        for lane in assignments
+    )
+
+
+def _default_gpu_memory_provider(pids: Sequence[int]) -> GpuMemorySnapshot:
+    import subprocess
+
+    import torch
+
+    free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+    wanted = {int(pid) for pid in pids if int(pid) > 0}
+    process_mib: dict[int, int] = {}
+    query = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-compute-apps=pid,used_memory",
+            "--format=csv,noheader,nounits",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if query.returncode == 0:
+        for line in query.stdout.splitlines():
+            fields = [field.strip() for field in line.split(",")]
+            if len(fields) != 2:
+                continue
+            try:
+                pid, memory = int(fields[0]), int(fields[1])
+            except ValueError:
+                continue
+            if pid in wanted:
+                process_mib[pid] = memory
+    return GpuMemorySnapshot(
+        total_mib=int(total_bytes / (1024 * 1024)),
+        free_mib=int(free_bytes / (1024 * 1024)),
+        process_mib=process_mib,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class PartitionSummary:
     """A deterministic worker assignment and its predicted runtime."""
 
@@ -28,17 +93,31 @@ def build_global_plan(
     frame_budget: int = 8000,
     memory_limit_mib: int | None = 10_000,
     memory_safety_mib: int = 512,
+    transient_memory_budget_mib: int | None = None,
+    worker_count: int = 1,
 ) -> tuple[BatchDecision, ...]:
     """Build the one immutable plan shared by every AED worker."""
 
-    scheduler = AdaptiveBatchScheduler(
-        segments,
-        max_batch_size=batch_size,
-        frame_budget=frame_budget,
-        memory_limit_mib=memory_limit_mib,
-        safety_mib=memory_safety_mib,
-    )
-    return tuple(scheduler.plan())
+    candidate_size = int(batch_size)
+    while candidate_size > 0:
+        scheduler = AdaptiveBatchScheduler(
+            segments,
+            max_batch_size=candidate_size,
+            frame_budget=frame_budget,
+            memory_limit_mib=memory_limit_mib,
+            safety_mib=memory_safety_mib,
+            transient_memory_limit_mib=transient_memory_budget_mib,
+        )
+        plan = tuple(scheduler.plan())
+        if transient_memory_budget_mib is None or worker_count <= 1:
+            return plan
+        assignments = partition_batches(plan, worker_count=worker_count)
+        if required_concurrent_increment_mib(assignments) <= int(
+            transient_memory_budget_mib
+        ):
+            return plan
+        candidate_size -= 1
+    raise RuntimeError("unable to build an AED batch plan")
 
 
 def _loads(assignments: Sequence[Sequence[BatchDecision]]) -> list[float]:
@@ -120,6 +199,64 @@ def summarize_partition(
     )
 
 
+def _prediction_accuracy(
+    assignments: Sequence[Sequence[BatchDecision]],
+    responses: Sequence[dict[str, object]],
+    resident_process_mib: dict[int, int],
+    workers: Sequence[Any],
+) -> dict[str, object]:
+    records: list[dict[str, object]] = []
+    for worker_index, (lane, response, worker) in enumerate(
+        zip(assignments, responses, workers)
+    ):
+        raw_metrics = response.get("batch_metrics", [])
+        if not isinstance(raw_metrics, list):
+            continue
+        pid = getattr(worker, "pid", None)
+        fallback_resident = (
+            resident_process_mib.get(int(pid), 0)
+            if isinstance(pid, int)
+            else 0
+        )
+        response_resident = response.get("resident_allocated_mib")
+        resident = (
+            int(response_resident)
+            if isinstance(response_resident, (int, float))
+            else fallback_resident
+        )
+        for batch_index, (decision, raw) in enumerate(zip(lane, raw_metrics)):
+            if not isinstance(raw, dict):
+                continue
+            actual_seconds = float(raw.get("actual_seconds") or 0.0)
+            actual_peak = raw.get("peak_allocated_mib")
+            actual_increment = (
+                None if actual_peak is None else max(0, int(actual_peak) - resident)
+            )
+            predicted_seconds = float(decision.estimate.predicted_seconds)
+            predicted_increment = decision.estimate.predicted_incremental_mib
+            records.append({
+                "worker_index": worker_index,
+                "batch_index": batch_index,
+                "indices": [item.index for item in decision.items],
+                "predicted_seconds": predicted_seconds,
+                "actual_seconds": actual_seconds,
+                "seconds_error": actual_seconds - predicted_seconds,
+                "predicted_incremental_mib": predicted_increment,
+                "actual_incremental_mib": actual_increment,
+                "incremental_mib_error": (
+                    None
+                    if actual_increment is None
+                    else actual_increment - predicted_increment
+                ),
+            })
+    return {
+        "batches": len(records),
+        "records": records,
+        "predicted_seconds": sum(float(item["predicted_seconds"]) for item in records),
+        "actual_seconds": sum(float(item["actual_seconds"]) for item in records),
+    }
+
+
 class ParallelFireRedWorkerClient:
     """Two AED clients with worker 0 as the single VAD/Punc owner."""
 
@@ -132,6 +269,8 @@ class ParallelFireRedWorkerClient:
         frame_budget: int = 8000,
         memory_limit_mib: int | None = 10_000,
         memory_safety_mib: int = 512,
+        gpu_safety_margin_mib: int = 1_536,
+        gpu_memory_provider: Any | None = None,
     ):
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -141,6 +280,10 @@ class ParallelFireRedWorkerClient:
         self.frame_budget = int(frame_budget)
         self.memory_limit_mib = memory_limit_mib
         self.memory_safety_mib = int(memory_safety_mib)
+        self.gpu_safety_margin_mib = int(gpu_safety_margin_mib)
+        self.gpu_memory_provider = (
+            gpu_memory_provider or _default_gpu_memory_provider
+        )
         self.last_response: dict[str, object] = {}
 
     @property
@@ -202,6 +345,11 @@ class ParallelFireRedWorkerClient:
             (float(start) / 1000.0, float(end) / 1000.0)
             for start, end in refined
         ]
+        before_plan = self.gpu_memory_provider(self.pids)
+        effective_budget = derive_transient_budget_mib(
+            before_plan,
+            safety_margin_mib=self.gpu_safety_margin_mib,
+        )
         plan_started = perf_counter()
         plan = build_global_plan(
             refined_seconds,
@@ -209,6 +357,8 @@ class ParallelFireRedWorkerClient:
             frame_budget=self.frame_budget,
             memory_limit_mib=self.memory_limit_mib,
             memory_safety_mib=self.memory_safety_mib,
+            transient_memory_budget_mib=effective_budget,
+            worker_count=2,
         )
         plan_seconds = perf_counter() - plan_started
         assignments = partition_batches(plan, worker_count=2)
@@ -225,18 +375,39 @@ class ParallelFireRedWorkerClient:
             )
             return response, perf_counter() - started
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [
-                executor.submit(
-                    execute,
-                    client,
-                    worker_plan,
-                )
+        before_dispatch = self.gpu_memory_provider(self.pids)
+        dispatch_budget = derive_transient_budget_mib(
+            before_dispatch,
+            safety_margin_mib=self.gpu_safety_margin_mib,
+        )
+        dispatch_mode = "concurrent"
+        if required_concurrent_increment_mib(assignments) > dispatch_budget:
+            dispatch_mode = "serial"
+        largest_single_increment = max(
+            (batch.estimate.predicted_incremental_mib for batch in plan),
+            default=0,
+        )
+        if largest_single_increment > dispatch_budget:
+            raise RuntimeError(
+                "AED transient memory budget cannot fit even one planned batch: "
+                f"required={largest_single_increment} MiB, budget={dispatch_budget} MiB"
+            )
+        if dispatch_mode == "concurrent":
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(execute, client, worker_plan)
+                    for client, worker_plan in zip(
+                        (self.worker0, self.worker1), plans
+                    )
+                ]
+                timed_responses = [future.result() for future in futures]
+        else:
+            timed_responses = [
+                execute(client, worker_plan)
                 for client, worker_plan in zip(
                     (self.worker0, self.worker1), plans
                 )
             ]
-            timed_responses = [future.result() for future in futures]
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
         aed_seconds = perf_counter() - aed_started
@@ -259,6 +430,23 @@ class ParallelFireRedWorkerClient:
             "metrics": {
                 "parallel": {
                 "warmup_excluded": True,
+                "dispatch_mode": dispatch_mode,
+                "memory": {
+                    "planned_free_mib": before_plan.free_mib,
+                    "dispatch_free_mib": before_dispatch.free_mib,
+                    "effective_transient_budget_mib": effective_budget,
+                    "dispatch_transient_budget_mib": dispatch_budget,
+                    "required_concurrent_increment_mib": (
+                        required_concurrent_increment_mib(assignments)
+                    ),
+                    "resident_process_mib": dict(before_plan.process_mib),
+                },
+                "prediction_accuracy": _prediction_accuracy(
+                    assignments,
+                    responses,
+                    before_plan.process_mib,
+                    (self.worker0, self.worker1),
+                ),
                 "vad_seconds": vad_seconds,
                 "plan_seconds": plan_seconds,
                 "aed_seconds": aed_seconds,

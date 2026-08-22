@@ -7,6 +7,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import selectors
 import subprocess
+import threading
 from typing import IO, Any, Callable
 import uuid
 
@@ -106,6 +107,8 @@ class FireRedWorkerClient:
         self._stderr: IO[str] | None = None
         self._response_ids: set[str] = set()
         self.last_response: dict[str, object] = {}
+        self._stdout_lines: Queue[str | None] | None = None
+        self._stdout_reader: threading.Thread | None = None
 
     @property
     def pid(self) -> int | None:
@@ -174,7 +177,49 @@ class FireRedWorkerClient:
         )
         return self
 
-    def _read_response(self, expected_id: str) -> dict[str, object]:
+    def _start_stdout_reader(self) -> Queue[str | None]:
+        """Start one persistent reader when stream responses are needed."""
+
+        if self._stdout_lines is not None:
+            return self._stdout_lines
+        process = self._process
+        if process is None or process.stdout is None:
+            raise TranscriptionError("FireRed worker is not running")
+        lines: Queue[str | None] = Queue()
+
+        def reader() -> None:
+            try:
+                for line in process.stdout:
+                    lines.put(line)
+            finally:
+                lines.put(None)
+
+        self._stdout_lines = lines
+        self._stdout_reader = threading.Thread(
+            target=reader,
+            name=f"firered-stdout-{process.pid}",
+            daemon=True,
+        )
+        self._stdout_reader.start()
+        return lines
+
+    def _next_stdout_line(self) -> str | None:
+        lines = self._stdout_lines
+        if lines is not None:
+            try:
+                return lines.get(timeout=self.timeout_seconds)
+            except Empty:
+                process = self._process
+                return_code = None if process is None else process.poll()
+                if return_code is not None:
+                    raise TranscriptionError(
+                        f"FireRed worker exited with code {return_code}"
+                    )
+                raise TranscriptionError(
+                    "FireRed worker timed out after "
+                    f"{self.timeout_seconds} seconds"
+                )
+
         process = self._process
         selector = self._selector
         if process is None or selector is None or process.stdout is None:
@@ -190,7 +235,13 @@ class FireRedWorkerClient:
                 "FireRed worker timed out after "
                 f"{self.timeout_seconds} seconds"
             )
-        line = process.stdout.readline()
+        return process.stdout.readline() or None
+
+    def _read_response(self, expected_id: str) -> dict[str, object]:
+        process = self._process
+        if process is None or process.stdout is None:
+            raise TranscriptionError("FireRed worker is not running")
+        line = self._next_stdout_line()
         if not line:
             try:
                 return_code = process.wait(timeout=0.1)
@@ -239,17 +290,7 @@ class FireRedWorkerClient:
         process = self._process
         if process is None or process.stdout is None:
             raise TranscriptionError("FireRed worker is not running")
-        lines: Queue[str | None] = Queue()
-
-        def reader() -> None:
-            try:
-                for line in process.stdout:
-                    lines.put(line)
-            finally:
-                lines.put(None)
-
-        import threading
-        threading.Thread(target=reader, daemon=True).start()
+        lines = self._start_stdout_reader()
         while True:
             try:
                 line = lines.get(timeout=self.timeout_seconds)
@@ -517,6 +558,8 @@ class FireRedWorkerClient:
                 self._stderr.close()
                 self._stderr = None
             self._process = None
+            self._stdout_lines = None
+            self._stdout_reader = None
 
     def __enter__(self) -> "FireRedWorkerClient":
         return self.start()

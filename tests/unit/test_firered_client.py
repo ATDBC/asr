@@ -275,6 +275,28 @@ def test_client_streams_aed_batch_events_before_final_response(tmp_path: Path):
     assert response["ok"] is True
 
 
+def test_client_reuses_stream_worker_for_multiple_requests(tmp_path: Path):
+    """A completed stream must not leave a competing stdout reader behind."""
+
+    with _client(tmp_path, "stream", timeout=0.5) as client:
+        first_events: list[dict[str, object]] = []
+        second_events: list[dict[str, object]] = []
+        plan = [[{"index": 0, "start_ms": 0, "end_ms": 500}]]
+        vad = [[0, 500]]
+
+        first = client.run_aed_plan_stream(
+            _audio(tmp_path, "one"), plan, vad, first_events.append
+        )
+        second = client.run_aed_plan_stream(
+            _audio(tmp_path, "two"), plan, vad, second_events.append
+        )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert len(first_events) == 1
+    assert len(second_events) == 1
+
+
 def test_client_serializes_parallel_actions_and_optional_modules(tmp_path: Path):
     script = tmp_path / "parallel_worker.py"
     script.write_text(

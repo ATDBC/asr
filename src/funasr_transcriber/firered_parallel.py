@@ -441,7 +441,8 @@ class ParallelFireRedWorkerClient:
             ]
             timed_responses = [future.result() for future in futures]
             punc_metrics = punc_future.result()
-        aed_wall_seconds = perf_counter() - aed_started
+        aed_ended = perf_counter()
+        aed_wall_seconds = aed_ended - aed_started
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
         durations = [int(response.get("duration_ms") or 0) for response in responses]
@@ -480,6 +481,8 @@ class ParallelFireRedWorkerClient:
                     "vad_seconds": vad_seconds,
                     "plan_seconds": plan_seconds,
                     "aed_wall_seconds": aed_wall_seconds,
+                    "aed_started_at_monotonic": aed_started,
+                    "aed_ended_at_monotonic": aed_ended,
                     "aed_worker_seconds": worker_aed_seconds,
                     "punc_queue_wall_seconds": float(punc_metrics["wall_seconds"]),
                     "punc_model_seconds": float(punc_metrics["model_seconds"]),
@@ -612,7 +615,8 @@ class ParallelFireRedWorkerClient:
             ]
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
-        aed_wall_seconds = perf_counter() - aed_started
+        aed_ended = perf_counter()
+        aed_wall_seconds = aed_ended - aed_started
         merged: list[dict[str, object]] = []
         duration_ms = 0
         for response in responses:
@@ -652,6 +656,8 @@ class ParallelFireRedWorkerClient:
                 "vad_seconds": vad_seconds,
                 "plan_seconds": plan_seconds,
                 "aed_wall_seconds": aed_wall_seconds,
+                "aed_started_at_monotonic": aed_started,
+                "aed_ended_at_monotonic": aed_ended,
                 "aed_worker_seconds": worker_aed_seconds,
                 "punc_queue_wall_seconds": punc_queue_wall_seconds,
                 "total_seconds": perf_counter() - started,

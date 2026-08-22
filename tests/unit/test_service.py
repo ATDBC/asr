@@ -700,3 +700,55 @@ def test_enabled_profile_records_owned_pids_and_branch_metrics(tmp_path: Path):
     assert profile["branches"]["asr"]["seconds"] >= 0
     assert profile["branches"]["diarization"]["seconds"] >= 0
     assert "other_processes" not in profile
+
+
+def test_deep_profile_includes_aed_memory_trace(tmp_path: Path):
+    created: dict[str, object] = {}
+
+    class DeepAsr(FakeAsr):
+        def __init__(self):
+            super().__init__([])
+            self.last_response = {
+                "metrics": {
+                    "parallel": {
+                        "aed_started_at_monotonic": 10.0,
+                        "aed_ended_at_monotonic": 20.0,
+                    }
+                }
+            }
+
+    class TraceSampler:
+        def start(self):
+            return None
+
+        def stop(self):
+            return {"sample_count": 1, "pid_observed": {}}
+
+        def trace_stage(self, started, ended):
+            assert (started, ended) == (10.0, 20.0)
+            return {"sample_count": 1, "samples": [], "summary": {}}
+
+    runner, source = _profiled_runner(
+        tmp_path,
+        sampler_factory=lambda *args, **kwargs: (
+            created.update(kwargs) or TraceSampler()
+        ),
+    )
+    runner.hot_host.asr_owner = DeepAsr()
+
+    runner.run(
+        ServiceRequest(
+            identifier="deep-profiled",
+            action="submit",
+            input_audio=source,
+            output_dir=tmp_path / "output",
+            config_fingerprint="test-fingerprint",
+            diagnostics_level="deep",
+        )
+    )
+
+    payload = __import__("json").loads(
+        (tmp_path / "output" / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert created["trace_enabled"] is True
+    assert payload["resource_profile"]["aed_memory_trace"]["sample_count"] == 1

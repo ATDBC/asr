@@ -645,6 +645,7 @@ class ServiceJobRunner:
             "cuda:0",
             self.config.diagnostics.sampling_interval_ms,
             self._owned_pid_getters(),
+            trace_enabled=diagnostics_level == "deep",
         )
         sampler.start()
         return sampler
@@ -656,6 +657,7 @@ class ServiceJobRunner:
         diagnostics: Any,
         *,
         include_model_inventory: bool,
+        include_memory_trace: bool = False,
     ) -> None:
         snapshot = dict(sampler.stop())
         diagnostics.resource_profile = {
@@ -667,6 +669,18 @@ class ServiceJobRunner:
                 "pid_observed": dict(snapshot.get("pid_observed") or {}),
             },
         }
+        if include_memory_trace:
+            parallel = branches.branch_metrics.get("asr", {}).get("parallel")
+            trace_stage = getattr(sampler, "trace_stage", None)
+            if callable(trace_stage) and isinstance(parallel, dict):
+                started = parallel.get("aed_started_at_monotonic")
+                ended = parallel.get("aed_ended_at_monotonic")
+                if isinstance(started, (int, float)) and isinstance(
+                    ended, (int, float)
+                ):
+                    diagnostics.resource_profile["aed_memory_trace"] = (
+                        trace_stage(float(started), float(ended))
+                    )
         if include_model_inventory:
             diagnostics.resource_profile["inventories"] = dict(
                 getattr(self.hot_host, "inventories", {})
@@ -867,6 +881,7 @@ class ServiceJobRunner:
                         diagnostics_level == "deep"
                         or self.config.diagnostics.include_model_inventory
                     ),
+                    include_memory_trace=diagnostics_level == "deep",
                 )
                 profile_finished = True
             if diagnostics_level == "off":

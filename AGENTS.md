@@ -27,7 +27,9 @@
 - 默认级别是 `basic`：记录低开销的阶段耗时、计数和调度摘要。
 - `resources` 额外启用只读 GPU/RSS 采样，记录 service、speaker、两个 AED、Punc 和 overlap
   owner 的资源峰值。
-- `deep` 在 `resources` 基础上写出完整 scheduler 和逐 batch JSONL trace。
+- `deep` 在 `resources` 基础上写出完整 scheduler、逐 batch JSONL trace，以及
+  `resource_profile.aed_memory_trace`：AED 阶段按采样间隔记录 GPU 总占用、空闲量和本项目各 owner
+  的显存时序，并计算平均/峰值利用率及达到峰值 95% 的样本比例；该时序只在 deep 开启时采集。
 - `off` 只保留最小成功/失败摘要；不要删除 `diagnostics.json` 文件本身。
 - CLI 的 `--diagnostics` 优先级高于配置文件；旧的 `--profile-resources` 是 `resources` 的兼容别名。
 - 资源采样只能查询 GPU 和本项目登记的 PID，绝不向其他项目的进程发送信号或进行管理。

@@ -148,8 +148,10 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
 启用 `resources` 后，作业的 `diagnostics.json` 额外写入：采样间隔和次数、service、speaker、
 两个 AED、Punc owner 和临时 overlap worker 的峰值显存、服务 RSS 峰值、GPU 总占用峰值、初始
 其他项目显存基线、净服务峰值，以及预热后 ASR 和 diarization 的开始/结束单调时间与耗时。`deep`
-级别还会在 `diagnostics/` 写出完整 `scheduler.json` 和 `batch-events.jsonl`；普通摘要不会包含
-完整 batch 计划。采样器只接受这些明确登记的本项目 owner 名称，不会写入其他 PID、命令行或显存行。
+级别还会在 `diagnostics/` 写出完整 `scheduler.json` 和 `batch-events.jsonl`，并在
+`resource_profile.aed_memory_trace` 保存 AED 阶段的显存时序、峰值/平均利用率、达到峰值 95% 的
+样本比例，以及各 owner 的峰值/平均显存；普通摘要不会包含完整 batch 计划或时序样本。采样器
+只接受这些明确登记的本项目 owner 名称，不会写入其他 PID、命令行或显存行。
 
 ## 对齐与输出
 

@@ -675,11 +675,28 @@ class ServiceJobRunner:
             if callable(trace_stage) and isinstance(parallel, dict):
                 started = parallel.get("aed_started_at_monotonic")
                 ended = parallel.get("aed_ended_at_monotonic")
+                memory = parallel.get("memory")
+                budget = (
+                    memory.get("dispatch_transient_budget_mib")
+                    if isinstance(memory, dict)
+                    else None
+                )
                 if isinstance(started, (int, float)) and isinstance(
                     ended, (int, float)
                 ):
                     diagnostics.resource_profile["aed_memory_trace"] = (
-                        trace_stage(float(started), float(ended))
+                        trace_stage(
+                            float(started),
+                            float(ended),
+                            effective_budget_mib=(
+                                int(budget)
+                                if isinstance(budget, (int, float))
+                                else None
+                            ),
+                            safety_margin_mib=(
+                                int(self.config.asr.gpu_safety_margin_mib)
+                            ),
+                        )
                     )
         if include_model_inventory:
             diagnostics.resource_profile["inventories"] = dict(

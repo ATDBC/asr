@@ -724,8 +724,9 @@ def test_deep_profile_includes_aed_memory_trace(tmp_path: Path):
         def stop(self):
             return {"sample_count": 1, "pid_observed": {}}
 
-        def trace_stage(self, started, ended):
+        def trace_stage(self, started, ended, **kwargs):
             assert (started, ended) == (10.0, 20.0)
+            assert kwargs["effective_budget_mib"] is None
             return {"sample_count": 1, "samples": [], "summary": {}}
 
     runner, source = _profiled_runner(

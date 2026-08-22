@@ -238,7 +238,12 @@ class ResourceSampler:
                         for name, pid in registered.items()
                         if pid in process_memory
                     }
-                    known_project_mib = sum(named_process_memory.values())
+                    process_pid_memory = {
+                        str(pid): int(process_memory[pid])
+                        for pid in set(registered.values())
+                        if pid in process_memory
+                    }
+                    known_project_mib = sum(process_pid_memory.values())
                     self._samples.append(
                         {
                             "timestamp_monotonic": sampled_at,
@@ -247,6 +252,7 @@ class ResourceSampler:
                             "used_mib": used,
                             "net_service_mib": known_project_mib,
                             "process_mib": named_process_memory,
+                            "process_pid_mib": process_pid_memory,
                         }
                     )
 
@@ -312,6 +318,9 @@ class ResourceSampler:
         self,
         started_at_monotonic: float,
         ended_at_monotonic: float,
+        *,
+        effective_budget_mib: int | None = None,
+        safety_margin_mib: int | None = None,
     ) -> dict[str, object]:
         """Return a compact time series and summary for one measured stage."""
 
@@ -382,6 +391,32 @@ class ResourceSampler:
             if used_values
             else 0.0
         )
+        stage_start_used = used_values[0] if used_values else 0
+        transient_increment = max(0, peak_used - stage_start_used)
+        budget_utilization = (
+            round(100 * transient_increment / effective_budget_mib, 3)
+            if effective_budget_mib and effective_budget_mib > 0
+            else None
+        )
+        remaining_over_safety = (
+            max(0, min(free_values) - safety_margin_mib)
+            if free_values and safety_margin_mib is not None
+            else None
+        )
+        process_pid_values = {
+            pid: [
+                int(sample["process_pid_mib"][pid])
+                for sample in samples
+                if pid in sample["process_pid_mib"]
+            ]
+            for pid in sorted(
+                {
+                    pid
+                    for sample in samples
+                    for pid in sample["process_pid_mib"]
+                }
+            )
+        }
         return {
             "stage_start_monotonic": started_at_monotonic,
             "stage_end_monotonic": ended_at_monotonic,
@@ -389,6 +424,11 @@ class ResourceSampler:
             "sample_count": len(public_samples),
             "summary": {
                 "total_mib": peak_total,
+                "stage_start_used_mib": stage_start_used,
+                "aed_transient_increment_mib": transient_increment,
+                "effective_budget_mib": effective_budget_mib,
+                "budget_utilization_pct": budget_utilization,
+                "remaining_over_safety_mib": remaining_over_safety,
                 "peak_used_mib": peak_used,
                 "average_used_mib": average_used,
                 "minimum_free_mib": min(free_values, default=0),
@@ -426,6 +466,11 @@ class ResourceSampler:
                 "process_peak_mib": process_peak,
                 "process_average_mib": process_average,
                 "near_peak_process_fraction": near_peak_process_fraction,
+                "unique_process_peak_mib": {
+                    pid: max(values)
+                    for pid, values in process_pid_values.items()
+                    if values
+                },
             },
             "samples": public_samples,
         }

@@ -89,3 +89,39 @@ def test_sampler_can_capture_stage_memory_trace_on_demand():
         "aed_worker_0": 500,
     }
     assert len(trace["samples"]) == 2
+
+
+def test_sampler_deduplicates_owner_labels_and_reports_budget_utilization():
+    sampler = ResourceSampler(
+        "cuda:0",
+        interval_ms=200,
+        pid_getters={
+            "service": lambda: 100,
+            "speaker": lambda: 100,
+            "aed_worker_0": lambda: 300,
+        },
+        query=lambda: (
+            {"total_mib": 24576, "free_mib": 12517},
+            {100: 618, 300: 5000},
+        ),
+        rss_query=lambda pid: None,
+        trace_enabled=True,
+    )
+    sampler.sample_once()
+    sampler._query = lambda: (
+        {"total_mib": 24576, "free_mib": 3695},
+        {100: 618, 300: 7000},
+    )
+    sampler.sample_once()
+
+    trace = sampler.trace_stage(
+        0.0,
+        float("inf"),
+        effective_budget_mib=10980,
+        safety_margin_mib=1536,
+    )
+
+    assert trace["summary"]["aed_transient_increment_mib"] == 8822
+    assert trace["summary"]["budget_utilization_pct"] == 80.346
+    assert trace["summary"]["remaining_over_safety_mib"] == 2159
+    assert trace["samples"][-1]["net_service_mib"] == 7618

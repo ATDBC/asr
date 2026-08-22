@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import signal
 from time import perf_counter
 import uuid
 
@@ -53,6 +54,7 @@ def run_matrix(
     fractions: list[float],
     repeats: int,
     diagnostics_level: str = "deep",
+    wait_timeout_seconds: float = 180.0,
 ) -> dict[str, object]:
     config = load_config(config_path)
     if config.general.device != "cuda:0":
@@ -86,10 +88,21 @@ def run_matrix(
         }
         try:
             accepted = client.submit(request)
-            terminal = client.wait(
-                str(accepted["job_id"]),
-                uuid.uuid4().hex,
-            )
+            def timeout_handler(signum, frame):
+                raise TimeoutError(
+                    f"job wait exceeded {wait_timeout_seconds:.1f} seconds"
+                )
+
+            previous_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.setitimer(signal.ITIMER_REAL, float(wait_timeout_seconds))
+            try:
+                terminal = client.wait(
+                    str(accepted["job_id"]),
+                    uuid.uuid4().hex,
+                )
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous_handler)
             diagnostics = json.loads(
                 (output_dir / "diagnostics.json").read_text(encoding="utf-8")
             )
@@ -165,6 +178,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--fractions", nargs="+", type=float, required=True)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--wait-timeout-seconds", type=float, default=180.0)
     parser.add_argument(
         "--diagnostics",
         choices=("resources", "deep"),
@@ -182,5 +196,6 @@ if __name__ == "__main__":
         args.fractions,
         args.repeats,
         args.diagnostics,
+        args.wait_timeout_seconds,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

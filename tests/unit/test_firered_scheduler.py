@@ -96,3 +96,12 @@ def test_cost_model_observe_updates_from_reserved_increment():
     assert model.observations == 1
     assert after.predicted_seconds != before.predicted_seconds
     assert after.predicted_incremental_mib != before.predicted_incremental_mib
+
+
+def test_default_cost_model_penalizes_longest_segment_for_time():
+    model = BatchCostModel()
+    short = model.estimate([(0.0, 1.0), (1.0, 2.0)])
+    long = model.estimate([(0.0, 1.0), (1.0, 8.0)])
+
+    assert long.max_frames > short.max_frames
+    assert long.predicted_seconds > short.predicted_seconds

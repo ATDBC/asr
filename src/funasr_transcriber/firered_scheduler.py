@@ -45,8 +45,8 @@ class BatchCostModel:
     memory_per_max_frame_mib: float = 0.0
     base_seconds: float = 0.05
     seconds_per_padded_frame: float = 0.0003
-    seconds_per_total_frame: float = 0.0
-    seconds_per_max_frame: float = 0.0
+    seconds_per_total_frame: float = 0.00002
+    seconds_per_max_frame: float = 0.002
     seconds_per_item: float = 0.01
     smoothing: float = 0.25
     observations: int = 0

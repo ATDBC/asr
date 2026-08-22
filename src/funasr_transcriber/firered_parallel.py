@@ -148,6 +148,32 @@ def partition_batches(
         target = min(range(worker_count), key=lambda index: (loads[index], index))
         assignments[target].append(batch)
 
+    # Improve the longest-processing-time result with deterministic one-batch
+    # moves.  This preserves complete batch boundaries while fixing cases in
+    # which an early LPT choice leaves a better local split available.
+    while worker_count > 1:
+        current_loads = _loads(assignments)
+        current_makespan = max(current_loads, default=0.0)
+        source = max(range(worker_count), key=lambda i: (current_loads[i], -i))
+        target = min(range(worker_count), key=lambda i: (current_loads[i], i))
+        if source == target or not assignments[source]:
+            break
+        best_move: tuple[float, int] | None = None
+        for batch_index, batch in enumerate(assignments[source]):
+            duration = float(batch.estimate.predicted_seconds)
+            candidate_loads = list(current_loads)
+            candidate_loads[source] -= duration
+            candidate_loads[target] += duration
+            candidate_makespan = max(candidate_loads)
+            if candidate_makespan < current_makespan:
+                candidate = (candidate_makespan, batch_index)
+                if best_move is None or candidate < best_move:
+                    best_move = candidate
+        if best_move is None:
+            break
+        _, batch_index = best_move
+        assignments[target].append(assignments[source].pop(batch_index))
+
     # Preserve execution order within each worker. This is useful for stable
     # diagnostics and does not affect the load-balancing decision above.
     plan_position = {id(batch): position for position, batch in enumerate(batches)}

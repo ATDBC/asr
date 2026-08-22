@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from funasr_transcriber.firered_scheduler import BatchCostModel
+
 from funasr_transcriber.firered_parallel import (
     GpuMemorySnapshot,
     ParallelFireRedWorkerClient,
@@ -57,6 +59,7 @@ def test_partition_assigns_complete_batches_to_the_least_loaded_worker():
         [(0.0, 10.0), (10.0, 9.0 + 10.0), (20.0, 25.0), (25.0, 27.0)],
         shared_budget_mib=1000,
         worker_resident_mib=(3000, 3000),
+        cost_model=BatchCostModel(seconds_per_total_frame=0, seconds_per_max_frame=0),
     )
 
     workers = partition_batches(plan, worker_count=2)

@@ -524,6 +524,7 @@ class FireRedWorkerClient:
         return {
             "seconds": float(response.get("warmup_seconds") or 0.0),
             "excluded": bool(response.get("warmup_excluded")),
+            "shapes": list(response.get("warmup_shapes") or []),
             "resident_allocated_mib": response.get("resident_allocated_mib"),
             "resident_reserved_mib": response.get("resident_reserved_mib"),
         }

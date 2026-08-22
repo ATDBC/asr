@@ -425,29 +425,44 @@ def _punctuate_aed_results(
     )
 
 
-def _warmup_process(system: FireRedSystem, wav_path: str) -> None:
+def _warmup_process(system: FireRedSystem, wav_path: str) -> dict[str, object]:
     """Exercise the resident AED/Punc CUDA paths before production timing."""
 
+    import numpy as np
     import soundfile as sf
 
     wav_np, sample_rate = sf.read(wav_path, dtype="int16")
+    shapes = [
+        ("short_single", 1, 1),
+        ("short_batch", 1, 4),
+        ("medium", 10, 1),
+        ("long", 30, 1),
+    ]
     if getattr(system, "asr", None) is not None:
-        uttid = "__firered_warmup__"
-        asr_results = system.asr.transcribe(
-            [uttid], [(sample_rate, wav_np)]
-        )
         punc = getattr(system, "punc", None)
-        if punc is not None and asr_results:
-            punc.process_with_timestamp(
-                [asr_results[0].get("timestamp", [])],
-                [uttid],
+        for shape, seconds, count in shapes:
+            samples = np.resize(wav_np, sample_rate * seconds)
+            uttids = [f"__firered_warmup_{shape}_{index}__" for index in range(count)]
+            asr_results = system.asr.transcribe(
+                uttids, [(sample_rate, samples) for _ in uttids]
             )
+            if punc is not None and asr_results:
+                punc.process_with_timestamp(
+                    [item.get("timestamp", []) for item in asr_results],
+                    uttids,
+                )
+            _synchronize_cuda()
     elif getattr(system, "punc", None) is not None:
         system.punc.process_with_timestamp(
             [[("预热", 0.0, 0.2)]],
             ["__firered_punc_warmup__"],
         )
     _synchronize_cuda()
+    return {
+        "shapes": [item[0] for item in shapes]
+        if getattr(system, "asr", None) is not None
+        else ["punc"]
+    }
 
 
 class FireRedSystem(Protocol):
@@ -706,7 +721,7 @@ def serve(
             if action == "warmup":
                 path = _validate_audio(request.get("audio_path"), audio_info)
                 warmup_started = clock()
-                _warmup_process(system, str(path))
+                warmup_info = _warmup_process(system, str(path))
                 resident_allocated_mib = _cuda_memory_allocated_mib()
                 resident_reserved_mib = _cuda_reserved_memory_mib()
                 _write_response(
@@ -716,6 +731,7 @@ def serve(
                         "ok": True,
                         "warmup_seconds": clock() - warmup_started,
                         "warmup_excluded": True,
+                        "warmup_shapes": warmup_info.get("shapes", []),
                         "resident_allocated_mib": resident_allocated_mib,
                         "resident_reserved_mib": resident_reserved_mib,
                     },

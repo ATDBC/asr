@@ -17,6 +17,7 @@ from funasr_transcriber.firered_worker import (
     firered_inventory,
     serve,
     _parser,
+    _warmup_process,
 )
 import funasr_transcriber.firered_worker as worker_module
 
@@ -81,6 +82,30 @@ def test_worker_half_precision_switch_defaults_off_and_can_be_enabled(tmp_path: 
     assert parser.parse_args(
         ["--model-root", str(tmp_path), "--use-half"]
     ).use_half is True
+
+
+def test_warmup_process_exercises_representative_aed_shapes(tmp_path: Path, monkeypatch):
+    wav = tmp_path / "warmup.wav"
+    sf.write(wav, np.zeros(16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, uttids, wavs):
+            self.calls.append((list(uttids), [len(item[1]) for item in wavs]))
+            return [
+                {"uttid": uttid, "timestamp": [], "confidence": 0.9}
+                for uttid in uttids
+            ]
+
+    asr = Asr()
+    monkeypatch.setattr(worker_module, "_synchronize_cuda", lambda: None)
+    result = _warmup_process(SimpleNamespace(asr=asr, punc=None), str(wav))
+
+    assert [len(call[0]) for call in asr.calls] == [1, 4, 1, 1]
+    assert [call[1][0] for call in asr.calls] == [16000, 16000, 160000, 480000]
+    assert result["shapes"] == ["short_single", "short_batch", "medium", "long"]
 
 
 def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, monkeypatch):

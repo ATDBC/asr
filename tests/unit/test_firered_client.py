@@ -110,6 +110,40 @@ def test_client_reuses_one_process_for_multiple_requests(tmp_path: Path):
     assert not hasattr(first.sentences[0], "language")
 
 
+def test_client_warmup_returns_representative_shapes(tmp_path: Path):
+    script = tmp_path / "warmup_worker.py"
+    script.write_text(
+        """
+import json
+import sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['action'] == 'warmup':
+        print(json.dumps({'id': request['id'], 'ok': True,
+                          'warmup_seconds': 1.0, 'warmup_excluded': True,
+                          'warmup_shapes': ['short_single', 'short_batch'],
+                          'resident_allocated_mib': 10,
+                          'resident_reserved_mib': 20}), flush=True)
+    elif request['action'] == 'shutdown':
+        print(json.dumps({'id': request['id'], 'ok': True, 'shutdown': True}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable),
+        model_root=tmp_path / "models",
+        device="cuda:0",
+        timeout_seconds=1.0,
+        stderr_log_path=tmp_path / "warmup.log",
+        worker_script=script,
+    )
+    audio = _audio(tmp_path, "warmup")
+    with client:
+        result = client.warmup(audio)
+    assert result["excluded"] is True
+    assert result["shapes"] == ["short_single", "short_batch"]
+
+
 def test_client_verify_uses_same_stable_result(tmp_path: Path):
     with _client(tmp_path) as client:
         result = client.verify(_audio(tmp_path, "one"))

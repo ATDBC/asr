@@ -157,12 +157,15 @@ class _FakeWorker:
         return {
             "aed_results": records,
             "duration_ms": 80000,
+            "resident_allocated_mib": 2000,
+            "resident_reserved_mib": 2200,
             "batch_metrics": [
                 {
                     "batch_index": index,
                     "actual_seconds": 0.5,
                     "peak_allocated_mib": 3000,
                     "peak_reserved_mib": 3200,
+                    "resident_reserved_mib": 2200,
                 }
                 for index, _ in enumerate(plan)
             ],
@@ -240,6 +243,7 @@ def test_parallel_owner_uses_global_vad_two_fixed_plans_and_one_punc(tmp_path):
         "aed_ended_at_monotonic"
     ]
     assert owner.last_response["metrics"]["parallel"]["punc_queue_wall_seconds"] >= 0
+    assert owner.last_response["metrics"]["parallel"]["cost_model_observations"] >= 1
     assert [call[0] for call in first.calls].count("punc") == 1
     assert [call[0] for call in second.calls].count("punc") == 0
     assert sorted(
@@ -279,6 +283,8 @@ def test_parallel_owner_streams_completed_aed_batches_to_single_punc(tmp_path):
     parallel = owner.last_response["metrics"]["parallel"]
     assert parallel["punc_batches"] >= 1
     assert parallel["punc_max_queue_depth"] >= 0
+    records = parallel["prediction_accuracy"]["records"]
+    assert records[0]["actual_reserved_incremental_mib"] == 1000
 
 
 def test_parallel_owner_uses_post_warmup_budget_and_serial_fallback(tmp_path):

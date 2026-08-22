@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from time import perf_counter
 
-from .firered_scheduler import BatchDecision, MemoryFirstBatchPacker
+from .firered_scheduler import BatchCostModel, BatchDecision, MemoryFirstBatchPacker
 from .firered_contract import normalize_official_result
 from .firered_client import parse_worker_response
 from .punc_scheduler import (
@@ -99,6 +99,7 @@ def build_global_plan(
     *,
     shared_budget_mib: int,
     worker_resident_mib: tuple[int, ...],
+    cost_model: BatchCostModel | None = None,
 ) -> tuple[BatchDecision, ...]:
     """Build the one immutable memory-first plan shared by AED workers."""
 
@@ -107,6 +108,7 @@ def build_global_plan(
             segments,
             shared_budget_mib=shared_budget_mib,
             worker_resident_mib=worker_resident_mib,
+            cost_model=cost_model or BatchCostModel(),
         ).plan()
     )
 
@@ -215,6 +217,12 @@ def _prediction_accuracy(
             if isinstance(response_resident, (int, float))
             else fallback_resident
         )
+        response_reserved = response.get("resident_reserved_mib")
+        reserved = (
+            int(response_reserved)
+            if isinstance(response_reserved, (int, float))
+            else None
+        )
         for batch_index, (decision, raw) in enumerate(zip(lane, raw_metrics)):
             if not isinstance(raw, dict):
                 continue
@@ -222,6 +230,12 @@ def _prediction_accuracy(
             actual_peak = raw.get("peak_allocated_mib")
             actual_increment = (
                 None if actual_peak is None else max(0, int(actual_peak) - resident)
+            )
+            actual_reserved_peak = raw.get("peak_reserved_mib")
+            actual_reserved_increment = (
+                None
+                if actual_reserved_peak is None or reserved is None
+                else max(0, int(actual_reserved_peak) - reserved)
             )
             predicted_seconds = float(decision.estimate.predicted_seconds)
             predicted_increment = decision.estimate.predicted_incremental_mib
@@ -234,6 +248,8 @@ def _prediction_accuracy(
                 "seconds_error": actual_seconds - predicted_seconds,
                 "predicted_incremental_mib": predicted_increment,
                 "actual_incremental_mib": actual_increment,
+                "actual_allocated_incremental_mib": actual_increment,
+                "actual_reserved_incremental_mib": actual_reserved_increment,
                 "incremental_mib_error": (
                     None
                     if actual_increment is None
@@ -246,6 +262,44 @@ def _prediction_accuracy(
         "predicted_seconds": sum(float(item["predicted_seconds"]) for item in records),
         "actual_seconds": sum(float(item["actual_seconds"]) for item in records),
     }
+
+
+def _observe_completed_batches(
+    model: BatchCostModel,
+    assignments: Sequence[Sequence[BatchDecision]],
+    responses: Sequence[dict[str, object]],
+) -> int:
+    """Calibrate only from batches whose reserved metric is complete."""
+
+    observed = 0
+    for lane, response in zip(assignments, responses):
+        raw_metrics = response.get("batch_metrics", [])
+        if not isinstance(raw_metrics, list):
+            continue
+        resident_reserved = response.get("resident_reserved_mib")
+        if not isinstance(resident_reserved, (int, float)):
+            continue
+        for decision, raw in zip(lane, raw_metrics):
+            if not isinstance(raw, dict):
+                continue
+            peak_reserved = raw.get("peak_reserved_mib")
+            actual_reserved = (
+                None
+                if not isinstance(peak_reserved, (int, float))
+                else max(0, int(peak_reserved) - int(resident_reserved))
+            )
+            actual_seconds = raw.get("actual_seconds")
+            if not isinstance(actual_reserved, (int, float)) or not isinstance(
+                actual_seconds, (int, float)
+            ):
+                continue
+            model.observe(
+                decision.estimate,
+                float(actual_seconds),
+                actual_incremental_reserved_mib=int(actual_reserved),
+            )
+            observed += 1
+    return observed
 
 
 class ParallelFireRedWorkerClient:
@@ -272,6 +326,7 @@ class ParallelFireRedWorkerClient:
             gpu_memory_provider or _default_gpu_memory_provider
         )
         self.worker_resident_mib: tuple[int, ...] = ()
+        self.cost_model = BatchCostModel()
         self.last_response: dict[str, object] = {}
 
     @property
@@ -331,6 +386,7 @@ class ParallelFireRedWorkerClient:
             "seconds": max(float(item.get("seconds") or 0.0) for item in results),
             "workers": results[:2],
             "punc": results[2] if len(results) > 2 else None,
+            "cost_model": self.cost_model.summary(),
         }
 
     def _transcribe_streaming(
@@ -445,6 +501,9 @@ class ParallelFireRedWorkerClient:
         aed_wall_seconds = aed_ended - aed_started
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
+        observed_batches = _observe_completed_batches(
+            self.cost_model, assignments, responses
+        )
         durations = [int(response.get("duration_ms") or 0) for response in responses]
         duration_ms = max(durations, default=0)
         raw_started = perf_counter()
@@ -495,9 +554,11 @@ class ParallelFireRedWorkerClient:
                     "worker_count": 2,
                     "planned_batches": len(plan),
                     "worker_batch_counts": [len(items) for items in assignments],
+                    "cost_model_observations": observed_batches,
                 },
                 "scheduler": {
                     "planner": "memory_first",
+                    "model": self.cost_model.summary(),
                     "shared_budget_mib": effective_budget,
                     "lane_budget_mib": max(1, effective_budget // 2),
                     "worker_resident_mib": list(self.worker_resident_mib),
@@ -544,6 +605,7 @@ class ParallelFireRedWorkerClient:
                 self.worker_resident_mib
                 or tuple(before_plan.process_mib.get(pid, 0) for pid in self.pids)
             ),
+            cost_model=self.cost_model,
         )
         plan_seconds = perf_counter() - plan_started
         assignments = partition_batches(plan, worker_count=2)
@@ -615,6 +677,9 @@ class ParallelFireRedWorkerClient:
             ]
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
+        observed_batches = _observe_completed_batches(
+            self.cost_model, assignments, responses
+        )
         aed_ended = perf_counter()
         aed_wall_seconds = aed_ended - aed_started
         merged: list[dict[str, object]] = []
@@ -664,8 +729,10 @@ class ParallelFireRedWorkerClient:
                 "worker_count": 2,
                 "planned_batches": len(plan),
                 "worker_batch_counts": [len(items) for items in assignments],
+                "cost_model_observations": observed_batches,
                 },
                 "scheduler": {
+                "model": self.cost_model.summary(),
                 "planner": "memory_first",
                 "shared_budget_mib": effective_budget,
                 "lane_budget_mib": max(1, effective_budget // 2),

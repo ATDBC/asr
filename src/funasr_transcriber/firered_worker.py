@@ -305,6 +305,7 @@ def _explicit_aed_process(
     records: list[dict[str, object]] = []
     batch_metrics: list[dict[str, object]] = []
     resident_allocated_mib = _cuda_memory_allocated_mib()
+    resident_reserved_mib = _cuda_reserved_memory_mib()
     for batch_index, raw_batch in enumerate(batch_plan):
         batch_uttid: list[str] = []
         batch_wav: list[tuple[int, object]] = []
@@ -338,6 +339,7 @@ def _explicit_aed_process(
             "peak_allocated_mib": _cuda_peak_memory_mib(),
             "peak_reserved_mib": _cuda_peak_reserved_mib(),
             "resident_allocated_mib": resident_allocated_mib,
+            "resident_reserved_mib": resident_reserved_mib,
         })
         returned = {str(result.get("uttid")): result for result in results}
         batch_records: list[dict[str, object]] = []
@@ -370,6 +372,7 @@ def _explicit_aed_process(
         "aed_results": records,
         "batch_metrics": batch_metrics,
         "resident_allocated_mib": resident_allocated_mib,
+        "resident_reserved_mib": resident_reserved_mib,
     }
 
 

@@ -146,8 +146,9 @@ def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, mon
             "indices": [0],
             "actual_seconds": 0.5,
             "peak_allocated_mib": 3_000,
-            "peak_reserved_mib": 3_200,
-            "resident_allocated_mib": 2_900,
+                "peak_reserved_mib": 3_200,
+                "resident_allocated_mib": 2_900,
+                "resident_reserved_mib": 0,
         }
     ]
 

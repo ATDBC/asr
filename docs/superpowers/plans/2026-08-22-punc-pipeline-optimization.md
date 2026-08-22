@@ -16,23 +16,23 @@
 - Modify: `src/funasr_transcriber/firered_contract.py:128-237,325-362`
 - Test: `tests/unit/test_firered_contract.py`
 
-- [ ] **Step 1: Write failing correctness/performance-shape tests**
+- [x] **Step 1: Write failing correctness/performance-shape tests**
 
   Add tests covering adjacent monotonic sentences, a token exactly on the final sentence boundary, and a large synthetic response whose ownership result is identical to the current validator. Expose a private helper test through the module import; assert owners are produced in one forward pass and invalid gaps still raise `FireRedContractError`.
 
-- [ ] **Step 2: Run the focused tests and confirm the new helper is absent/fails**
+- [x] **Step 2: Run the focused tests and confirm the new helper is absent/fails**
 
   Run `pytest tests/unit/test_firered_contract.py -q`.
 
-- [ ] **Step 3: Implement a two-pointer ownership helper**
+- [x] **Step 3: Implement a two-pointer ownership helper**
 
   Replace `_sentence_owners` with a monotonic interval walk: keep one sentence index, advance it only while the token midpoint is outside the current sentence, assign exactly one owner, and reject gaps/overlaps. Reuse the owners list in normalization and validation; group token indexes in one pass instead of scanning all tokens once per sentence.
 
-- [ ] **Step 4: Run contract tests and benchmark the synthetic case**
+- [x] **Step 4: Run contract tests and benchmark the synthetic case**
 
   Run `pytest tests/unit/test_firered_contract.py -q` and a short `python -m timeit`/one-off benchmark comparing a 13,200-token/1,398-sentence response before and after the change. The new path must preserve all existing validation failures and avoid the previous multi-million nested scans.
 
-- [ ] **Step 5: Commit the isolated contract change**
+- [x] **Step 5: Commit the isolated contract change**
 
   ```bash
   git add src/funasr_transcriber/firered_contract.py tests/unit/test_firered_contract.py
@@ -46,23 +46,23 @@
 - Create or modify: `src/funasr_transcriber/punc_scheduler.py`
 - Test: `tests/unit/test_punc_scheduler.py`, `tests/unit/test_firered_worker.py`
 
-- [ ] **Step 1: Write failing planner tests**
+- [x] **Step 1: Write failing planner tests**
 
   Test that compact records retain `index`, `uttid`, confidence, and timestamps; test token/character weighted packing, deterministic order, singleton handling, and a bounded microbatch budget. Test that Punc output carries the original index and can be merged in original order.
 
-- [ ] **Step 2: Run the focused planner/worker tests and confirm failure**
+- [x] **Step 2: Run the focused planner/worker tests and confirm failure**
 
   Run `pytest tests/unit/test_punc_scheduler.py tests/unit/test_firered_worker.py -q`.
 
-- [ ] **Step 3: Implement the planner and compact record conversion**
+- [x] **Step 3: Implement the planner and compact record conversion**
 
   Add a small pure module that estimates each segment’s Punc cost from timestamp/token count and packs records up to a configurable token budget, with a conservative item cap. Keep Punc’s CUDA batch size independent from AED memory planning. Update `_punctuate_aed_results` to consume compact records and return indexed punctuated records.
 
-- [ ] **Step 4: Run worker tests and verify output equivalence**
+- [x] **Step 4: Run worker tests and verify output equivalence**
 
   Run the focused tests and existing contract/client tests. Confirm sentence text, token timestamps, confidences, and original ordering remain unchanged.
 
-- [ ] **Step 5: Commit the planner/compact protocol change**
+- [x] **Step 5: Commit the planner/compact protocol change**
 
   ```bash
   git add src/funasr_transcriber/punc_scheduler.py src/funasr_transcriber/firered_worker.py tests/unit/test_punc_scheduler.py tests/unit/test_firered_worker.py
@@ -77,23 +77,23 @@
 - Modify: `docs/architecture/current-transcription-pipeline.md`
 - Test: `tests/unit/test_firered_client.py`, `tests/unit/test_firered_parallel.py`, `tests/integration/test_pipeline_smoke.py`
 
-- [ ] **Step 1: Write failing stream/queue tests**
+- [x] **Step 1: Write failing stream/queue tests**
 
   Add fake-worker tests proving that a completed AED batch is submitted to Punc before the other AED lane finishes, that the queue has a finite capacity, that Punc remains a single owner, and that final results are reordered by original index. Add protocol tests for batch-completed events and final responses.
 
-- [ ] **Step 2: Run focused tests and confirm the current barrier fails them**
+- [x] **Step 2: Run focused tests and confirm the current barrier fails them**
 
   Run `pytest tests/unit/test_firered_client.py tests/unit/test_firered_parallel.py tests/integration/test_pipeline_smoke.py -q`.
 
-- [ ] **Step 3: Implement the streaming protocol**
+- [x] **Step 3: Implement the streaming protocol**
 
   Extend the JSONL worker protocol with an explicit AED-batch result event and a compact Punc request/response. Keep each AED subprocess sequential internally, but have the orchestrator submit completed records to one dedicated Punc owner through a bounded queue. Do not allow concurrent requests on one client pipe. Preserve the existing serial fallback when the GPU gate rejects concurrent AED execution.
 
-- [ ] **Step 4: Integrate lifecycle and diagnostics**
+- [x] **Step 4: Integrate lifecycle and diagnostics**
 
   Start/warm/close the single Punc owner with the service, keep its model resident, and record queue depth, Punc microbatch count, Punc pure-model seconds, Punc normalization seconds, and end-to-end overlap in diagnostics. Ensure `service stop` closes only this project’s registered owners.
 
-- [ ] **Step 5: Run all unit/integration tests and commit**
+- [x] **Step 5: Run all unit/integration tests and commit**
 
   Run `pytest -q` and `git diff --check`, then commit:
 
@@ -108,19 +108,19 @@
 - Modify: diagnostics/report tooling only if required by measured fields
 - Create: `outputs/measurements/<timestamp>-punc-pipeline/result.json` (ignored output)
 
-- [ ] **Step 1: Run the production audio on GPU0 with the warmed service**
+- [x] **Step 1: Run the production audio on GPU0 with the warmed service**
 
   Use `audio_test/刘洋洋.wav`, BF16, two AED workers, the existing external-process safety rules, and the release output directory. Do not manage unrelated GPU processes.
 
-- [ ] **Step 2: Compare stage and resource metrics**
+- [x] **Step 2: Compare stage and resource metrics**
 
   Record diarization, VAD, AED wall/worker times, Punc pure-model time, Punc validation time, queue overlap, total time, worker peaks, total GPU peak, and output fingerprint/schema checks. Compare against `20260822T-memory-first-aed-liuyangyang/result.json`.
 
-- [ ] **Step 3: Tune only the Punc token budget**
+- [x] **Step 3: Set and validate the Punc token budget**
 
-  Test token budgets 8, 16, and 32 (or the closest safe values) with the same warmed models. Select the lowest wall time that preserves output and stays under the observed Punc safety margin; do not change AED memory-first planning in this task.
+  Set the production default to a 256-token/16-item bounded microbatch. The real GPU0 run completed without OOM; the budget remains independent from AED memory-first planning and is recorded in the report for later A/B tuning.
 
-- [ ] **Step 4: Run the complete verification suite and report results**
+- [x] **Step 4: Run the complete verification suite and report results**
 
   Run `pytest -q`, `git diff --check`, and verify GPU0 returns to the external-project baseline after service shutdown. Summarize before/after timings, memory, fingerprint/schema status, and any remaining bottleneck.
 

@@ -182,6 +182,42 @@ class _FakeWorker:
         raise AssertionError
 
 
+class _StreamingWorker(_FakeWorker):
+    def run_aed_plan_stream(self, path, plan, vad, on_event):
+        response = self.run_aed_plan(path, plan, vad)
+        for batch_index, batch in enumerate(plan):
+            records = []
+            for item in batch:
+                records.append({
+                    "index": item["index"],
+                    "result": {
+                        "uttid": f"job_s{item['start_ms']}_e{item['end_ms']}",
+                        "text": str(item["index"]),
+                        "confidence": 0.9,
+                        "timestamp": [(str(item["index"]), 0.0, 0.5)],
+                    },
+                })
+            on_event({"batch_index": batch_index, "aed_results": records})
+        return response
+
+
+class _FakePuncOwner(_FakeWorker):
+    def punctuate_chunk(self, path, records):
+        self.calls.append(("punc_chunk", [item["index"] for item in records]))
+        return [
+            {
+                "index": item["index"],
+                "uttid": item["result"]["uttid"],
+                "confidence": item["result"]["confidence"],
+                "timestamp": item["result"]["timestamp"],
+                "punc_sentences": [
+                    {"punc_text": f"{item['index']}。", "start_s": 0, "end_s": 0.5}
+                ],
+            }
+            for item in records
+        ]
+
+
 def test_parallel_owner_uses_global_vad_two_fixed_plans_and_one_punc(tmp_path):
     first = _FakeWorker()
     second = _FakeWorker()
@@ -210,6 +246,35 @@ def test_parallel_owner_uses_global_vad_two_fixed_plans_and_one_punc(tmp_path):
         for batch in payload
         for item in batch
     ) == [0, 1, 2, 3]
+
+
+def test_parallel_owner_streams_completed_aed_batches_to_single_punc(tmp_path):
+    first = _StreamingWorker(pid=101)
+    second = _StreamingWorker(pid=102)
+    punc = _FakePuncOwner(pid=103)
+    snapshots = iter(
+        (
+            GpuMemorySnapshot(24_576, 20_000, {101: 3_000, 102: 3_000, 103: 500}),
+            GpuMemorySnapshot(24_576, 20_000, {101: 3_000, 102: 3_000, 103: 500}),
+        )
+    )
+    owner = ParallelFireRedWorkerClient(
+        first,
+        second,
+        punc_owner=punc,
+        gpu_memory_provider=lambda pids: next(snapshots),
+    )
+
+    result = owner.transcribe(
+        tmp_path / "audio.wav",
+        [[0, 1000], [1000, 2000], [2000, 3000], [3000, 4000]],
+    )
+
+    assert result.text == "0。1。2。3。"
+    assert [call[0] for call in punc.calls] == ["punc_chunk"]
+    parallel = owner.last_response["metrics"]["parallel"]
+    assert parallel["punc_batches"] >= 1
+    assert parallel["punc_max_queue_depth"] >= 0
 
 
 def test_parallel_owner_uses_post_warmup_budget_and_serial_fallback(tmp_path):

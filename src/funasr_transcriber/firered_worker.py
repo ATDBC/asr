@@ -15,15 +15,24 @@ import re
 import sys
 import time
 from typing import Any, Callable, IO, Protocol
+from types import SimpleNamespace
 
 from .firered_contract import normalize_official_result
 from .firered_scheduler import MemoryFirstBatchPacker
+from .punc_scheduler import (
+    DEFAULT_PUNC_MAX_ITEMS,
+    DEFAULT_PUNC_TOKEN_BUDGET,
+    assemble_punc_items,
+    compact_aed_record,
+    pack_punc_records,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 
 SCRIPTED_VAD_THRESHOLD_SECONDS = 10.0
-PUNC_INTERNAL_BATCH_SIZE = 8
+PUNC_INTERNAL_BATCH_SIZE = DEFAULT_PUNC_MAX_ITEMS
+PUNC_TOKEN_BUDGET = DEFAULT_PUNC_TOKEN_BUDGET
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +294,7 @@ def _explicit_aed_process(
     batch_plan: list[list[dict[str, object]]],
     vad_segments: list[tuple[float, float]],
     clock: Callable[[], float] = time.perf_counter,
+    on_batch: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     """Execute a caller-owned immutable batch plan without VAD or Punc."""
 
@@ -330,6 +340,7 @@ def _explicit_aed_process(
             "resident_allocated_mib": resident_allocated_mib,
         })
         returned = {str(result.get("uttid")): result for result in results}
+        batch_records: list[dict[str, object]] = []
         for item in batch_items:
             result = returned.get(str(item["uttid"]))
             if result is None:
@@ -337,7 +348,15 @@ def _explicit_aed_process(
             text = str(result.get("text", "")).strip()
             if not text or re.search(r"(<blank>)|(<sil>)", text):
                 continue
-            records.append({"index": item["index"], "result": result})
+            record = {"index": item["index"], "result": result}
+            records.append(record)
+            batch_records.append(record)
+        if on_batch is not None:
+            on_batch({
+                "batch_index": batch_index,
+                "aed_results": batch_records,
+                "batch_metrics": batch_metrics[-1],
+            })
         LOGGER.debug("explicit AED batch completed in %.3fs", actual_seconds)
 
     records.sort(key=lambda item: int(item["index"]))
@@ -354,6 +373,35 @@ def _explicit_aed_process(
     }
 
 
+def _punctuate_aed_items(
+    system: FireRedSystem,
+    aed_results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Punctuate compact AED records and retain their original indexes."""
+
+    ordered = sorted(aed_results, key=lambda item: int(item["index"]))
+    records = [compact_aed_record(item) for item in ordered]
+    output: list[dict[str, object]] = []
+    for group in pack_punc_records(
+        records,
+        token_budget=PUNC_TOKEN_BUDGET,
+        max_items=PUNC_INTERNAL_BATCH_SIZE,
+    ):
+        punctuated = system.punc.process_with_timestamp(
+            [record.timestamp for record in group],
+            [record.uttid for record in group],
+        )
+        for record, punc_result in zip(group, punctuated):
+            output.append({
+                "index": record.index,
+                "uttid": record.uttid,
+                "confidence": record.confidence,
+                "timestamp": [list(item) for item in record.timestamp],
+                "punc_sentences": punc_result["punc_sentences"],
+            })
+    return output
+
+
 def _punctuate_aed_results(
     system: FireRedSystem,
     request_id: str,
@@ -363,47 +411,12 @@ def _punctuate_aed_results(
 ) -> dict[str, object]:
     """Apply one shared Punc model and produce the normal raw result shape."""
 
-    ordered = sorted(aed_results, key=lambda item: int(item["index"]))
-    results = [item["result"] for item in ordered]
-    sentences: list[dict[str, object]] = []
-    words: list[dict[str, object]] = []
-    for offset in range(0, len(results), PUNC_INTERNAL_BATCH_SIZE):
-        group = results[offset:offset + PUNC_INTERNAL_BATCH_SIZE]
-        punctuated = system.punc.process_with_timestamp(
-            [result.get("timestamp", []) for result in group],
-            [str(result["uttid"]) for result in group],
-        )
-        for asr_result, punc_result in zip(group, punctuated):
-            start_ms, end_ms = str(asr_result["uttid"]).split("_")[-2:]
-            start_ms = int(start_ms[1:])
-            end_ms = int(end_ms[1:])
-            for index, sentence in enumerate(punc_result["punc_sentences"]):
-                start = start_ms + int(float(sentence["start_s"]) * 1000)
-                end = end_ms if index == len(punc_result["punc_sentences"]) - 1 else start_ms + int(float(sentence["end_s"]) * 1000)
-                if index == 0:
-                    start = start_ms
-                sentences.append({
-                    "start_ms": start,
-                    "end_ms": end,
-                    "text": sentence["punc_text"],
-                    "asr_confidence": asr_result["confidence"],
-                })
-            for word, start, end in asr_result.get("timestamp", []):
-                words.append({
-                    "start_ms": int(float(start) * 1000 + start_ms),
-                    "end_ms": int(float(end) * 1000 + start_ms),
-                    "text": word,
-                })
-    text = "".join(str(sentence["text"]) for sentence in sentences)
-    text = re.sub(r"([.,!?])\s*([a-zA-Z])", r"\1 \2", text)
-    return {
-        "uttid": request_id,
-        "text": text,
-        "sentences": sentences,
-        "vad_segments_ms": vad_segments_ms,
-        "dur_s": duration_ms / 1000.0,
-        "words": words,
-    }
+    return assemble_punc_items(
+        request_id,
+        _punctuate_aed_items(system, aed_results),
+        duration_ms=duration_ms,
+        vad_segments_ms=vad_segments_ms,
+    )
 
 
 def _warmup_process(system: FireRedSystem, wav_path: str) -> None:
@@ -423,6 +436,11 @@ def _warmup_process(system: FireRedSystem, wav_path: str) -> None:
                 [asr_results[0].get("timestamp", [])],
                 [uttid],
             )
+    elif getattr(system, "punc", None) is not None:
+        system.punc.process_with_timestamp(
+            [[("预热", 0.0, 0.2)]],
+            ["__firered_punc_warmup__"],
+        )
     _synchronize_cuda()
 
 
@@ -712,7 +730,8 @@ def serve(
                 )
                 continue
             if action not in {
-                "transcribe", "verify", "refine_vad", "aed_plan", "punctuate"
+                "transcribe", "verify", "refine_vad", "aed_plan",
+                "punctuate", "punctuate_chunk",
             }:
                 raise ValueError(f"unsupported worker action: {action}")
             path = _validate_audio(request.get("audio_path"), audio_info)
@@ -747,12 +766,26 @@ def serve(
                 raw_plan = request.get("batch_plan")
                 if not isinstance(raw_plan, list):
                     raise ValueError("aed_plan requires batch_plan")
+                on_batch = None
+                if bool(request.get("stream")):
+                    def on_batch(event: dict[str, object]) -> None:
+                        _write_response(
+                            protocol_output,
+                            {
+                                "id": identifier,
+                                "ok": True,
+                                "event": "aed_batch",
+                                **event,
+                            },
+                        )
+
                 response = _explicit_aed_process(
                     system,
                     str(path),
                     identifier,
                     raw_plan,
                     scripted_segments,
+                    on_batch=on_batch,
                 )
                 _write_response(
                     protocol_output,
@@ -779,6 +812,20 @@ def serve(
                 _write_response(
                     protocol_output,
                     normalize_official_result(identifier, response),
+                )
+                continue
+            if action == "punctuate_chunk":
+                raw_results = request.get("aed_results")
+                if not isinstance(raw_results, list):
+                    raise ValueError("punctuate_chunk requires aed_results")
+                response = _punctuate_aed_items(system, raw_results)
+                _write_response(
+                    protocol_output,
+                    {
+                        "id": identifier,
+                        "ok": True,
+                        "punc_results": response,
+                    },
                 )
                 continue
             inference_started = clock()
@@ -893,6 +940,39 @@ def build_firered_system(
     return system
 
 
+def build_punc_system(model_root: Path, device: str) -> FireRedSystem:
+    """Construct the single-model Punc owner used by the streaming path."""
+
+    import torch
+    from fireredasr2s.fireredpunc import FireRedPunc, FireRedPuncConfig
+
+    if not device.startswith("cuda:"):
+        raise ValueError("Punc worker requires an explicit CUDA device")
+    try:
+        device_index = int(device.split(":", 1)[1])
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"invalid CUDA device: {device}") from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable in the Punc environment")
+    torch.cuda.set_device(device_index)
+    root = Path(model_root).expanduser().resolve() / "fireredasr2s"
+    system = SimpleNamespace(
+        asr=None,
+        vad=None,
+        lid=None,
+        punc=FireRedPunc.from_pretrained(
+            str(root / "FireRedPunc"),
+            FireRedPuncConfig(use_gpu=True),
+        ),
+        config=SimpleNamespace(
+            enable_vad=False,
+            enable_lid=False,
+            enable_punc=True,
+        ),
+    )
+    return system
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-root", type=Path, required=True)
@@ -900,6 +980,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-half", action="store_true")
     parser.add_argument("--disable-vad", action="store_true")
     parser.add_argument("--disable-punc", action="store_true")
+    parser.add_argument("--punc-only", action="store_true")
     return parser
 
 
@@ -914,12 +995,16 @@ def main(argv: list[str] | None = None) -> int:
     serve(
         sys.stdin,
         protocol_output,
-        lambda: build_firered_system(
-            args.model_root,
-            args.device,
-            args.use_half,
-            not args.disable_vad,
-            not args.disable_punc,
+        lambda: (
+            build_punc_system(args.model_root, args.device)
+            if args.punc_only
+            else build_firered_system(
+                args.model_root,
+                args.device,
+                args.use_half,
+                not args.disable_vad,
+                not args.disable_punc,
+            )
         ),
         peak_sampler=_peak_gpu_bytes,
     )

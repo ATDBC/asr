@@ -6,9 +6,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from queue import Empty, Queue
 from time import perf_counter
 
 from .firered_scheduler import BatchDecision, MemoryFirstBatchPacker
+from .firered_contract import normalize_official_result
+from .firered_client import parse_worker_response
+from .punc_scheduler import (
+    DEFAULT_PUNC_MAX_ITEMS,
+    DEFAULT_PUNC_TOKEN_BUDGET,
+    assemble_punc_items,
+)
 from .schemas import AsrResult
 
 
@@ -248,11 +256,13 @@ class ParallelFireRedWorkerClient:
         worker0: Any,
         worker1: Any,
         *,
+        punc_owner: Any | None = None,
         gpu_safety_margin_mib: int = 1_536,
         gpu_memory_provider: Any | None = None,
     ):
         self.worker0 = worker0
         self.worker1 = worker1
+        self.punc_owner = punc_owner or worker0
         self.gpu_safety_margin_mib = int(gpu_safety_margin_mib)
         self.gpu_memory_provider = (
             gpu_memory_provider or _default_gpu_memory_provider
@@ -266,20 +276,23 @@ class ParallelFireRedWorkerClient:
 
     @property
     def pids(self) -> tuple[int, ...]:
-        return tuple(
-            pid for pid in (
-                getattr(self.worker0, "pid", None),
-                getattr(self.worker1, "pid", None),
-            ) if pid is not None
-        )
+        pids: list[int] = []
+        for client in (self.worker0, self.worker1, self.punc_owner):
+            pid = getattr(client, "pid", None)
+            if pid is not None and pid not in pids:
+                pids.append(pid)
+        return tuple(pids)
 
     def start(self) -> "ParallelFireRedWorkerClient":
         try:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                first = executor.submit(self.worker0.start)
-                second = executor.submit(self.worker1.start)
-                first.result()
-                second.result()
+            clients = []
+            for client in (self.worker0, self.worker1, self.punc_owner):
+                if client not in clients:
+                    clients.append(client)
+            with ThreadPoolExecutor(max_workers=len(clients)) as executor:
+                futures = [executor.submit(client.start) for client in clients]
+                for future in futures:
+                    future.result()
         except Exception:
             self.close()
             raise
@@ -288,24 +301,211 @@ class ParallelFireRedWorkerClient:
     def status(self) -> dict[str, object]:
         return {
             "workers": [self.worker0.status(), self.worker1.status()],
+            "punc": self.punc_owner.status()
+            if self.punc_owner is not self.worker0
+            else None,
             "worker_count": 2,
         }
 
     def warmup(self, audio_path: Path | None = None) -> dict[str, object]:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        clients = []
+        for client in (self.worker0, self.worker1, self.punc_owner):
+            if client not in clients:
+                clients.append(client)
+        with ThreadPoolExecutor(max_workers=len(clients)) as executor:
             futures = [
                 executor.submit(client.warmup, audio_path)
-                for client in (self.worker0, self.worker1)
+                for client in clients
             ]
         results = [future.result() for future in futures]
         self.worker_resident_mib = tuple(
-            int(item.get("resident_allocated_mib") or 0) for item in results
+            int(results[index].get("resident_allocated_mib") or 0)
+            for index in range(2)
         )
         return {
             "excluded": all(bool(item.get("excluded")) for item in results),
             "seconds": max(float(item.get("seconds") or 0.0) for item in results),
-            "workers": results,
+            "workers": results[:2],
+            "punc": results[2] if len(results) > 2 else None,
         }
+
+    def _transcribe_streaming(
+        self,
+        audio_path: Path,
+        refined: list[list[int]],
+        plan: tuple[BatchDecision, ...],
+        assignments: tuple[tuple[BatchDecision, ...], ...],
+        plans: list[list[list[dict[str, int]]]],
+        dispatch_mode: str,
+        before_plan: GpuMemorySnapshot,
+        before_dispatch: GpuMemorySnapshot,
+        effective_budget: int,
+        dispatch_budget: int,
+        started: float,
+        vad_seconds: float,
+        plan_seconds: float,
+    ) -> AsrResult:
+        """Overlap AED batch events with one independent Punc owner."""
+
+        sentinel = object()
+        queue: Queue[object] = Queue(maxsize=8)
+        punc_items: list[dict[str, object]] = []
+        punc_batches = 0
+        punc_model_seconds = 0.0
+        max_queue_depth = 0
+
+        def flush_pending(pending: list[dict[str, object]]) -> None:
+            nonlocal punc_batches, punc_model_seconds
+            if not pending:
+                return
+            punc_started = perf_counter()
+            chunk = self.punc_owner.punctuate_chunk(audio_path, pending)
+            punc_model_seconds += perf_counter() - punc_started
+            punc_batches += 1
+            punc_items.extend(chunk)
+            pending.clear()
+
+        def consume_punc() -> dict[str, object]:
+            nonlocal max_queue_depth
+            pending: list[dict[str, object]] = []
+            completed_lanes = 0
+            punc_started = perf_counter()
+            while completed_lanes < len(assignments):
+                try:
+                    item = queue.get(timeout=0.05)
+                except Empty:
+                    flush_pending(pending)
+                    continue
+                if item is sentinel:
+                    completed_lanes += 1
+                    flush_pending(pending)
+                    continue
+                if isinstance(item, list):
+                    pending.extend(
+                        record for record in item if isinstance(record, dict)
+                    )
+                    max_queue_depth = max(max_queue_depth, queue.qsize())
+                    token_count = 0
+                    for record in pending:
+                        result = record.get("result")
+                        if isinstance(result, dict):
+                            timestamp = result.get("timestamp", [])
+                            if isinstance(timestamp, (list, tuple)):
+                                token_count += len(timestamp)
+                    if (
+                        token_count >= DEFAULT_PUNC_TOKEN_BUDGET
+                        or len(pending) >= DEFAULT_PUNC_MAX_ITEMS
+                    ):
+                        flush_pending(pending)
+            flush_pending(pending)
+            return {
+                "wall_seconds": perf_counter() - punc_started,
+                "batches": punc_batches,
+                "model_seconds": punc_model_seconds,
+                "max_queue_depth": max_queue_depth,
+            }
+
+        def execute(
+            client: Any,
+            worker_plan: list[list[dict[str, int]]],
+        ) -> tuple[dict[str, object], float]:
+            def on_event(event: dict[str, object]) -> None:
+                raw = event.get("aed_results")
+                if isinstance(raw, list) and raw:
+                    queue.put(raw)
+
+            worker_started = perf_counter()
+            try:
+                response = client.run_aed_plan_stream(
+                    audio_path,
+                    worker_plan,
+                    refined,
+                    on_event,
+                )
+                return response, perf_counter() - worker_started
+            finally:
+                queue.put(sentinel)
+
+        aed_started = perf_counter()
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            punc_future = executor.submit(consume_punc)
+            futures = [
+                executor.submit(execute, client, worker_plan)
+                for client, worker_plan in zip(
+                    (self.worker0, self.worker1), plans
+                )
+            ]
+            timed_responses = [future.result() for future in futures]
+            punc_metrics = punc_future.result()
+        aed_seconds = perf_counter() - aed_started
+        responses = [item[0] for item in timed_responses]
+        worker_aed_seconds = [float(item[1]) for item in timed_responses]
+        durations = [int(response.get("duration_ms") or 0) for response in responses]
+        duration_ms = max(durations, default=0)
+        raw_started = perf_counter()
+        raw = assemble_punc_items(
+            "parallel",
+            punc_items,
+            duration_ms=duration_ms,
+            vad_segments_ms=refined,
+        )
+        normalized = normalize_official_result("parallel", raw)
+        result = parse_worker_response(normalized)
+        normalization_seconds = perf_counter() - raw_started
+        self.last_response = {
+            "metrics": {
+                "parallel": {
+                    "warmup_excluded": True,
+                    "dispatch_mode": dispatch_mode,
+                    "memory": {
+                        "planned_free_mib": before_plan.free_mib,
+                        "dispatch_free_mib": before_dispatch.free_mib,
+                        "effective_transient_budget_mib": effective_budget,
+                        "dispatch_transient_budget_mib": dispatch_budget,
+                        "required_concurrent_increment_mib": (
+                            required_concurrent_increment_mib(assignments)
+                        ),
+                        "resident_process_mib": dict(before_plan.process_mib),
+                    },
+                    "prediction_accuracy": _prediction_accuracy(
+                        assignments,
+                        responses,
+                        before_plan.process_mib,
+                        (self.worker0, self.worker1),
+                    ),
+                    "vad_seconds": vad_seconds,
+                    "plan_seconds": plan_seconds,
+                    "aed_seconds": aed_seconds,
+                    "aed_worker_seconds": worker_aed_seconds,
+                    "punc_seconds": float(punc_metrics["wall_seconds"]),
+                    "punc_model_seconds": float(punc_metrics["model_seconds"]),
+                    "punc_normalization_seconds": normalization_seconds,
+                    "punc_batches": int(punc_metrics["batches"]),
+                    "punc_max_queue_depth": int(punc_metrics["max_queue_depth"]),
+                    "total_seconds": perf_counter() - started,
+                    "worker_count": 2,
+                    "planned_batches": len(plan),
+                    "worker_batch_counts": [len(items) for items in assignments],
+                },
+                "scheduler": {
+                    "planner": "memory_first",
+                    "shared_budget_mib": effective_budget,
+                    "lane_budget_mib": max(1, effective_budget // 2),
+                    "worker_resident_mib": list(self.worker_resident_mib),
+                    "planned_batches": len(plan),
+                    "planned_items": sum(len(batch.items) for batch in plan),
+                    "batch_sizes": [len(batch.items) for batch in plan],
+                    "worker_predicted_seconds": [
+                        summary.predicted_seconds
+                        for summary in summarize_partition(assignments)
+                    ],
+                    "worker_plans": [
+                        serialize_batch_plan(items) for items in assignments
+                    ],
+                },
+            },
+        }
+        return result
 
     def transcribe(
         self,
@@ -341,15 +541,6 @@ class ParallelFireRedWorkerClient:
         from .firered_parallel import serialize_batch_plan as _serialize
 
         plans = [_serialize(batches) for batches in assignments]
-        aed_started = perf_counter()
-        def execute(client: Any, worker_plan: list[list[dict[str, int]]]):
-            started = perf_counter()
-            response = client.run_aed_plan(
-                audio_path,
-                worker_plan,
-                refined,
-            )
-            return response, perf_counter() - started
 
         before_dispatch = self.gpu_memory_provider(self.pids)
         dispatch_budget = derive_transient_budget_mib(
@@ -368,6 +559,35 @@ class ParallelFireRedWorkerClient:
                 "AED transient memory budget cannot fit even one planned batch: "
                 f"required={largest_single_increment} MiB, budget={dispatch_budget} MiB"
             )
+        if (
+            self.punc_owner is not self.worker0
+            and all(hasattr(client, "run_aed_plan_stream") for client in (self.worker0, self.worker1))
+            and hasattr(self.punc_owner, "punctuate_chunk")
+        ):
+            return self._transcribe_streaming(
+                audio_path,
+                refined,
+                tuple(plan),
+                tuple(tuple(items) for items in assignments),
+                plans,
+                dispatch_mode,
+                before_plan,
+                before_dispatch,
+                effective_budget,
+                dispatch_budget,
+                started,
+                vad_seconds,
+                plan_seconds,
+            )
+        aed_started = perf_counter()
+        def execute(client: Any, worker_plan: list[list[dict[str, int]]]):
+            started = perf_counter()
+            response = client.run_aed_plan(
+                audio_path,
+                worker_plan,
+                refined,
+            )
+            return response, perf_counter() - started
         if dispatch_mode == "concurrent":
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [
@@ -460,10 +680,19 @@ class ParallelFireRedWorkerClient:
         return self.worker0.verify(audio_path)
 
     def close(self) -> None:
-        try:
-            self.worker0.close()
-        finally:
-            self.worker1.close()
+        clients = []
+        for client in (self.worker0, self.worker1, self.punc_owner):
+            if client not in clients:
+                clients.append(client)
+        first_error: BaseException | None = None
+        for client in clients:
+            try:
+                client.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def __enter__(self) -> "ParallelFireRedWorkerClient":
         return self.start()

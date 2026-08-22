@@ -127,6 +127,39 @@ def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, mon
     ]
 
 
+def test_explicit_aed_process_emits_completed_batch_event(tmp_path: Path, monkeypatch):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Asr:
+        def transcribe(self, uttids, wavs):
+            return [{
+                "uttid": uttids[0],
+                "text": "测试",
+                "confidence": 0.9,
+                "timestamp": [("测试", 0.0, 1.0)],
+            }]
+
+    monkeypatch.setattr(worker_module, "_reset_cuda_peak_memory", lambda: None)
+    monkeypatch.setattr(worker_module, "_synchronize_cuda", lambda: None)
+    monkeypatch.setattr(worker_module, "_cuda_peak_memory_mib", lambda: 3_000)
+    monkeypatch.setattr(worker_module, "_cuda_peak_reserved_mib", lambda: 3_200)
+    monkeypatch.setattr(worker_module, "_cuda_memory_allocated_mib", lambda: 2_900)
+
+    events = []
+    _explicit_aed_process(
+        SimpleNamespace(asr=Asr()),
+        str(wav),
+        "job",
+        [[{"index": 0, "start_ms": 0, "end_ms": 1000}]],
+        [(0.0, 1.0)],
+        on_batch=events.append,
+    )
+
+    assert events[0]["batch_index"] == 0
+    assert events[0]["aed_results"][0]["index"] == 0
+
+
 def test_scheduled_process_restores_original_result_order(tmp_path: Path):
     wav = tmp_path / "normalized.wav"
     sf.write(wav, np.zeros(7 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")

@@ -20,8 +20,9 @@ funasr-transcribe recording.wav
        └─ worker-0 全局 FireRedVAD → 主进程固定 batch 计划
              ┌─ FireRed AED worker-0 ─┐
              └─ FireRed AED worker-1 ─┘
+                    ↓ batch 完成即入有界队列
+                单个独立 FireRedPunc owner
                     ↓ 按原始 index 合并
-                worker-0 的单个 FireRedPunc
               ↑
        diarization 先行完成；ASR 只使用 diarization 段落；超过 10 秒的长 turn
        触发一次全局 FireRedVAD，结果与每个 speaker 区间求交后再进入 AED/Punc；
@@ -32,8 +33,8 @@ funasr-transcribe recording.wav
        所有热模型继续常驻，供 FIFO 中的下一个作业复用
 ```
 
-服务启动会先只读检查 GPU 0 的并行预算，然后并发加载两个 FireRed AED 和 3D-Speaker；
-worker-0 独占 Punc 与 FireRedVAD，worker-1 不加载这两个模块。两个 worker 的首个 `status`
+服务启动会先只读检查 GPU 0 的并行预算，然后并发加载两个 FireRed AED、一个独立 Punc owner 和 3D-Speaker；
+worker-0 只承载 FireRedVAD，worker-1 不加载 VAD/Punc，Punc owner 只加载 Punc。三个 FireRed owner 的首个 `status`
 请求完成后，服务用短音频预热 AED/Punc；预热不计入后续作业耗时。FireRed 仍在独立的
 `.venv-asr` 子进程；主服务进程不导入 FireRed 运行时。服务停止时会先进入 draining，
 拒绝新的提交、完成已经接受的作业，再关闭热模型；因此 `funasr-transcribe service stop`
@@ -62,8 +63,8 @@ funasr-transcribe service stop --config /etc/funasr-transcriber.toml
 
 ## FireRed worker 边界与功能归类
 
-本文中“FireRed worker”专指隔离常驻的 FireRed AED owner；生产部署为两个 AED worker，
-worker-0 额外持有唯一的 FireRedPunc。
+本文中“FireRed worker”专指隔离常驻的 FireRed owner；生产部署为两个 AED worker 和一个唯一的
+Punc owner。Punc owner 不加载 AED/VAD。
 FireRedVAD 在功能上归属于说话人分离阶段：它只负责把超过 10 秒的 speaker 区间细分为
 可供 AED 解码的语音区间。由于官方运行时和模型依赖，FireRedVAD 目前仍由同一个
 `.venv-asr` 子进程承载；这属于进程部署方式，不改变它在流程和指标中的说话人分离角色。
@@ -81,14 +82,16 @@ FireRedVAD 在功能上归属于说话人分离阶段：它只负责把超过 10
 overlap 临时 worker 对分离轨道的重解码）仍运行 FireRedVAD。
 
 worker-0 固定加载 FireRedASR2S 提交 `4e7d9aaf4482a47cec1724807026b9b151926eb5` 的
-FireRedASR2-AED、FireRedPunc 和 FireRedVAD；worker-1 只加载 FireRedASR2-AED。语言识别
-模型不加载。主进程按时长排序后用 memory-first 装箱器根据预热后的实际 worker 常驻显存和共享预算决定每个 batch 的具体片段，完成两路 AED 后由 worker-0 执行一次 Punc，再按
-原始时间索引恢复，因此响应顺序和 speaker 归属不变。
-在第一个 AED batch 开始前，两个 worker 预热完成、说话人分离/VAD 结束；主进程按时长排序并基于初始成本模型一次性生成完整批次计划。
+FireRedASR2-AED 和 FireRedVAD；worker-1 只加载 FireRedASR2-AED；独立 Punc owner 只加载
+FireRedPunc。语言识别模型不加载。主进程按时长排序后用 memory-first 装箱器根据预热后的实际
+worker 常驻显存和共享预算决定每个 batch 的具体片段；任一 AED batch 完成后立即进入有界 Punc
+队列，Punc 按 token 预算组成微批，最后按原始时间索引恢复，因此响应顺序和 speaker 归属不变。
+在第一个 AED batch 开始前，两个 AED worker 和 Punc owner 预热完成、说话人分离/VAD 结束；主进程按时长排序并基于初始成本模型一次性生成完整批次计划。
 计划预算来自预热后 GPU 0 空闲显存减去 `[asr].gpu_safety_margin_mib=1536`，使用每个 worker 的实际常驻基线和预计瞬时增量显存。AED 开始前再次采样：满足两路预计峰值则并发，
 只能容纳一路则按相同固定计划串行，连单个批次都放不下则提前失败；这些门控不会重排或重分批。
-两个 worker 后续 batch 严格按各自固定计划执行；batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，
-不会重新排序或改变后续批次。该读取只调用 CUDA 只读接口，不枚举、暂停或操作其他项目进程。
+两个 AED worker 后续 batch 严格按各自固定计划执行，互相没有 batch 屏障；每个完成事件立即进入有界 Punc 队列。
+batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，不会重新排序或改变后续批次。该读取只调用 CUDA 只读接口，
+不枚举、暂停或操作其他项目进程。
 完整计划、两路分配、预热基线、实际观测以及逐批时间/增量显存误差会写入 `diagnostics.json.scheduler` 和并行指标。
 doctor/overlap 请求仍保持 FireRedVAD 输出顺序。2026-08-21 在本机 GPU 0
 以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次：batch 1/4 共享稳定
@@ -141,7 +144,7 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
   无法满足释放容差时不会继续 overlap 重型阶段。
 
 启用 `--profile-resources` 后，作业的 `diagnostics.json` 额外写入：采样间隔和次数、
-服务/两个 FireRed/临时 overlap worker 的峰值显存、服务 RSS 峰值、FireRed 与 Speaker 的模型
+服务/三个 FireRed owner/临时 overlap worker 的峰值显存、服务 RSS 峰值、FireRed 与 Speaker 的模型
 inventory、GPU 总占用峰值、初始其他项目显存基线、净服务峰值，以及预热后 ASR 和 diarization
 的开始/结束单调时间与耗时。采样器只接受这些明确登记
 的本项目 owner 名称，不会写入其他 PID、命令行或显存行。

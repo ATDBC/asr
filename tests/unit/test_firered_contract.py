@@ -5,6 +5,7 @@ import pytest
 from funasr_transcriber.firered_contract import (
     FireRedContractError,
     NoSpeechError,
+    _sentence_owners_linear,
     normalize_official_result,
     validate_stable_response,
 )
@@ -155,3 +156,28 @@ def test_stable_validator_rejects_text_token_mismatch():
 
     with pytest.raises(FireRedContractError, match="full text"):
         validate_stable_response(response)
+
+
+def test_sentence_owners_linear_walks_adjacent_ranges_once():
+    tokens = [
+        {"start_ms": 100, "end_ms": 200, "text": "甲"},
+        {"start_ms": 900, "end_ms": 1000, "text": "乙"},
+        {"start_ms": 1100, "end_ms": 1200, "text": "丙"},
+    ]
+    sentences = [
+        {"start_ms": 0, "end_ms": 1000, "text": "甲乙"},
+        {"start_ms": 1000, "end_ms": 2000, "text": "丙"},
+    ]
+
+    assert _sentence_owners_linear(tokens, sentences) == [0, 0, 1]
+
+
+def test_sentence_owners_linear_rejects_gap_without_nested_scan():
+    tokens = [{"start_ms": 1500, "end_ms": 1600, "text": "错"}]
+    sentences = [
+        {"start_ms": 0, "end_ms": 1000, "text": "前"},
+        {"start_ms": 2000, "end_ms": 3000, "text": "后"},
+    ]
+
+    with pytest.raises(FireRedContractError, match="exactly one sentence"):
+        _sentence_owners_linear(tokens, sentences)

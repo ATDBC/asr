@@ -63,6 +63,13 @@ def _fake_worker(tmp_path: Path, mode: str = "normal") -> Path:
                     "vad_segments_ms": vad_segments,
                     "duration_ms": 600
                 }}
+                if MODE == "stream" and request["action"] == "aed_plan":
+                    print(json.dumps({{
+                        "id": request["id"], "ok": True,
+                        "event": "aed_batch",
+                        "batch_index": 0,
+                        "aed_results": [{{"index": 0, "result": {{"uttid": "job_s0_e500", "timestamp": [["一", 0.0, 0.5]], "confidence": 0.9}}}}]
+                    }}), flush=True)
                 print(json.dumps(response, ensure_ascii=False), flush=True)
                 if MODE == "duplicate":
                     print(json.dumps(response, ensure_ascii=False), flush=True)
@@ -139,6 +146,22 @@ def test_client_does_not_pass_obsolete_batch_or_memory_flags_to_worker(tmp_path:
     assert not any("segment-memory" in item for item in command)
 
 
+def test_client_can_start_a_punc_only_worker(tmp_path: Path):
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable),
+        model_root=tmp_path / "models",
+        device="cuda:0",
+        timeout_seconds=1.0,
+        stderr_log_path=tmp_path / "punc.log",
+        punc_only=True,
+    )
+
+    command = client._command()
+
+    assert "--punc-only" in command
+    assert "--disable-punc" not in command
+
+
 @pytest.mark.parametrize(
     ("mode", "message"),
     (
@@ -203,6 +226,33 @@ def test_client_omits_vad_segments_by_default(tmp_path: Path):
         result = client.transcribe(_audio(tmp_path, "one"))
 
     assert result.vad_segments_ms == ((0, 600),)
+
+
+def test_client_streams_aed_batch_events_before_final_response(tmp_path: Path):
+    events = []
+    with _client(tmp_path, "stream") as client:
+        response = client.run_aed_plan_stream(
+            _audio(tmp_path, "one"),
+            [[{"index": 0, "start_ms": 0, "end_ms": 500}]],
+            [[0, 500]],
+            events.append,
+        )
+
+    assert events == [{
+        "id": events[0]["id"],
+        "ok": True,
+        "event": "aed_batch",
+        "batch_index": 0,
+        "aed_results": [{
+            "index": 0,
+            "result": {
+                "uttid": "job_s0_e500",
+                "timestamp": [["一", 0.0, 0.5]],
+                "confidence": 0.9,
+            },
+        }],
+    }]
+    assert response["ok"] is True
 
 
 def test_client_serializes_parallel_actions_and_optional_modules(tmp_path: Path):

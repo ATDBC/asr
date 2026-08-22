@@ -125,33 +125,60 @@ def _validate_ranges(
         previous_end = end_ms
 
 
-def _sentence_owners(
+def _sentence_owners_linear(
     tokens: list[dict[str, object]],
     sentences: list[dict[str, object]],
 ) -> list[int]:
+    """Assign timestamped tokens to monotonic sentence intervals in one pass."""
+
+    if not sentences:
+        raise FireRedContractError("timestamp word must belong to exactly one sentence")
     owners: list[int] = []
+    sentence_index = 0
     for token in tokens:
         midpoint = (
             int(token["start_ms"]) + int(token["end_ms"])
         ) / 2
-        matching = [
-            index
-            for index, sentence in enumerate(sentences)
-            if int(sentence["start_ms"]) <= midpoint
-            and (
-                midpoint < int(sentence["end_ms"])
-                or (
-                    index == len(sentences) - 1
-                    and midpoint == int(sentence["end_ms"])
-                )
+        while sentence_index < len(sentences):
+            sentence = sentences[sentence_index]
+            end_ms = int(sentence["end_ms"])
+            is_final_boundary = (
+                sentence_index == len(sentences) - 1
+                and midpoint == end_ms
             )
-        ]
-        if len(matching) != 1:
+            if midpoint < end_ms or is_final_boundary:
+                break
+            sentence_index += 1
+        if sentence_index >= len(sentences):
             raise FireRedContractError(
                 "timestamp word must belong to exactly one sentence"
             )
-        owners.append(matching[0])
+        sentence = sentences[sentence_index]
+        start_ms = int(sentence["start_ms"])
+        end_ms = int(sentence["end_ms"])
+        if midpoint < start_ms or midpoint > end_ms:
+            raise FireRedContractError(
+                "timestamp word must belong to exactly one sentence"
+            )
+        if (
+            sentence_index + 1 < len(sentences)
+            and int(sentences[sentence_index + 1]["start_ms"]) <= midpoint
+        ):
+            raise FireRedContractError(
+                "timestamp word must belong to exactly one sentence"
+            )
+        owners.append(sentence_index)
     return owners
+
+
+def _token_indexes_by_owner(
+    owners: list[int],
+    sentence_count: int,
+) -> list[list[int]]:
+    groups = [[] for _ in range(sentence_count)]
+    for token_index, owner in enumerate(owners):
+        groups[owner].append(token_index)
+    return groups
 
 
 def validate_stable_response(response: dict[str, object]) -> None:
@@ -224,12 +251,12 @@ def validate_stable_response(response: dict[str, object]) -> None:
     if normalize_text(sentence_text) != normalize_text(text):
         raise FireRedContractError("sentences do not preserve the full text")
 
-    owners = _sentence_owners(tokens, sentences)
+    owners = _sentence_owners_linear(tokens, sentences)
+    token_groups = _token_indexes_by_owner(owners, len(sentences))
     for index, sentence in enumerate(sentences):
         covered = "".join(
-            str(token["text"])
-            for token, owner in zip(tokens, owners)
-            if owner == index
+            str(tokens[token_index]["text"])
+            for token_index in token_groups[index]
         )
         if normalize_text(covered) != normalize_text(str(sentence["text"])):
             raise FireRedContractError(
@@ -322,15 +349,12 @@ def normalize_official_result(
         duration_ms,
         "sentence",
     )
-    owners = _sentence_owners(words, sentences)
+    owners = _sentence_owners_linear(words, sentences)
+    word_groups = _token_indexes_by_owner(owners, len(sentences))
 
     punctuated: list[str] = ["" for _ in words]
     for sentence_index, sentence in enumerate(sentences):
-        indexes = [
-            index
-            for index, owner in enumerate(owners)
-            if owner == sentence_index
-        ]
+        indexes = word_groups[sentence_index]
         if not indexes:
             raise FireRedContractError("sentence text is without words")
         attached = attach_sentence_punctuation(

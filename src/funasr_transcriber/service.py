@@ -877,7 +877,13 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
         / "hello_zh.wav"
     )
 
-    def client(stderr_name: str, *, enable_vad: bool, enable_punc: bool) -> FireRedWorkerClient:
+    def client(
+        stderr_name: str,
+        *,
+        enable_vad: bool,
+        enable_punc: bool,
+        punc_only: bool = False,
+    ) -> FireRedWorkerClient:
         return FireRedWorkerClient(
             worker_python=config.asr.worker_python,
             model_root=config.paths.model_dir,
@@ -887,6 +893,7 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             use_half=config.asr.use_half,
             enable_vad=enable_vad,
             enable_punc=enable_punc,
+            punc_only=punc_only,
             warmup_audio=warmup_audio,
         )
 
@@ -897,8 +904,14 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
         if worker_count != 2:
             raise ValueError("aed_worker_count must be 1 or 2")
         return ParallelFireRedWorkerClient(
-            client("firered-worker-0.log", enable_vad=True, enable_punc=True),
+            client("firered-worker-0.log", enable_vad=True, enable_punc=False),
             client("firered-worker-1.log", enable_vad=False, enable_punc=False),
+            punc_owner=client(
+                "firered-punc.log",
+                enable_vad=False,
+                enable_punc=True,
+                punc_only=True,
+            ),
             gpu_safety_margin_mib=config.asr.gpu_safety_margin_mib,
         )
 

@@ -257,12 +257,16 @@ class ParallelFireRedWorkerClient:
         worker1: Any,
         *,
         punc_owner: Any | None = None,
+        punc_token_budget: int = DEFAULT_PUNC_TOKEN_BUDGET,
+        punc_max_items: int = DEFAULT_PUNC_MAX_ITEMS,
         gpu_safety_margin_mib: int = 1_536,
         gpu_memory_provider: Any | None = None,
     ):
         self.worker0 = worker0
         self.worker1 = worker1
         self.punc_owner = punc_owner or worker0
+        self.punc_token_budget = int(punc_token_budget)
+        self.punc_max_items = int(punc_max_items)
         self.gpu_safety_margin_mib = int(gpu_safety_margin_mib)
         self.gpu_memory_provider = (
             gpu_memory_provider or _default_gpu_memory_provider
@@ -393,8 +397,8 @@ class ParallelFireRedWorkerClient:
                             if isinstance(timestamp, (list, tuple)):
                                 token_count += len(timestamp)
                     if (
-                        token_count >= DEFAULT_PUNC_TOKEN_BUDGET
-                        or len(pending) >= DEFAULT_PUNC_MAX_ITEMS
+                        token_count >= self.punc_token_budget
+                        or len(pending) >= self.punc_max_items
                     ):
                         flush_pending(pending)
             flush_pending(pending)
@@ -437,7 +441,7 @@ class ParallelFireRedWorkerClient:
             ]
             timed_responses = [future.result() for future in futures]
             punc_metrics = punc_future.result()
-        aed_seconds = perf_counter() - aed_started
+        aed_wall_seconds = perf_counter() - aed_started
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
         durations = [int(response.get("duration_ms") or 0) for response in responses]
@@ -475,13 +479,15 @@ class ParallelFireRedWorkerClient:
                     ),
                     "vad_seconds": vad_seconds,
                     "plan_seconds": plan_seconds,
-                    "aed_seconds": aed_seconds,
+                    "aed_wall_seconds": aed_wall_seconds,
                     "aed_worker_seconds": worker_aed_seconds,
-                    "punc_seconds": float(punc_metrics["wall_seconds"]),
+                    "punc_queue_wall_seconds": float(punc_metrics["wall_seconds"]),
                     "punc_model_seconds": float(punc_metrics["model_seconds"]),
                     "punc_normalization_seconds": normalization_seconds,
                     "punc_batches": int(punc_metrics["batches"]),
                     "punc_max_queue_depth": int(punc_metrics["max_queue_depth"]),
+                    "punc_token_budget": self.punc_token_budget,
+                    "punc_max_items": self.punc_max_items,
                     "total_seconds": perf_counter() - started,
                     "worker_count": 2,
                     "planned_batches": len(plan),
@@ -606,7 +612,7 @@ class ParallelFireRedWorkerClient:
             ]
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
-        aed_seconds = perf_counter() - aed_started
+        aed_wall_seconds = perf_counter() - aed_started
         merged: list[dict[str, object]] = []
         duration_ms = 0
         for response in responses:
@@ -621,7 +627,7 @@ class ParallelFireRedWorkerClient:
             duration_ms,
             refined,
         )
-        punc_seconds = perf_counter() - punc_started
+        punc_queue_wall_seconds = perf_counter() - punc_started
         self.last_response = {
             "metrics": {
                 "parallel": {
@@ -645,9 +651,9 @@ class ParallelFireRedWorkerClient:
                 ),
                 "vad_seconds": vad_seconds,
                 "plan_seconds": plan_seconds,
-                "aed_seconds": aed_seconds,
+                "aed_wall_seconds": aed_wall_seconds,
                 "aed_worker_seconds": worker_aed_seconds,
-                "punc_seconds": punc_seconds,
+                "punc_queue_wall_seconds": punc_queue_wall_seconds,
                 "total_seconds": perf_counter() - started,
                 "worker_count": 2,
                 "planned_batches": len(plan),

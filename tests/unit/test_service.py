@@ -51,6 +51,41 @@ def _result() -> AsrResult:
     )
 
 
+def test_owned_pid_getters_name_all_resident_owners():
+    runner = ServiceJobRunner.__new__(ServiceJobRunner)
+    runner.hot_host = type(
+        "Host",
+        (),
+        {
+            "asr_owner": type(
+                "Asr",
+                (),
+                {
+                    "pid": 101,
+                    "pids": (101, 102),
+                    "punc_owner": type("Punc", (), {"pid": 103})(),
+                },
+            )(),
+        },
+    )()
+    runner._active_overlap_pid = 104
+
+    getters = runner._owned_pid_getters()
+
+    assert set(getters) == {
+        "service",
+        "speaker",
+        "aed_worker_0",
+        "aed_worker_1",
+        "punc_worker",
+        "overlap_worker",
+    }
+    assert getters["aed_worker_0"]() == 101
+    assert getters["aed_worker_1"]() == 102
+    assert getters["punc_worker"]() == 103
+    assert getters["overlap_worker"]() == 104
+
+
 class FakeAsr:
     def __init__(self, events: list[str]):
         self.events = events
@@ -623,9 +658,17 @@ def test_enabled_profile_records_owned_pids_and_branch_metrics(tmp_path: Path):
             return {
                 "sampling_interval_ms": 200,
                 "sample_count": 2,
-                "process_peak_mib": {"service": 514, "firered": 9256},
+                "process_peak_mib": {
+                    "service": 514,
+                    "aed_worker_0": 9256,
+                    "punc_worker": 500,
+                },
                 "cpu_rss_peak_kib": {"service": 1000},
-                "pid_observed": {"service": True, "firered": True},
+                "pid_observed": {
+                    "service": True,
+                    "aed_worker_0": True,
+                    "punc_worker": True,
+                },
             }
 
     runner, source = _profiled_runner(
@@ -649,7 +692,11 @@ def test_enabled_profile_records_owned_pids_and_branch_metrics(tmp_path: Path):
     )
     profile = payload["resource_profile"]
     assert profile["enabled"] is True
-    assert profile["process_peak_mib"] == {"service": 514, "firered": 9256}
+    assert profile["process_peak_mib"] == {
+        "service": 514,
+        "aed_worker_0": 9256,
+        "punc_worker": 500,
+    }
     assert profile["branches"]["asr"]["seconds"] >= 0
     assert profile["branches"]["diarization"]["seconds"] >= 0
     assert "other_processes" not in profile

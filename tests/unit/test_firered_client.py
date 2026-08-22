@@ -162,6 +162,26 @@ def test_client_can_start_a_punc_only_worker(tmp_path: Path):
     assert "--disable-punc" not in command
 
 
+def test_client_passes_punc_microbatch_controls(tmp_path: Path):
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable),
+        model_root=tmp_path / "models",
+        device="cuda:0",
+        timeout_seconds=1.0,
+        stderr_log_path=tmp_path / "punc.log",
+        punc_only=True,
+        punc_token_budget=512,
+        punc_max_items=32,
+    )
+
+    command = client._command()
+
+    assert "--punc-token-budget" in command
+    assert "512" in command
+    assert "--punc-max-items" in command
+    assert "32" in command
+
+
 @pytest.mark.parametrize(
     ("mode", "message"),
     (

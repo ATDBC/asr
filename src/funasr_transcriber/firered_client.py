@@ -11,6 +11,7 @@ from typing import IO, Any, Callable
 import uuid
 
 from .errors import TranscriptionError
+from .punc_scheduler import DEFAULT_PUNC_MAX_ITEMS, DEFAULT_PUNC_TOKEN_BUDGET
 from .firered_contract import (
     FireRedContractError,
     validate_stable_response,
@@ -79,6 +80,8 @@ class FireRedWorkerClient:
         enable_vad: bool = True,
         enable_punc: bool = True,
         punc_only: bool = False,
+        punc_token_budget: int = DEFAULT_PUNC_TOKEN_BUDGET,
+        punc_max_items: int = DEFAULT_PUNC_MAX_ITEMS,
         warmup_audio: Path | None = None,
     ):
         self.worker_python = Path(worker_python)
@@ -93,6 +96,8 @@ class FireRedWorkerClient:
         self.enable_vad = bool(enable_vad)
         self.enable_punc = bool(enable_punc)
         self.punc_only = bool(punc_only)
+        self.punc_token_budget = int(punc_token_budget)
+        self.punc_max_items = int(punc_max_items)
         self.warmup_audio = (
             None if warmup_audio is None else Path(warmup_audio)
         )
@@ -123,6 +128,8 @@ class FireRedWorkerClient:
         if self.use_half:
             command.append("--use-half")
         if self.punc_only:
+            command.extend(["--punc-token-budget", str(self.punc_token_budget)])
+            command.extend(["--punc-max-items", str(self.punc_max_items)])
             command.append("--punc-only")
             return command
         if not self.enable_vad:

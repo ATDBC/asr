@@ -214,10 +214,15 @@ funasr-transcribe /data/recording.mp3 \
 funasr-transcribe /data/recording.mp3 \
   --config /etc/funasr-transcriber.toml \
   --profile-resources
+
+# 深度性能诊断：资源采样、完整调度计划和逐 batch trace
+funasr-transcribe /data/recording.mp3 \
+  --config /etc/funasr-transcriber.toml \
+  --diagnostics deep
 ~~~
 
 首次转录会自动启动本机后台服务。服务在 `work_dir/service/` 保存自己的 Unix socket、
-状态和日志，并常驻一个 FireRed AED/Punc worker 与一个 3D-Speaker owner。FireRedVAD
+状态和日志，并常驻两个 FireRed AED worker、一个独立 FireRedPunc owner 与一个 3D-Speaker owner。FireRedVAD
 功能上属于说话人分离阶段，但目前由同一个 `.venv-asr` worker 进程承载。普通作业先跑说话人分离、
 再以其段落做 ASR，多个 CLI 请求按 FIFO 排队；每次 CLI 返回不会释放热模型。
 
@@ -251,10 +256,11 @@ TXT 示例：
 [00:00:11] 说话人2：好的，主要有三个方面。
 ~~~
 
-JSON 保留毫秒级起止时间、说话人、来源、对齐置信度与重叠标记。diagnostics
-记录句级 AED/ASR 置信度、VAD 区间、阶段耗时、GPU 准入/释放样本和降级告警。默认
-`resource_profile` 仅为 `{"enabled": false}`；使用 `--profile-resources` 后还会记录服务、
-FireRed 与临时 overlap owner 的资源峰值、模型清单和分支耗时，绝不包含其他项目 PID。
+JSON 保留毫秒级起止时间、说话人、来源、对齐置信度与重叠标记。diagnostics 默认记录
+低开销阶段耗时和调度摘要；`--diagnostics resources` 额外记录 service、speaker、两个 AED、
+Punc 与临时 overlap owner 的资源峰值；`--diagnostics deep` 还会写出完整 scheduler 和逐 batch
+事件 trace。旧的 `--profile-resources` 等价于 `--diagnostics resources`。所有资源采样只包含本项目
+登记的 PID，不包含其他项目进程。
 
 ## 退出码
 

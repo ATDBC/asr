@@ -89,6 +89,7 @@ class ServiceRequest:
     keep_intermediate: bool = False
     overlap_enabled: bool = False
     profile_resources: bool = False
+    diagnostics_level: str = "basic"
 
 
 def config_fingerprint(config: AppConfig) -> str:
@@ -116,6 +117,15 @@ def _optional_bool(payload: Mapping[str, Any], key: str) -> bool:
     value = payload.get(key, False)
     if not isinstance(value, bool):
         raise ServiceProtocolError(f"{key} must be a boolean")
+    return value
+
+
+def _diagnostics_level(payload: Mapping[str, Any]) -> str:
+    value = str(payload.get("diagnostics_level") or "basic").lower()
+    if value not in {"off", "basic", "resources", "deep"}:
+        raise ServiceProtocolError(
+            "diagnostics_level must be off, basic, resources, or deep"
+        )
     return value
 
 
@@ -157,6 +167,7 @@ def parse_request(payload: Mapping[str, Any]) -> ServiceRequest:
         keep_intermediate=_optional_bool(payload, "keep_intermediate"),
         overlap_enabled=_optional_bool(payload, "overlap_enabled"),
         profile_resources=_optional_bool(payload, "profile_resources"),
+        diagnostics_level=_diagnostics_level(payload),
     )
 
 
@@ -302,6 +313,7 @@ class ServiceClient:
             "keep_intermediate": request.keep_intermediate,
             "overlap_enabled": request.overlap_enabled,
             "profile_resources": request.profile_resources,
+            "diagnostics_level": request.diagnostics_level,
         }
 
     def submit(self, request: ServiceRequest) -> dict[str, Any]:

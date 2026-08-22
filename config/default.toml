@@ -15,6 +15,8 @@ use_half = true
 aed_worker_count = 2
 # Free GPU 0 after warm-up minus this margin is the shared AED transient budget.
 gpu_safety_margin_mib = 1536
+punc_token_budget = 256
+punc_max_items = 16
 
 [diarization]
 speaker_count = "auto"
@@ -46,6 +48,12 @@ startup_timeout_seconds = 180
 profile_sampling_interval_ms = 200
 minimum_total_mib = 23552
 minimum_free_mib = 13312
+
+[diagnostics]
+level = "basic"
+sampling_interval_ms = 200
+include_model_inventory = false
+write_batch_trace = false
 
 [overlap]
 enabled = false

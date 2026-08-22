@@ -129,6 +129,28 @@ def test_main_passes_transcribe_arguments():
     assert received["args"].keep_intermediate is True
 
 
+def test_main_passes_diagnostics_level():
+    received = {}
+
+    def runner(args):
+        received["args"] = args
+        return 0
+
+    assert main(["sample.wav", "--diagnostics", "deep"], transcribe_runner=runner) == 0
+    assert received["args"].diagnostics == "deep"
+
+
+def test_profile_resources_is_retained_as_compatibility_flag():
+    received = {}
+
+    def runner(args):
+        received["args"] = args
+        return 0
+
+    assert main(["sample.wav", "--profile-resources"], transcribe_runner=runner) == 0
+    assert received["args"].profile_resources is True
+
+
 def test_models_verify_dispatches_to_model_runner():
     received = {}
 

@@ -234,8 +234,8 @@ def test_parallel_owner_uses_global_vad_two_fixed_plans_and_one_punc(tmp_path):
     assert first.closed == second.closed == 1
     assert first.calls[0][0] == "vad"
     assert owner.last_response["metrics"]["parallel"]["warmup_excluded"] is True
-    assert owner.last_response["metrics"]["parallel"]["aed_seconds"] >= 0
-    assert owner.last_response["metrics"]["parallel"]["punc_seconds"] >= 0
+    assert owner.last_response["metrics"]["parallel"]["aed_wall_seconds"] >= 0
+    assert owner.last_response["metrics"]["parallel"]["punc_queue_wall_seconds"] >= 0
     assert [call[0] for call in first.calls].count("punc") == 1
     assert [call[0] for call in second.calls].count("punc") == 0
     assert sorted(

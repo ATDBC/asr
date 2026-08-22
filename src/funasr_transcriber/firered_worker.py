@@ -382,10 +382,16 @@ def _punctuate_aed_items(
     ordered = sorted(aed_results, key=lambda item: int(item["index"]))
     records = [compact_aed_record(item) for item in ordered]
     output: list[dict[str, object]] = []
+    token_budget = int(
+        getattr(system, "punc_token_budget", PUNC_TOKEN_BUDGET)
+    )
+    max_items = int(
+        getattr(system, "punc_max_items", PUNC_INTERNAL_BATCH_SIZE)
+    )
     for group in pack_punc_records(
         records,
-        token_budget=PUNC_TOKEN_BUDGET,
-        max_items=PUNC_INTERNAL_BATCH_SIZE,
+        token_budget=token_budget,
+        max_items=max_items,
     ):
         punctuated = system.punc.process_with_timestamp(
             [record.timestamp for record in group],
@@ -878,6 +884,8 @@ def build_firered_system(
     use_half: bool = False,
     enable_vad: bool = True,
     enable_punc: bool = True,
+    punc_token_budget: int = PUNC_TOKEN_BUDGET,
+    punc_max_items: int = PUNC_INTERNAL_BATCH_SIZE,
 ) -> FireRedSystem:
     """Construct the AED/Punc worker and its hosted speaker-VAD helper."""
 
@@ -935,12 +943,19 @@ def build_firered_system(
         enable_punc=enable_punc,
     )
     system = FireRedAsr2System(config)
+    system.punc_token_budget = int(punc_token_budget)
+    system.punc_max_items = int(punc_max_items)
     if system.vad is not None:
         system.vad = GuardedVad(system.vad)
     return system
 
 
-def build_punc_system(model_root: Path, device: str) -> FireRedSystem:
+def build_punc_system(
+    model_root: Path,
+    device: str,
+    punc_token_budget: int = PUNC_TOKEN_BUDGET,
+    punc_max_items: int = PUNC_INTERNAL_BATCH_SIZE,
+) -> FireRedSystem:
     """Construct the single-model Punc owner used by the streaming path."""
 
     import torch
@@ -970,6 +985,8 @@ def build_punc_system(model_root: Path, device: str) -> FireRedSystem:
             enable_punc=True,
         ),
     )
+    system.punc_token_budget = int(punc_token_budget)
+    system.punc_max_items = int(punc_max_items)
     return system
 
 
@@ -981,6 +998,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-vad", action="store_true")
     parser.add_argument("--disable-punc", action="store_true")
     parser.add_argument("--punc-only", action="store_true")
+    parser.add_argument("--punc-token-budget", type=int, default=PUNC_TOKEN_BUDGET)
+    parser.add_argument("--punc-max-items", type=int, default=PUNC_INTERNAL_BATCH_SIZE)
     return parser
 
 
@@ -996,7 +1015,12 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdin,
         protocol_output,
         lambda: (
-            build_punc_system(args.model_root, args.device)
+            build_punc_system(
+                args.model_root,
+                args.device,
+                args.punc_token_budget,
+                args.punc_max_items,
+            )
             if args.punc_only
             else build_firered_system(
                 args.model_root,
@@ -1004,6 +1028,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.use_half,
                 not args.disable_vad,
                 not args.disable_punc,
+                args.punc_token_budget,
+                args.punc_max_items,
             )
         ),
         peak_sampler=_peak_gpu_bytes,

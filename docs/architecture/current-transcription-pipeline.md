@@ -1,7 +1,7 @@
 # 当前录音转录流程
 
 生产转录由本机常驻服务执行。客户端通过 Unix socket 提交作业；服务只使用物理 GPU 0，
-长期持有两个 AED FireRedWorkerClient、一个共享 Punc/VAD owner 和一个 SpeakerDiarizer。除非收到 `service stop` 或
+长期持有两个 AED FireRedWorkerClient、一个独立 Punc owner 和一个 SpeakerDiarizer。除非收到 `service stop` 或
 执行显式 overlap 作业，模型不会在每次 CLI 调用后卸载。
 
 ## 服务生命周期与普通作业
@@ -58,8 +58,9 @@ funasr-transcribe service stop --config /etc/funasr-transcriber.toml
 ```
 
 `--enable-overlap` 和 `--disable-overlap` 互斥。配置中的 overlap 默认值为关闭，所以普通
-作业不会创建 pyannote 或 ClearVoice worker。`--profile-resources` 仅为当前作业启用资源
-采样；默认输出的 `resource_profile` 为 `{ "enabled": false }`。
+作业不会创建 pyannote 或 ClearVoice worker。诊断默认级别为 `basic`；`--diagnostics resources`
+启用资源采样，`--diagnostics deep` 额外写出完整调度和逐 batch trace；`--profile-resources` 是
+`resources` 的兼容别名。默认输出的 `resource_profile` 为 `{ "enabled": false }`。
 
 ## FireRed worker 边界与功能归类
 
@@ -92,7 +93,8 @@ worker 常驻显存和共享预算决定每个 batch 的具体片段；任一 AE
 两个 AED worker 后续 batch 严格按各自固定计划执行，互相没有 batch 屏障；每个完成事件立即进入有界 Punc 队列。
 batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，不会重新排序或改变后续批次。该读取只调用 CUDA 只读接口，
 不枚举、暂停或操作其他项目进程。
-完整计划、两路分配、预热基线、实际观测以及逐批时间/增量显存误差会写入 `diagnostics.json.scheduler` 和并行指标。
+基础级别保留完整计划的摘要、两路分配和预热基线；逐批时间/增量显存误差只有 `deep` 级别才写入
+`diagnostics/scheduler.json` 和 `diagnostics/batch-events.jsonl`，普通 `diagnostics.json` 不嵌入完整计划。
 doctor/overlap 请求仍保持 FireRedVAD 输出顺序。2026-08-21 在本机 GPU 0
 以 420 秒、151 段 RAMC 录音校准 batch 1/2/4/8 各 3 次：batch 1/4 共享稳定
 fingerprint，中位端到端 28.50 秒（batch 4），进程峰值 5,690 MiB；batch 2/8 的
@@ -108,7 +110,7 @@ token、VAD 与音频时长的一致性。
 
 新的正式长音频基线固定为 `audio_test/刘洋洋.wav`（约 3600.6 秒）：3D-Speaker 模型
 加载时间 28.039 秒不计，但模型加载完成后的音频读取、3D-Speaker VAD、embedding、
-聚类、合并和 smoothing 均计入说话人分离耗时 28.252 秒。FireRed AED/Punc worker 的模型加载
+聚类、合并和 smoothing 均计入说话人分离耗时 28.252 秒。两个 FireRed AED worker 和独立 Punc owner 的模型加载
 时间 36.631 秒和显式 warm-up 不计；worker 正式处理 809 个最终片段（batch 8）耗时
 242.145 秒，其中说话人分离阶段的 FireRedVAD 8.604 秒、AED 208.678 秒、Punc 6.008 秒。两部分按
 正式串行流程合计，模型加载和 warm-up 排除后的端到端基线为 270.397 秒。FireRed
@@ -122,7 +124,7 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
 3D-Speaker 共驻。仅当当前请求使用 `--enable-overlap` 时，服务按下列顺序执行：
 
 1. 先用热模型完成主 ASR 与 diarization，并由热 Speaker 计算说话人 centroid。
-2. FireRed AED/Punc worker（同时释放其承载的 FireRedVAD helper）关闭，SpeakerDiarizer 关闭；
+2. 两个 AED worker、独立 Punc owner（以及 worker-0 承载的 FireRedVAD helper）和 SpeakerDiarizer 关闭；
    服务以只读 GPU 采样记录热 owner 的释放。
 3. 启动隔离 overlap worker，完成 pyannote 检测与 ClearVoice 分离；该 worker 退出后才继续。
 4. 临时加载 3D-Speaker，对已分离轨道进行 embedding/centroid 匹配，然后关闭它。
@@ -139,15 +141,15 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
 - 常驻服务在热加载前要求总显存至少 23 GiB、空闲至少 13,312 MiB；这是一项准入阈值，
   实际显存占用仍以 profiling 实测为准。
 - `nvidia-smi` 只读。系统从不终止、暂停、重启、迁移或枚举/导出其他项目的进程。
-- FireRed AED/Punc worker、其承载的 FireRedVAD helper 与 SpeakerDiarizer 的释放状态会写入
+- 两个 AED worker、独立 Punc owner、其承载的 FireRedVAD helper 与 SpeakerDiarizer 的释放状态会写入
   overlap 作业的 GPU stage。
   无法满足释放容差时不会继续 overlap 重型阶段。
 
-启用 `--profile-resources` 后，作业的 `diagnostics.json` 额外写入：采样间隔和次数、
-服务/三个 FireRed owner/临时 overlap worker 的峰值显存、服务 RSS 峰值、FireRed 与 Speaker 的模型
-inventory、GPU 总占用峰值、初始其他项目显存基线、净服务峰值，以及预热后 ASR 和 diarization
-的开始/结束单调时间与耗时。采样器只接受这些明确登记
-的本项目 owner 名称，不会写入其他 PID、命令行或显存行。
+启用 `resources` 后，作业的 `diagnostics.json` 额外写入：采样间隔和次数、service、speaker、
+两个 AED、Punc owner 和临时 overlap worker 的峰值显存、服务 RSS 峰值、GPU 总占用峰值、初始
+其他项目显存基线、净服务峰值，以及预热后 ASR 和 diarization 的开始/结束单调时间与耗时。`deep`
+级别还会在 `diagnostics/` 写出完整 `scheduler.json` 和 `batch-events.jsonl`；普通摘要不会包含
+完整 batch 计划。采样器只接受这些明确登记的本项目 owner 名称，不会写入其他 PID、命令行或显存行。
 
 ## 对齐与输出
 
@@ -162,7 +164,10 @@ inventory、GPU 总占用峰值、初始其他项目显存基线、净服务峰�
 recording_transcript/
 ├── transcript.txt
 ├── transcript.json
-└── diagnostics.json
+├── diagnostics.json
+└── diagnostics/               # 仅 deep 级别生成
+    ├── scheduler.json
+    └── batch-events.jsonl
 ```
 
 ## 主要实现位置

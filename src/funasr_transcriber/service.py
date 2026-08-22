@@ -19,6 +19,7 @@ from .alignment import attribute_by_segment
 from .audio import normalize_audio, probe_audio
 from .config import AppConfig, load_config
 from .diagnostics import export_diagnostics
+from .diagnostic_traces import compact_scheduler_summary, write_deep_traces
 from .errors import (
     EnvironmentError as TranscriberEnvironmentError,
     OutputError,
@@ -593,29 +594,56 @@ class ServiceJobRunner:
         )
 
     def _owned_pid_getters(self) -> dict[str, Callable[[], int | None]]:
-        def firered_pid() -> int | None:
-            owner = self.hot_host.asr_owner
-            pid = getattr(owner, "pid", None)
-            return pid if isinstance(pid, int) and pid > 0 else None
+        def service_pid() -> int:
+            return os.getpid()
 
-        def firered_pid_1() -> int | None:
+        def speaker_pid() -> int:
+            # SpeakerDiarizer is hosted by the service process.
+            return os.getpid()
+
+        def aed_pid(index: int) -> int | None:
             owner = self.hot_host.asr_owner
             pids = getattr(owner, "pids", ())
-            return pids[1] if len(pids) > 1 else None
+            if index < len(pids):
+                pid = pids[index]
+            else:
+                pid = getattr(owner, "pid", None) if index == 0 else None
+            return pid if isinstance(pid, int) and pid > 0 else None
+
+        def punc_pid() -> int | None:
+            owner = self.hot_host.asr_owner
+            punc_owner = getattr(owner, "punc_owner", None)
+            pid = getattr(punc_owner, "pid", None)
+            if pid is None and punc_owner is None:
+                pid = getattr(owner, "pid", None)
+            return pid if isinstance(pid, int) and pid > 0 else None
 
         return {
-            "service": os.getpid,
-            "firered": firered_pid,
-            "firered_1": firered_pid_1,
-            "overlap": lambda: self._active_overlap_pid,
+            "service": service_pid,
+            "speaker": speaker_pid,
+            "aed_worker_0": lambda: aed_pid(0),
+            "aed_worker_1": lambda: aed_pid(1),
+            "punc_worker": punc_pid,
+            "overlap_worker": lambda: self._active_overlap_pid,
         }
 
-    def _start_resource_sampler(self, request: ServiceRequest) -> Any | None:
-        if not request.profile_resources:
+    @staticmethod
+    def _diagnostics_level(request: ServiceRequest) -> str:
+        level = str(getattr(request, "diagnostics_level", "basic")).lower()
+        if request.profile_resources and level == "basic":
+            return "resources"
+        return level
+
+    def _start_resource_sampler(
+        self,
+        request: ServiceRequest,
+        diagnostics_level: str,
+    ) -> Any | None:
+        if diagnostics_level not in {"resources", "deep"}:
             return None
         sampler = self._sampler_factory(
             "cuda:0",
-            self.config.service.profile_sampling_interval_ms,
+            self.config.diagnostics.sampling_interval_ms,
             self._owned_pid_getters(),
         )
         sampler.start()
@@ -626,18 +654,23 @@ class ServiceJobRunner:
         sampler: Any,
         branches: NormalBranchResult,
         diagnostics: Any,
+        *,
+        include_model_inventory: bool,
     ) -> None:
         snapshot = dict(sampler.stop())
         diagnostics.resource_profile = {
             "enabled": True,
             **snapshot,
-            "inventories": dict(getattr(self.hot_host, "inventories", {})),
-            "branches": dict(branches.branch_metrics),
+            "branches": compact_scheduler_summary(branches.branch_metrics),
             "uncertainty": {
                 "driver_memory_unit": "MiB",
                 "pid_observed": dict(snapshot.get("pid_observed") or {}),
             },
         }
+        if include_model_inventory:
+            diagnostics.resource_profile["inventories"] = dict(
+                getattr(self.hot_host, "inventories", {})
+            )
 
     def _run_overlap_enhancement(
         self,
@@ -727,11 +760,12 @@ class ServiceJobRunner:
         job_dir.mkdir(parents=True, exist_ok=False)
         sampler: Any | None = None
         profile_finished = False
-        self._capture_overlap_pid = request.profile_resources
+        diagnostics_level = self._diagnostics_level(request)
+        self._capture_overlap_pid = diagnostics_level in {"resources", "deep"}
         if not self.hot_host.started:
             self.hot_host.start()
         measurement_started = perf_counter()
-        sampler = self._start_resource_sampler(request)
+        sampler = self._start_resource_sampler(request, diagnostics_level)
         try:
             input_info = self._probe(
                 input_audio,
@@ -752,12 +786,13 @@ class ServiceJobRunner:
             diagnostics.runtime["warmup"] = dict(
                 getattr(self.hot_host, "warmup_metrics", {})
             )
+            diagnostics.runtime["diagnostics_level"] = diagnostics_level
             with diagnostics.stage("normal_model_branches"):
                 branches = run_normal_branches(
                     normalized,
                     asr_owner,
                     speaker_owner,
-                    profile_enabled=request.profile_resources,
+                    profile_enabled=diagnostics_level in {"resources", "deep"},
                 )
             for branch_name, branch in branches.branch_metrics.items():
                 seconds = branch.get("seconds")
@@ -789,6 +824,12 @@ class ServiceJobRunner:
             parallel_metrics = branches.branch_metrics.get("asr", {}).get("parallel")
             if isinstance(parallel_metrics, dict):
                 diagnostics.scheduler["parallel"] = parallel_metrics
+            if diagnostics_level == "deep":
+                write_deep_traces(
+                    staging_dir / "diagnostics",
+                    diagnostics.scheduler,
+                )
+            diagnostics.scheduler = compact_scheduler_summary(diagnostics.scheduler)
             if not branches.speaker_segments:
                 raise TranscriptionError("speaker diarization returned no segments")
             with diagnostics.stage("alignment"):
@@ -818,8 +859,21 @@ class ServiceJobRunner:
                 perf_counter() - measurement_started
             )
             if sampler is not None:
-                self._finish_resource_profile(sampler, branches, diagnostics)
+                self._finish_resource_profile(
+                    sampler,
+                    branches,
+                    diagnostics,
+                    include_model_inventory=(
+                        diagnostics_level == "deep"
+                        or self.config.diagnostics.include_model_inventory
+                    ),
+                )
                 profile_finished = True
+            if diagnostics_level == "off":
+                diagnostics.stage_seconds.clear()
+                diagnostics.scheduler.clear()
+                diagnostics.asr.clear()
+                diagnostics.gpu_stages.clear()
             export_transcript(
                 result.transcript,
                 staging_dir,
@@ -894,6 +948,8 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             enable_vad=enable_vad,
             enable_punc=enable_punc,
             punc_only=punc_only,
+            punc_token_budget=config.asr.punc_token_budget,
+            punc_max_items=config.asr.punc_max_items,
             warmup_audio=warmup_audio,
         )
 
@@ -912,6 +968,8 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
                 enable_punc=True,
                 punc_only=True,
             ),
+            punc_token_budget=config.asr.punc_token_budget,
+            punc_max_items=config.asr.punc_max_items,
             gpu_safety_margin_mib=config.asr.gpu_safety_margin_mib,
         )
 

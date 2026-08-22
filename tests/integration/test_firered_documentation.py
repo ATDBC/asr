@@ -33,7 +33,7 @@ def test_architecture_describes_current_worker_lifecycle():
     ).read_text(encoding="utf-8")
 
     assert "FireRedWorkerClient" in architecture
-    assert "FireRed AED/Punc worker" in architecture
+    assert "两个 FireRed AED worker 和独立 Punc owner" in architecture
     assert "SpeakerDiarizer 关闭" in architecture
     assert "memory-first" in architecture
     assert "segment_batch_size" not in architecture
@@ -53,6 +53,7 @@ def test_architecture_documents_hot_diarization_first_service():
         "diarization 先行完成",
         "vad_segments_ms",
         "--profile-resources",
+        "--diagnostics resources",
         "--enable-overlap",
         "service stop",
     ):

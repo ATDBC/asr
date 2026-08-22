@@ -61,6 +61,17 @@ def test_pack_punc_records_allows_a_single_oversized_record():
     assert [[record.index for record in batch] for batch in batches] == [[4]]
 
 
+def test_pack_punc_records_rejects_invalid_budgets():
+    records = [_record(0, 1)]
+
+    import pytest
+
+    with pytest.raises(ValueError, match="token_budget"):
+        pack_punc_records(records, token_budget=0)
+    with pytest.raises(ValueError, match="max_items"):
+        pack_punc_records(records, max_items=0)
+
+
 def test_assemble_punc_items_restores_original_index_order():
     raw = assemble_punc_items(
         "job",

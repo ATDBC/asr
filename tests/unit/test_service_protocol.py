@@ -62,3 +62,18 @@ def test_protocol_parses_wait_request_for_an_accepted_job():
 def test_protocol_rejects_wait_without_job_id():
     with pytest.raises(ServiceProtocolError, match="job_id"):
         parse_request({"id": "wait-1", "action": "wait"})
+
+
+def test_protocol_parses_diagnostics_level():
+    request = parse_request(
+        {
+            "id": "job-1",
+            "action": "submit",
+            "input_audio": "/tmp/input.wav",
+            "output_dir": "/tmp/output",
+            "config_fingerprint": "fingerprint",
+            "diagnostics_level": "deep",
+        }
+    )
+
+    assert request.diagnostics_level == "deep"

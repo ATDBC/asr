@@ -791,6 +791,7 @@ class ServiceJobRunner:
         job_dir.mkdir(parents=True, exist_ok=False)
         sampler: Any | None = None
         profile_finished = False
+        previous_budget_fraction = 1.0
         diagnostics_level = self._diagnostics_level(request)
         self._capture_overlap_pid = diagnostics_level in {"resources", "deep"}
         if not self.hot_host.started:
@@ -812,6 +813,13 @@ class ServiceJobRunner:
             speaker_owner = self.hot_host.speaker_owner
             if asr_owner is None or speaker_owner is None:
                 raise TranscriptionError("resident model owners are unavailable")
+            previous_budget_fraction = getattr(
+                asr_owner, "aed_budget_fraction", 1.0
+            )
+            if hasattr(asr_owner, "aed_budget_fraction"):
+                asr_owner.aed_budget_fraction = float(
+                    request.aed_budget_fraction
+                )
             pipeline = TranscriptionPipeline(self.config)
             diagnostics = pipeline.new_diagnostics()
             diagnostics.runtime["warmup"] = dict(
@@ -923,6 +931,10 @@ class ServiceJobRunner:
                 raise OutputError(f"unable to publish output: {exc}") from exc
             return {"output_dir": str(published)}
         finally:
+            if "asr_owner" in locals() and asr_owner is not None and hasattr(
+                asr_owner, "aed_budget_fraction"
+            ):
+                asr_owner.aed_budget_fraction = previous_budget_fraction
             if sampler is not None and not profile_finished:
                 sampler.stop()
             self._active_overlap_pid = None

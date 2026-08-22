@@ -353,6 +353,7 @@ class ParallelFireRedWorkerClient:
         )
         self.worker_resident_mib: tuple[int, ...] = ()
         self.cost_model = BatchCostModel()
+        self.aed_budget_fraction = 1.0
         self.last_response: dict[str, object] = {}
 
     @property
@@ -619,10 +620,11 @@ class ParallelFireRedWorkerClient:
             for start, end in refined
         ]
         before_plan = self.gpu_memory_provider(self.pids)
-        effective_budget = derive_transient_budget_mib(
+        budget_fraction = min(max(float(self.aed_budget_fraction), 0.1), 1.0)
+        effective_budget = int(round(derive_transient_budget_mib(
             before_plan,
             safety_margin_mib=self.gpu_safety_margin_mib,
-        )
+        ) * budget_fraction))
         plan_started = perf_counter()
         plan = build_global_plan(
             refined_seconds,
@@ -640,10 +642,10 @@ class ParallelFireRedWorkerClient:
         plans = [_serialize(batches) for batches in assignments]
 
         before_dispatch = self.gpu_memory_provider(self.pids)
-        dispatch_budget = derive_transient_budget_mib(
+        dispatch_budget = int(round(derive_transient_budget_mib(
             before_dispatch,
             safety_margin_mib=self.gpu_safety_margin_mib,
-        )
+        ) * budget_fraction))
         dispatch_mode = "concurrent"
         if required_concurrent_increment_mib(assignments) > dispatch_budget:
             dispatch_mode = "serial"

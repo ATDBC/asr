@@ -90,6 +90,7 @@ class ServiceRequest:
     overlap_enabled: bool = False
     profile_resources: bool = False
     diagnostics_level: str = "basic"
+    aed_budget_fraction: float = 1.0
 
 
 def config_fingerprint(config: AppConfig) -> str:
@@ -125,6 +126,15 @@ def _diagnostics_level(payload: Mapping[str, Any]) -> str:
     if value not in {"off", "basic", "resources", "deep"}:
         raise ServiceProtocolError(
             "diagnostics_level must be off, basic, resources, or deep"
+        )
+    return value
+
+
+def _budget_fraction(payload: Mapping[str, Any]) -> float:
+    value = float(payload.get("aed_budget_fraction", 1.0))
+    if not 0.1 <= value <= 1.0:
+        raise ServiceProtocolError(
+            "aed_budget_fraction must stay within 0.1..1.0"
         )
     return value
 
@@ -168,6 +178,7 @@ def parse_request(payload: Mapping[str, Any]) -> ServiceRequest:
         overlap_enabled=_optional_bool(payload, "overlap_enabled"),
         profile_resources=_optional_bool(payload, "profile_resources"),
         diagnostics_level=_diagnostics_level(payload),
+        aed_budget_fraction=_budget_fraction(payload),
     )
 
 
@@ -314,6 +325,7 @@ class ServiceClient:
             "overlap_enabled": request.overlap_enabled,
             "profile_resources": request.profile_resources,
             "diagnostics_level": request.diagnostics_level,
+            "aed_budget_fraction": request.aed_budget_fraction,
         }
 
     def submit(self, request: ServiceRequest) -> dict[str, Any]:

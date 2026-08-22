@@ -77,3 +77,32 @@ def test_protocol_parses_diagnostics_level():
     )
 
     assert request.diagnostics_level == "deep"
+
+
+def test_protocol_accepts_bounded_aed_budget_fraction():
+    request = parse_request(
+        {
+            "id": "job",
+            "action": "submit",
+            "input_audio": "/tmp/input.wav",
+            "output_dir": "/tmp/output",
+            "config_fingerprint": "fingerprint",
+            "aed_budget_fraction": 0.8,
+        }
+    )
+
+    assert request.aed_budget_fraction == 0.8
+
+
+def test_protocol_rejects_unsafe_aed_budget_fraction():
+    with pytest.raises(ServiceProtocolError, match="aed_budget_fraction"):
+        parse_request(
+            {
+                "id": "job",
+                "action": "submit",
+                "input_audio": "/tmp/input.wav",
+                "output_dir": "/tmp/output",
+                "config_fingerprint": "fingerprint",
+                "aed_budget_fraction": 0.05,
+            }
+        )

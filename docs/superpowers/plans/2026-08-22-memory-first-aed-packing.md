@@ -23,10 +23,10 @@
 - Modify: `tests/unit/test_firered_client.py`
 - Modify: `tests/unit/test_firered_worker.py`
 
-- [ ] Write failing tests asserting `AsrConfig` has only `gpu_safety_margin_mib` for AED resource control, default TOML omits the four obsolete keys, and the worker command contains no obsolete flags.
-- [ ] Run `.venv/bin/python -m pytest -q tests/unit/test_config.py tests/unit/test_firered_client.py tests/unit/test_firered_worker.py` and verify failures mention the obsolete fields still exist.
-- [ ] Remove the four keys from defaults, dataclasses, validation, client constructor/command, worker parser/build function, service factories, and doctor factory; keep Punc's internal model batch setting independent and fixed.
-- [ ] Run the focused tests and update all affected existing assertions to the new API.
+- [x] Write failing tests asserting `AsrConfig` has only `gpu_safety_margin_mib` for AED resource control, default TOML omits the four obsolete keys, and the worker command contains no obsolete flags.
+- [x] Run `.venv/bin/python -m pytest -q tests/unit/test_config.py tests/unit/test_firered_client.py tests/unit/test_firered_worker.py` and verify failures mention the obsolete fields still exist.
+- [x] Remove the four keys from defaults, dataclasses, validation, client constructor/command, worker parser/build function, service factories, and doctor factory; keep Punc's internal model batch setting independent and fixed.
+- [x] Run the focused tests and update all affected existing assertions to the new API.
 
 ### Task 2: Replace scheduler with memory-first greedy packing
 
@@ -36,11 +36,11 @@
 - Modify: `tests/unit/test_firered_scheduler.py`
 - Modify: `tests/unit/test_firered_parallel.py`
 
-- [ ] Write failing tests for: a budget of 1000 MiB producing different batch cardinalities as segment durations change; no fixed batch-size cap; exact original-index preservation; singleton capacity failure; and two-lane peak fitting.
-- [ ] Run the focused scheduler/parallel tests and verify the new tests fail because the old scheduler still requires `max_batch_size`, frame budget, and static memory limits.
-- [ ] Implement `MemoryFirstBatchPacker` with inputs `(segments, shared_budget_mib, worker_resident_mib, cost_model)`; greedily add duration-sorted segments while predicted padded-frame transient growth fits; close batches before overflow; raise a typed capacity error for an oversized singleton.
-- [ ] Replace `build_global_plan()` with the packer, passing actual worker baselines and shared budget; preserve deterministic LPT lane assignment and no mid-run replanning.
-- [ ] Run focused scheduler/parallel tests until green.
+- [x] Write failing tests for: a budget of 1000 MiB producing different batch cardinalities as segment durations change; no fixed batch-size cap; exact original-index preservation; singleton capacity failure; and two-lane peak fitting.
+- [x] Run the focused scheduler/parallel tests and verify the new tests fail because the old scheduler still requires `max_batch_size`, frame budget, and static memory limits.
+- [x] Implement `MemoryFirstBatchPacker` with inputs `(segments, shared_budget_mib, worker_resident_mib, cost_model)`; greedily add duration-sorted segments while predicted padded-frame transient growth fits; close batches before overflow; raise a typed capacity error for an oversized singleton.
+- [x] Replace `build_global_plan()` with the packer, passing actual worker baselines and shared budget; preserve deterministic LPT lane assignment and no mid-run replanning.
+- [x] Run focused scheduler/parallel tests until green.
 
 ### Task 3: Wire actual worker baselines and dispatch diagnostics
 
@@ -51,11 +51,11 @@
 - Modify: `tests/unit/test_firered_parallel.py`
 - Modify: `tests/unit/test_firered_worker.py`
 
-- [ ] Write failing tests proving the planner subtracts worker-specific warmed allocations, emits exact batch membership, and reports predicted/actual time and allocated/reserved memory per batch.
-- [ ] Run focused tests and verify failures identify the old hard-coded `5000 MiB` baseline or missing fields.
-- [ ] Return warmed allocated/reserved baselines from worker warm-up/status, pass them into the packer, and expose `memory_first` diagnostics with budget, batch list, worker lanes, dispatch mode, and errors.
-- [ ] Keep the second GPU snapshot as a gate only: concurrent if both lanes fit, serial if only one lane fits, fail before AED if a singleton cannot fit.
-- [ ] Run focused tests and inspect serialized JSON protocol requests for absence of obsolete options.
+- [x] Write failing tests proving the planner subtracts worker-specific warmed allocations, emits exact batch membership, and reports predicted/actual time and allocated/reserved memory per batch.
+- [x] Run focused tests and verify failures identify the old hard-coded `5000 MiB` baseline or missing fields.
+- [x] Return warmed allocated/reserved baselines from worker warm-up/status, pass them into the packer, and expose `memory_first` diagnostics with budget, batch list, worker lanes, dispatch mode, and errors.
+- [x] Keep the second GPU snapshot as a gate only: concurrent if both lanes fit, serial if only one lane fits, fail before AED if a singleton cannot fit.
+- [x] Run focused tests and inspect serialized JSON protocol requests for absence of obsolete options.
 
 ### Task 4: Update documentation and remove stale references
 
@@ -67,17 +67,17 @@
 - Modify: `docs/superpowers/plans/2026-08-22-automatic-aed-memory-budget.md`
 - Modify: `tests/integration/test_firered_documentation.py`
 
-- [ ] Add failing documentation assertions that the active pipeline describes memory-first packing and does not present the four removed settings as production controls.
-- [ ] Run documentation tests and verify the stale references fail.
-- [ ] Rewrite active documentation around `gpu_safety_margin_mib`, dynamic cardinality, actual worker baselines, and the dispatch gate; leave historical migration records untouched where they describe past designs.
-- [ ] Run documentation tests and `rg` to distinguish only historical references from active configuration references.
+- [x] Add failing documentation assertions that the active pipeline describes memory-first packing and does not present the four removed settings as production controls.
+- [x] Run documentation tests and verify the stale references fail.
+- [x] Rewrite active documentation around `gpu_safety_margin_mib`, dynamic cardinality, actual worker baselines, and the dispatch gate; leave historical migration records untouched where they describe past designs.
+- [x] Run documentation tests and `rg` to distinguish only historical references from active configuration references.
 
 ### Task 5: Verify, benchmark, and commit
 
 **Files:**
 - Create ignored report: `outputs/measurements/20260822T-memory-first-aed-liuyangyang/result.json`
 
-- [ ] Run `.venv/bin/python -m pytest -q` and `git diff --check`.
-- [ ] Read GPU0 state without changing external processes; start the repository service with the new config and run `audio_test/刘洋洋.wav` using resource profiling.
-- [ ] Verify the report includes dynamically chosen batch sizes, peak budget utilization, stage timing, prediction errors, and transcript fingerprint; compare against the previous 102-batch run.
-- [ ] Stop only this service, confirm GPU0 returns to the external baseline, inspect `git status`, and commit all tracked changes.
+- [x] Run `.venv/bin/python -m pytest -q` and `git diff --check`.
+- [x] Read GPU0 state without changing external processes; start the repository service with the new config and run `audio_test/刘洋洋.wav` using resource profiling.
+- [x] Verify the report includes dynamically chosen batch sizes, peak budget utilization, stage timing, prediction errors, and transcript fingerprint; compare against the previous 102-batch run.
+- [x] Stop only this service, confirm GPU0 returns to the external baseline, inspect `git status`, and commit all tracked changes.

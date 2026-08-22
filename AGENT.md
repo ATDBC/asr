@@ -16,8 +16,9 @@ user explicitly requests it.
   described as the AED/Punc worker's functional stage.
 - 3D-Speaker diarization runs before normal ASR. Long speaker intervals use the hosted
   FireRedVAD helper, intersected with the speaker interval, before AED/Punc decoding.
-- The AED scheduler creates one complete duration/memory plan before the first batch.
-  Later observations update diagnostics only; they must not reorder or repartition work.
+- The AED scheduler is memory-first: post-warm-up free GPU memory minus the configured
+  safety margin determines exact batch membership. Batch cardinality is never a fixed
+  production setting. The complete plan is immutable before the first AED request.
 - Production ASR defaults to `use_half = true`. On the current RTX 3090 this selects
   `torch.bfloat16` in the pinned upstream FireRed implementation. `false` is the FP32
   fallback; do not silently change the default back to FP32.

@@ -52,10 +52,6 @@ def _default_asr_client(config: AppConfig) -> FireRedWorkerClient:
         timeout_seconds=config.asr.timeout_seconds,
         stderr_log_path=config.paths.work_dir / "doctor-firered-worker.log",
         use_half=config.asr.use_half,
-        segment_batch_size=config.asr.segment_batch_size,
-        segment_frame_budget=config.asr.segment_frame_budget,
-        segment_memory_limit_mib=config.asr.segment_memory_limit_mib,
-        segment_memory_safety_mib=config.asr.segment_memory_safety_mib,
     )
 
 

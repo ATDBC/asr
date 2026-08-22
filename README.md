@@ -90,10 +90,6 @@ worker_python = "/path/to/standalone_transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
 use_half = true                 # GPU 支持时由 FireRed 选择 BF16
 aed_worker_count = 2            # 两个 AED；worker-0 独占 VAD/Punc
-segment_batch_size = 8
-segment_frame_budget = 8000
-segment_memory_limit_mib = 10000
-segment_memory_safety_mib = 512
 gpu_safety_margin_mib = 1536       # 预热后空闲显存保留的安全余量
 
 [service]
@@ -114,14 +110,11 @@ GPU 1 重映射成逻辑 `cuda:0`。配置优先级为：
 命令行 > FUNASR_TRANSCRIBER_* 环境变量 > TOML > 内置默认值
 ~~~
 
-`segment_batch_size` 是动态调度器允许的 AED 最大批大小。调度器先按时长降低 padding，
-在说话人分离/VAD 完成且两个 AED 已预热后读取一次 GPU 0 空闲显存，用
-`free_mib - gpu_safety_margin_mib` 得到两路 AED 的共享瞬时显存预算，再用
-`segment_frame_budget`、`segment_memory_limit_mib` 和该预算一次性切出完整批次计划。执行期间严格按计划消费；
-每个 batch 完成后的实际耗时和显存峰值只用于诊断和更新预测模型，不会重排后续批次。每个
-VAD 段仍按原时间顺序导出，完整计划、实际观测和预测超限记录写入
-`diagnostics.json.scheduler`。默认 8 是速度与显存校准后的取值，注意 batch 8 的转写与 batch 1/4
-不完全逐字一致（batch 间浮点差异），但同一 batch 重复运行结果稳定。
+AED 不再配置固定 batch 数量、帧数或静态显存上限。说话人分离/VAD 完成且两个 AED 已预热后读取
+GPU 0 空闲显存，用 `free_mib - gpu_safety_margin_mib` 得到共享瞬时预算；memory-first 装箱器按
+片段时长、padding 后帧数和实际 worker 常驻基线，逐个决定每个 batch 的具体片段，直到再加入片段会超出预算。
+batch 数量和每个 batch 的 cardinality 都是计算结果。完整计划、实际观测和预测误差写入
+`diagnostics.json`，执行期间不重排或重新分 batch。
 
 生产默认常驻两个 AED worker，但只加载一个 Punc 模型。说话人分离完成后，worker-0 对全部
 speaker 区间执行一次全局 FireRedVAD；主进程随后生成一份完整 batch 计划，并按预测耗时用
@@ -130,7 +123,7 @@ worker-0 的单个 Punc 模型。`aed_worker_count = 1` 可回退到单 worker�
 必须通过现有 GPU 空间准入检查后才会启动两路 AED。AED 开始前会再次只读检查 GPU 0：预算足够时并发，
 预算只能容纳单路时按固定计划串行；若连一个计划批次也容纳不下则在 AED 前拒绝该作业，不会触碰其他项目进程。
 
-每个固定批次都会返回预计/实际耗时、预计/实际增量显存（worker 预热后的 PyTorch allocated 基线）和误差，
+每个 memory-first 批次都会返回预计/实际耗时、预计/实际增量显存（worker 预热后的 PyTorch allocated 基线）和误差，
 并汇总到 `diagnostics.json`，因此可以直接验证“按音频段长度预测”的准确性。`100 MiB` 不作为默认余量；
 CUDA allocator 和其他用户显存变化需要更大的安全空间，当前默认 `1536 MiB`。
 

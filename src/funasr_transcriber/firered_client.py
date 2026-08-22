@@ -75,10 +75,6 @@ class FireRedWorkerClient:
         worker_script: Path | None = None,
         # FireRed's upstream use_half flag selects BF16 when the GPU supports it.
         use_half: bool = False,
-        segment_batch_size: int = 1,
-        segment_frame_budget: int = 8000,
-        segment_memory_limit_mib: int = 10000,
-        segment_memory_safety_mib: int = 512,
         enable_vad: bool = True,
         enable_punc: bool = True,
         warmup_audio: Path | None = None,
@@ -92,10 +88,6 @@ class FireRedWorkerClient:
             Path(worker_script) if worker_script is not None else None
         )
         self.use_half = bool(use_half)
-        self.segment_batch_size = int(segment_batch_size)
-        self.segment_frame_budget = int(segment_frame_budget)
-        self.segment_memory_limit_mib = int(segment_memory_limit_mib)
-        self.segment_memory_safety_mib = int(segment_memory_safety_mib)
         self.enable_vad = bool(enable_vad)
         self.enable_punc = bool(enable_punc)
         self.warmup_audio = (
@@ -124,14 +116,6 @@ class FireRedWorkerClient:
             str(self.model_root.expanduser().resolve()),
             "--device",
             self.device,
-            "--segment-batch-size",
-            str(self.segment_batch_size),
-            "--segment-frame-budget",
-            str(self.segment_frame_budget),
-            "--segment-memory-limit-mib",
-            str(self.segment_memory_limit_mib),
-            "--segment-memory-safety-mib",
-            str(self.segment_memory_safety_mib),
         ]
         if self.use_half:
             command.append("--use-half")
@@ -146,14 +130,6 @@ class FireRedWorkerClient:
             return self
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        if self.segment_batch_size <= 0:
-            raise ValueError("segment_batch_size must be positive")
-        if self.segment_frame_budget <= 0:
-            raise ValueError("segment_frame_budget must be positive")
-        if self.segment_memory_limit_mib <= 0:
-            raise ValueError("segment_memory_limit_mib must be positive")
-        if self.segment_memory_safety_mib < 0:
-            raise ValueError("segment_memory_safety_mib must not be negative")
         self.stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._stderr = self.stderr_log_path.open(
             "a",
@@ -364,6 +340,8 @@ class FireRedWorkerClient:
         return {
             "seconds": float(response.get("warmup_seconds") or 0.0),
             "excluded": bool(response.get("warmup_excluded")),
+            "resident_allocated_mib": response.get("resident_allocated_mib"),
+            "resident_reserved_mib": response.get("resident_reserved_mib"),
         }
 
     def close(self) -> None:

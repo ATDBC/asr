@@ -8,7 +8,7 @@ from typing import Any, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 
-from .firered_scheduler import AdaptiveBatchScheduler, BatchDecision
+from .firered_scheduler import BatchDecision, MemoryFirstBatchPacker
 from .schemas import AsrResult
 
 
@@ -89,35 +89,18 @@ class PartitionSummary:
 def build_global_plan(
     segments: Sequence[tuple[float, float]],
     *,
-    batch_size: int,
-    frame_budget: int = 8000,
-    memory_limit_mib: int | None = 10_000,
-    memory_safety_mib: int = 512,
-    transient_memory_budget_mib: int | None = None,
-    worker_count: int = 1,
+    shared_budget_mib: int,
+    worker_resident_mib: tuple[int, ...],
 ) -> tuple[BatchDecision, ...]:
-    """Build the one immutable plan shared by every AED worker."""
+    """Build the one immutable memory-first plan shared by AED workers."""
 
-    candidate_size = int(batch_size)
-    while candidate_size > 0:
-        scheduler = AdaptiveBatchScheduler(
+    return tuple(
+        MemoryFirstBatchPacker(
             segments,
-            max_batch_size=candidate_size,
-            frame_budget=frame_budget,
-            memory_limit_mib=memory_limit_mib,
-            safety_mib=memory_safety_mib,
-            transient_memory_limit_mib=transient_memory_budget_mib,
-        )
-        plan = tuple(scheduler.plan())
-        if transient_memory_budget_mib is None or worker_count <= 1:
-            return plan
-        assignments = partition_batches(plan, worker_count=worker_count)
-        if required_concurrent_increment_mib(assignments) <= int(
-            transient_memory_budget_mib
-        ):
-            return plan
-        candidate_size -= 1
-    raise RuntimeError("unable to build an AED batch plan")
+            shared_budget_mib=shared_budget_mib,
+            worker_resident_mib=worker_resident_mib,
+        ).plan()
+    )
 
 
 def _loads(assignments: Sequence[Sequence[BatchDecision]]) -> list[float]:
@@ -265,25 +248,16 @@ class ParallelFireRedWorkerClient:
         worker0: Any,
         worker1: Any,
         *,
-        batch_size: int,
-        frame_budget: int = 8000,
-        memory_limit_mib: int | None = 10_000,
-        memory_safety_mib: int = 512,
         gpu_safety_margin_mib: int = 1_536,
         gpu_memory_provider: Any | None = None,
     ):
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive")
         self.worker0 = worker0
         self.worker1 = worker1
-        self.batch_size = int(batch_size)
-        self.frame_budget = int(frame_budget)
-        self.memory_limit_mib = memory_limit_mib
-        self.memory_safety_mib = int(memory_safety_mib)
         self.gpu_safety_margin_mib = int(gpu_safety_margin_mib)
         self.gpu_memory_provider = (
             gpu_memory_provider or _default_gpu_memory_provider
         )
+        self.worker_resident_mib: tuple[int, ...] = ()
         self.last_response: dict[str, object] = {}
 
     @property
@@ -323,7 +297,10 @@ class ParallelFireRedWorkerClient:
                 executor.submit(client.warmup, audio_path)
                 for client in (self.worker0, self.worker1)
             ]
-            results = [future.result() for future in futures]
+        results = [future.result() for future in futures]
+        self.worker_resident_mib = tuple(
+            int(item.get("resident_allocated_mib") or 0) for item in results
+        )
         return {
             "excluded": all(bool(item.get("excluded")) for item in results),
             "seconds": max(float(item.get("seconds") or 0.0) for item in results),
@@ -353,12 +330,11 @@ class ParallelFireRedWorkerClient:
         plan_started = perf_counter()
         plan = build_global_plan(
             refined_seconds,
-            batch_size=self.batch_size,
-            frame_budget=self.frame_budget,
-            memory_limit_mib=self.memory_limit_mib,
-            memory_safety_mib=self.memory_safety_mib,
-            transient_memory_budget_mib=effective_budget,
-            worker_count=2,
+            shared_budget_mib=effective_budget,
+            worker_resident_mib=(
+                self.worker_resident_mib
+                or tuple(before_plan.process_mib.get(pid, 0) for pid in self.pids)
+            ),
         )
         plan_seconds = perf_counter() - plan_started
         assignments = partition_batches(plan, worker_count=2)
@@ -458,8 +434,16 @@ class ParallelFireRedWorkerClient:
                 "worker_batch_counts": [len(items) for items in assignments],
                 },
                 "scheduler": {
+                "planner": "memory_first",
+                "shared_budget_mib": effective_budget,
+                "lane_budget_mib": max(1, effective_budget // 2),
+                "worker_resident_mib": list(
+                    self.worker_resident_mib
+                    or tuple(before_plan.process_mib.get(pid, 0) for pid in self.pids)
+                ),
                 "planned_batches": len(plan),
                 "planned_items": sum(len(batch.items) for batch in plan),
+                "batch_sizes": [len(batch.items) for batch in plan],
                 "worker_predicted_seconds": [
                     summary.predicted_seconds
                     for summary in summarize_partition(assignments)

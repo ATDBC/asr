@@ -583,10 +583,6 @@ class ServiceJobRunner:
             timeout_seconds=self.config.asr.timeout_seconds,
             stderr_log_path=job_dir / "overlap-firered-worker.log",
             use_half=self.config.asr.use_half,
-            segment_batch_size=self.config.asr.segment_batch_size,
-            segment_frame_budget=self.config.asr.segment_frame_budget,
-            segment_memory_limit_mib=self.config.asr.segment_memory_limit_mib,
-            segment_memory_safety_mib=self.config.asr.segment_memory_safety_mib,
             warmup_audio=(
                 Path(self.config.paths.model_dir)
                 / "fireredasr2s"
@@ -889,10 +885,6 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             timeout_seconds=config.asr.timeout_seconds,
             stderr_log_path=paths.directory / stderr_name,
             use_half=config.asr.use_half,
-            segment_batch_size=config.asr.segment_batch_size,
-            segment_frame_budget=config.asr.segment_frame_budget,
-            segment_memory_limit_mib=config.asr.segment_memory_limit_mib,
-            segment_memory_safety_mib=config.asr.segment_memory_safety_mib,
             enable_vad=enable_vad,
             enable_punc=enable_punc,
             warmup_audio=warmup_audio,
@@ -907,10 +899,6 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
         return ParallelFireRedWorkerClient(
             client("firered-worker-0.log", enable_vad=True, enable_punc=True),
             client("firered-worker-1.log", enable_vad=False, enable_punc=False),
-            batch_size=config.asr.segment_batch_size,
-            frame_budget=config.asr.segment_frame_budget,
-            memory_limit_mib=config.asr.segment_memory_limit_mib,
-            memory_safety_mib=config.asr.segment_memory_safety_mib,
             gpu_safety_margin_mib=config.asr.gpu_safety_margin_mib,
         )
 

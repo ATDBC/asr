@@ -82,12 +82,10 @@ overlap 临时 worker 对分离轨道的重解码）仍运行 FireRedVAD。
 
 worker-0 固定加载 FireRedASR2S 提交 `4e7d9aaf4482a47cec1724807026b9b151926eb5` 的
 FireRedASR2-AED、FireRedPunc 和 FireRedVAD；worker-1 只加载 FireRedASR2-AED。语言识别
-模型不加载。主进程按时长排序后分 batch，完成两路 AED 后由 worker-0 执行一次 Punc，再按
-原始时间索引恢复，因此响应顺序和 speaker 归属不变；`[asr].segment_batch_size` 是 batch
-上限，`[asr].segment_frame_budget`（默认 8000，约 80 秒特征帧）同时限制动态 batch 的总帧数。
+模型不加载。主进程按时长排序后用 memory-first 装箱器根据预热后的实际 worker 常驻显存和共享预算决定每个 batch 的具体片段，完成两路 AED 后由 worker-0 执行一次 Punc，再按
+原始时间索引恢复，因此响应顺序和 speaker 归属不变。
 在第一个 AED batch 开始前，两个 worker 预热完成、说话人分离/VAD 结束；主进程按时长排序并基于初始成本模型一次性生成完整批次计划。
-计划预算来自预热后 GPU 0 空闲显存减去 `[asr].gpu_safety_margin_mib=1536`，使用每个 worker 的预计瞬时增量显存，
-同时保留 `[asr].segment_memory_limit_mib=10000` 作为单 worker 紧急上限。AED 开始前再次采样：满足两路预计峰值则并发，
+计划预算来自预热后 GPU 0 空闲显存减去 `[asr].gpu_safety_margin_mib=1536`，使用每个 worker 的实际常驻基线和预计瞬时增量显存。AED 开始前再次采样：满足两路预计峰值则并发，
 只能容纳一路则按相同固定计划串行，连单个批次都放不下则提前失败；这些门控不会重排或重分批。
 两个 worker 后续 batch 严格按各自固定计划执行；batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，
 不会重新排序或改变后续批次。该读取只调用 CUDA 只读接口，不枚举、暂停或操作其他项目进程。

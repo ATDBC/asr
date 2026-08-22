@@ -35,7 +35,8 @@ def test_architecture_describes_current_worker_lifecycle():
     assert "FireRedWorkerClient" in architecture
     assert "FireRed AED/Punc worker" in architecture
     assert "SpeakerDiarizer 关闭" in architecture
-    assert "segment_batch_size" in architecture
+    assert "memory-first" in architecture
+    assert "segment_batch_size" not in architecture
     assert "FireRedLID" not in architecture
     assert "GPU 0" in architecture
     for legacy_name in ("FunASR AutoModel", "Para" + "former"):

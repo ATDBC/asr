@@ -1,4 +1,7 @@
-# Automatic AED Memory Budget Design
+# Automatic AED Memory Budget Design (superseded)
+
+> Superseded by `2026-08-22-memory-first-aed-packing-design.md`. The former
+> fixed batch/frame/memory controls are no longer part of the active pipeline.
 
 ## Goal
 

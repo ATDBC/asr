@@ -28,10 +28,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "timeout_seconds": 1800,
         "use_half": True,
         "aed_worker_count": 2,
-        "segment_batch_size": 8,
-        "segment_frame_budget": 8000,
-        "segment_memory_limit_mib": 10000,
-        "segment_memory_safety_mib": 512,
         "gpu_safety_margin_mib": 1536,
     },
     "diarization": {
@@ -96,10 +92,6 @@ class AsrConfig:
     timeout_seconds: int
     use_half: bool
     aed_worker_count: int
-    segment_batch_size: int
-    segment_frame_budget: int
-    segment_memory_limit_mib: int
-    segment_memory_safety_mib: int
     gpu_safety_margin_mib: int
 
 
@@ -246,14 +238,6 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             timeout_seconds=int(values["asr"]["timeout_seconds"]),
             use_half=bool(values["asr"]["use_half"]),
             aed_worker_count=int(values["asr"]["aed_worker_count"]),
-            segment_batch_size=int(values["asr"]["segment_batch_size"]),
-            segment_frame_budget=int(values["asr"]["segment_frame_budget"]),
-            segment_memory_limit_mib=int(
-                values["asr"]["segment_memory_limit_mib"]
-            ),
-            segment_memory_safety_mib=int(
-                values["asr"]["segment_memory_safety_mib"]
-            ),
             gpu_safety_margin_mib=int(values["asr"]["gpu_safety_margin_mib"]),
         ),
         diarization=DiarizationConfig(
@@ -316,16 +300,8 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("max_audio_seconds must be 7200 in version 1")
     if config.asr.timeout_seconds <= 0:
         raise ValueError("ASR timeout_seconds must be positive")
-    if config.asr.segment_batch_size <= 0:
-        raise ValueError("ASR segment_batch_size must be positive")
     if config.asr.aed_worker_count not in (1, 2):
         raise ValueError("ASR aed_worker_count must be 1 or 2")
-    if config.asr.segment_frame_budget <= 0:
-        raise ValueError("ASR segment_frame_budget must be positive")
-    if config.asr.segment_memory_limit_mib <= 0:
-        raise ValueError("ASR segment_memory_limit_mib must be positive")
-    if config.asr.segment_memory_safety_mib < 0:
-        raise ValueError("ASR segment_memory_safety_mib must not be negative")
     if config.asr.gpu_safety_margin_mib <= 0:
         raise ValueError("ASR gpu_safety_margin_mib must be positive")
     diarization = config.diarization

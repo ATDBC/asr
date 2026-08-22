@@ -49,7 +49,9 @@ short segments naturally form larger batches and long segments form smaller
 ones.
 
 The prediction model uses padded feature frames and item count for time and
-transient memory. It is parameterized by each worker's warmed resident memory,
+transient memory. Its active BF16 driver-visible calibration starts at
+`384 MiB + 0.045 MiB * padded_frames` and is intentionally conservative about
+allocator/runtime overhead. It is parameterized by each worker's warmed resident memory,
 not by a hard-coded `5000 MiB` process baseline. Observed per-batch allocated
 and reserved peaks remain diagnostics and calibration evidence only; they never
 repartition an active plan.

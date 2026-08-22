@@ -15,7 +15,6 @@ from funasr_transcriber.firered_worker import (
     _explicit_aed_process,
     _scheduled_process,
     firered_inventory,
-    duration_ordered_batches,
     serve,
     _parser,
 )
@@ -82,35 +81,6 @@ def test_worker_half_precision_switch_defaults_off_and_can_be_enabled(tmp_path: 
     assert parser.parse_args(
         ["--model-root", str(tmp_path), "--use-half"]
     ).use_half is True
-
-
-def test_duration_ordered_batches_retain_indices_for_order_restoration():
-    segments = [(0.0, 3.0), (3.0, 4.0), (4.0, 6.0), (6.0, 7.0)]
-
-    batches = duration_ordered_batches(segments, batch_size=2)
-
-    assert [[item.index for item in batch] for batch in batches] == [
-        [1, 3],
-        [2, 0],
-    ]
-    assert [
-        (item.index, item.start_s, item.end_s)
-        for batch in batches
-        for item in batch
-    ] == [
-        (1, 3.0, 4.0),
-        (3, 6.0, 7.0),
-        (2, 4.0, 6.0),
-        (0, 0.0, 3.0),
-    ]
-
-
-def test_duration_ordered_batches_respect_frame_budget_before_batch_limit():
-    segments = [(0.0, 40.0), (40.0, 70.0), (70.0, 100.0)]
-
-    batches = duration_ordered_batches(segments, batch_size=8, frame_budget=5_000)
-
-    assert [[item.index for item in batch] for batch in batches] == [[1], [2], [0]]
 
 
 def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, monkeypatch):
@@ -198,7 +168,6 @@ def test_scheduled_process_restores_original_result_order(tmp_path: Path):
         asr=asr,
         punc=Punc(),
         config=SimpleNamespace(
-            asr_batch_size=2,
             enable_lid=False,
             enable_punc=True,
             asr_config=SimpleNamespace(return_timestamp=True),
@@ -209,12 +178,10 @@ def test_scheduled_process_restores_original_result_order(tmp_path: Path):
         str(wav),
         "job",
         [(0.0, 3.0), (3.0, 4.0), (4.0, 6.0), (6.0, 7.0)],
-        batch_size=2,
     )
 
     assert [batch[0].split("_s", 1)[1].split("_e", 1)[0] for batch in asr.batches] == [
         "3000",
-        "4000",
     ]
     assert [sentence["start_ms"] for sentence in raw["sentences"]] == [
         0,
@@ -259,7 +226,6 @@ def test_scheduled_process_matches_dropped_aed_items_by_uttid(tmp_path: Path):
         asr=Asr(),
         punc=Punc(),
         config=SimpleNamespace(
-            asr_batch_size=2,
             enable_lid=False,
             enable_punc=True,
             asr_config=SimpleNamespace(return_timestamp=True),
@@ -270,13 +236,9 @@ def test_scheduled_process_matches_dropped_aed_items_by_uttid(tmp_path: Path):
         str(wav),
         "job",
         [(0.0, 1.0), (1.0, 5.0), (5.0, 6.0)],
-        batch_size=2,
     )
 
-    assert [sentence["start_ms"] for sentence in raw["sentences"]] == [
-        1000,
-        5000,
-    ]
+    assert [sentence["start_ms"] for sentence in raw["sentences"]] == [1000]
 
 
 def _request(identifier: str, action: str, path: Path | None = None) -> str:

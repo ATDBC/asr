@@ -17,12 +17,13 @@ import time
 from typing import Any, Callable, IO, Protocol
 
 from .firered_contract import normalize_official_result
-from .firered_scheduler import AdaptiveBatchScheduler
+from .firered_scheduler import MemoryFirstBatchPacker
 
 
 LOGGER = logging.getLogger(__name__)
 
 SCRIPTED_VAD_THRESHOLD_SECONDS = 10.0
+PUNC_INTERNAL_BATCH_SIZE = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,68 +31,6 @@ class AudioInfo:
     sample_rate: int
     channels: int
     subtype: str
-
-
-@dataclass(frozen=True, slots=True)
-class ScheduledSegment:
-    """One VAD interval with its position in the caller's chronological list."""
-
-    index: int
-    start_s: float
-    end_s: float
-
-    @property
-    def duration_s(self) -> float:
-        return self.end_s - self.start_s
-
-
-def duration_ordered_batches(
-    segments: list[tuple[float, float]] | tuple[tuple[float, float], ...],
-    batch_size: int,
-    frame_budget: int | None = None,
-    frame_rate: int = 100,
-) -> list[list[ScheduledSegment]]:
-    """Group intervals by similar duration while retaining original indices.
-
-    The returned groups are execution order only. Callers must use ``index``
-    to restore chronological output order before formatting the response.
-    ``frame_budget`` is optional and limits the sum of estimated feature frames
-    per batch; an individual interval is allowed to exceed the budget.
-    """
-
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    if frame_budget is not None and frame_budget <= 0:
-        raise ValueError("frame_budget must be positive when provided")
-    scheduled = [
-        ScheduledSegment(index, float(start_s), float(end_s))
-        for index, (start_s, end_s) in enumerate(segments)
-    ]
-    ordered = sorted(
-        scheduled,
-        key=lambda item: (item.duration_s, item.index),
-    )
-    batches: list[list[ScheduledSegment]] = []
-    current: list[ScheduledSegment] = []
-    current_frames = 0
-    for item in ordered:
-        item_frames = max(1, int(round(item.duration_s * frame_rate)))
-        budget_would_be_exceeded = (
-            frame_budget is not None
-            and current
-            and current_frames + item_frames > frame_budget
-        )
-        if current and (
-            len(current) >= batch_size or budget_would_be_exceeded
-        ):
-            batches.append(current)
-            current = []
-            current_frames = 0
-        current.append(item)
-        current_frames += item_frames
-    if current:
-        batches.append(current)
-    return batches
 
 
 def _synchronize_cuda() -> None:
@@ -147,6 +86,17 @@ def _cuda_peak_reserved_mib() -> int | None:
     return None
 
 
+def _cuda_reserved_memory_mib() -> int | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return int(torch.cuda.memory_reserved() / (1024 * 1024))
+    except ImportError:
+        pass
+    return None
+
+
 def _cuda_free_memory_mib() -> int | None:
     try:
         import torch
@@ -164,11 +114,8 @@ def _scheduled_process(
     wav_path: str,
     uttid: str,
     vad_segments: list[tuple[float, float]],
-    batch_size: int,
-    frame_budget: int | None = None,
-    memory_limit_mib: int | None = 10_000,
-    memory_safety_mib: int = 512,
     free_memory_provider: Callable[[], int | None] | None = None,
+    safety_margin_mib: int = 1_536,
     clock: Callable[[], float] = time.perf_counter,
 ) -> dict[str, object]:
     """Run the pinned modules with duration-aware AED batches.
@@ -185,16 +132,17 @@ def _scheduled_process(
     duration_s = wav_np.shape[0] / sample_rate
     config = system.config
     records: list[tuple[int, dict[str, object], object]] = []
-    scheduler = AdaptiveBatchScheduler(
+    free_memory = (free_memory_provider or _cuda_free_memory_mib)()
+    if free_memory is None:
+        raise RuntimeError("GPU free memory is unavailable for memory-first packing")
+    resident = _cuda_memory_allocated_mib() or 0
+    packer = MemoryFirstBatchPacker(
         vad_segments,
-        max_batch_size=batch_size,
-        frame_budget=frame_budget or 8000,
-        memory_limit_mib=memory_limit_mib,
-        safety_mib=memory_safety_mib,
-        free_memory_provider=free_memory_provider or _cuda_free_memory_mib,
+        shared_budget_mib=max(1, int(free_memory) - int(safety_margin_mib)),
+        worker_resident_mib=(resident,),
     )
-    scheduler.plan()
-    while (decision := scheduler.next_batch()) is not None:
+    plan = packer.plan()
+    for decision in plan:
         batch = list(decision.items)
         batch_uttid: list[str] = []
         batch_wav: list[tuple[int, object]] = []
@@ -209,11 +157,6 @@ def _scheduled_process(
         asr_started = clock()
         asr_results = system.asr.transcribe(batch_uttid, batch_wav)
         _synchronize_cuda()
-        scheduler.observe(
-            decision,
-            actual_seconds=clock() - asr_started,
-            actual_peak_mib=_cuda_peak_memory_mib(),
-        )
         lid_results = (
             system.lid.process(batch_uttid, batch_wav)
             if getattr(config, "enable_lid", False)
@@ -251,7 +194,7 @@ def _scheduled_process(
         for index, asr_result in enumerate(asr_results):
             timestamp = asr_result.get("timestamp", [])
             punc_batch.append((asr_result, timestamp))
-            if len(punc_batch) < batch_size and index != len(asr_results) - 1:
+            if len(punc_batch) < PUNC_INTERNAL_BATCH_SIZE and index != len(asr_results) - 1:
                 continue
             punc_results.extend(
                 system.punc.process_with_timestamp(
@@ -331,7 +274,7 @@ def _scheduled_process(
         "dur_s": duration_s,
         "words": words,
         "wav_path": wav_path,
-        "_scheduler": scheduler.summary(),
+        "_scheduler": packer.summary(),
     }
 
 
@@ -417,7 +360,6 @@ def _punctuate_aed_results(
     aed_results: list[dict[str, object]],
     duration_ms: int,
     vad_segments_ms: list[list[int]],
-    batch_size: int,
 ) -> dict[str, object]:
     """Apply one shared Punc model and produce the normal raw result shape."""
 
@@ -425,8 +367,8 @@ def _punctuate_aed_results(
     results = [item["result"] for item in ordered]
     sentences: list[dict[str, object]] = []
     words: list[dict[str, object]] = []
-    for offset in range(0, len(results), max(1, batch_size)):
-        group = results[offset:offset + max(1, batch_size)]
+    for offset in range(0, len(results), PUNC_INTERNAL_BATCH_SIZE):
+        group = results[offset:offset + PUNC_INTERNAL_BATCH_SIZE]
         punctuated = system.punc.process_with_timestamp(
             [result.get("timestamp", []) for result in group],
             [str(result["uttid"]) for result in group],
@@ -741,6 +683,8 @@ def serve(
                 path = _validate_audio(request.get("audio_path"), audio_info)
                 warmup_started = clock()
                 _warmup_process(system, str(path))
+                resident_allocated_mib = _cuda_memory_allocated_mib()
+                resident_reserved_mib = _cuda_reserved_memory_mib()
                 _write_response(
                     protocol_output,
                     {
@@ -748,6 +692,8 @@ def serve(
                         "ok": True,
                         "warmup_seconds": clock() - warmup_started,
                         "warmup_excluded": True,
+                        "resident_allocated_mib": resident_allocated_mib,
+                        "resident_reserved_mib": resident_reserved_mib,
                     },
                 )
                 continue
@@ -829,7 +775,6 @@ def serve(
                     raw_results,
                     duration_ms,
                     raw_vad_ms,
-                    int(getattr(system.config, "punc_batch_size", 1)),
                 )
                 _write_response(
                     protocol_output,
@@ -854,10 +799,6 @@ def serve(
                             str(path),
                             identifier,
                             list(vad_result["timestamps"]),
-                            int(system.config.asr_batch_size),
-                            getattr(system.config, "segment_frame_budget", None),
-                            getattr(system.config, "segment_memory_limit_mib", 10_000),
-                            getattr(system.config, "segment_memory_safety_mib", 512),
                         )
                     else:
                         raw = system.process(str(path), uttid=identifier)
@@ -887,10 +828,6 @@ def serve(
 def build_firered_system(
     model_root: Path,
     device: str,
-    segment_batch_size: int = 1,
-    segment_frame_budget: int = 8000,
-    segment_memory_limit_mib: int = 10_000,
-    segment_memory_safety_mib: int = 512,
     use_half: bool = False,
     enable_vad: bool = True,
     enable_punc: bool = True,
@@ -912,14 +849,6 @@ def build_firered_system(
         raise ValueError(f"invalid CUDA device: {device}") from exc
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable in the FireRed environment")
-    if segment_batch_size <= 0:
-        raise ValueError("segment_batch_size must be positive")
-    if segment_frame_budget <= 0:
-        raise ValueError("segment_frame_budget must be positive")
-    if segment_memory_limit_mib <= 0:
-        raise ValueError("segment_memory_limit_mib must be positive")
-    if segment_memory_safety_mib < 0:
-        raise ValueError("segment_memory_safety_mib must not be negative")
     torch.cuda.set_device(device_index)
     install_bf16_forced_align_compat()
 
@@ -952,16 +881,13 @@ def build_firered_system(
             return_timestamp=True,
         ),
         punc_config=FireRedPuncConfig(use_gpu=True),
-        asr_batch_size=segment_batch_size,
-        punc_batch_size=segment_batch_size,
+        asr_batch_size=1,
+        punc_batch_size=PUNC_INTERNAL_BATCH_SIZE,
         enable_vad=enable_vad,
         enable_lid=False,
         enable_punc=enable_punc,
     )
     system = FireRedAsr2System(config)
-    system.config.segment_frame_budget = segment_frame_budget
-    system.config.segment_memory_limit_mib = segment_memory_limit_mib
-    system.config.segment_memory_safety_mib = segment_memory_safety_mib
     if system.vad is not None:
         system.vad = GuardedVad(system.vad)
     return system
@@ -971,28 +897,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-root", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--segment-batch-size", type=_positive_int, default=1)
-    parser.add_argument("--segment-frame-budget", type=_positive_int, default=8000)
-    parser.add_argument("--segment-memory-limit-mib", type=_positive_int, default=10_000)
-    parser.add_argument("--segment-memory-safety-mib", type=_nonnegative_int, default=512)
     parser.add_argument("--use-half", action="store_true")
     parser.add_argument("--disable-vad", action="store_true")
     parser.add_argument("--disable-punc", action="store_true")
     return parser
-
-
-def _positive_int(value: str) -> int:
-    result = int(value)
-    if result <= 0:
-        raise argparse.ArgumentTypeError("segment batch size must be positive")
-    return result
-
-
-def _nonnegative_int(value: str) -> int:
-    result = int(value)
-    if result < 0:
-        raise argparse.ArgumentTypeError("must not be negative")
-    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1009,10 +917,6 @@ def main(argv: list[str] | None = None) -> int:
         lambda: build_firered_system(
             args.model_root,
             args.device,
-            args.segment_batch_size,
-            args.segment_frame_budget,
-            args.segment_memory_limit_mib,
-            args.segment_memory_safety_mib,
             args.use_half,
             not args.disable_vad,
             not args.disable_punc,

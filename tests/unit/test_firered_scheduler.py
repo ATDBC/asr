@@ -90,12 +90,26 @@ def test_cost_model_observe_updates_from_reserved_increment():
     )
     estimate = model.estimate([(0.0, 1.0), (1.0, 2.0)])
     before = model.estimate([(0.0, 1.0), (1.0, 2.0)])
-    model.observe(estimate, actual_seconds=0.5, actual_incremental_reserved_mib=5)
+    model.observe(estimate, actual_seconds=0.5, actual_incremental_reserved_mib=100)
     after = model.estimate([(0.0, 1.0), (1.0, 2.0)])
 
     assert model.observations == 1
     assert after.predicted_seconds != before.predicted_seconds
     assert after.predicted_incremental_mib != before.predicted_incremental_mib
+
+
+def test_cost_model_does_not_reduce_memory_safety_from_reserved_lower_bound():
+    model = BatchCostModel()
+    estimate = model.estimate([(0.0, 1.0), (1.0, 2.0)])
+    before = model.memory_per_padded_frame_mib
+
+    model.observe(
+        estimate,
+        actual_seconds=estimate.predicted_seconds,
+        actual_incremental_reserved_mib=1,
+    )
+
+    assert model.memory_per_padded_frame_mib == before
 
 
 def test_default_cost_model_penalizes_longest_segment_for_time():

@@ -150,7 +150,7 @@ class BatchCostModel:
             )
             if predicted_variable_memory > 0:
                 ratio = max(
-                    0.1,
+                    1.0,
                     min(4.0, float(actual_memory) / predicted_variable_memory),
                 )
                 self.memory_per_padded_frame_mib = (

@@ -416,6 +416,28 @@ class ParallelFireRedWorkerClient:
             "cost_model": self.cost_model.summary(),
         }
 
+    def cleanup_cuda_cache(self) -> dict[str, object]:
+        """Concurrently trim unused allocator cache in both AED workers."""
+
+        started = perf_counter()
+        workers = (self.worker0, self.worker1)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(worker.cleanup_cuda_cache)
+                for worker in workers
+            ]
+            results = [future.result() for future in futures]
+        records: list[dict[str, object]] = []
+        for index, (worker, result) in enumerate(zip(workers, results)):
+            record = dict(result)
+            record["worker_index"] = index
+            record["pid"] = getattr(worker, "pid", None)
+            records.append(record)
+        return {
+            "seconds": perf_counter() - started,
+            "workers": records,
+        }
+
     def _transcribe_streaming(
         self,
         audio_path: Path,

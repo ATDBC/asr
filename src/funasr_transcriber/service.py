@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import queue
@@ -56,6 +57,9 @@ from .service_protocol import (
 from .schemas import AsrResult, SpeakerSegment
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def _open_owner(owner: Any) -> Any:
     start = getattr(owner, "start", None)
     if callable(start):
@@ -88,9 +92,11 @@ class HotModelHost:
         self.asr_owner: Any | None = None
         self.speaker_owner: Any | None = None
         self.inventories: dict[str, object] = {}
+        self._warmed = False
         self.warmup_metrics: dict[str, object] = {
             "performed": False,
-            "excluded_from_job_timing": True,
+            "excluded_from_job_timing": False,
+            "reason": "not_performed",
         }
 
     @property
@@ -120,17 +126,6 @@ class HotModelHost:
             status = getattr(asr_owner, "status", None)
             if callable(status):
                 self.inventories["firered"] = status()
-            warmup = getattr(asr_owner, "warmup", None)
-            if callable(warmup):
-                warmup_result = warmup()
-                if isinstance(warmup_result, dict):
-                    self.warmup_metrics = {
-                        "performed": True,
-                        "excluded_from_job_timing": bool(
-                            warmup_result.get("excluded", False)
-                        ),
-                        **warmup_result,
-                    }
             inventory = getattr(speaker_owner, "resource_inventory", None)
             if callable(inventory):
                 self.inventories["speaker"] = inventory()
@@ -142,14 +137,41 @@ class HotModelHost:
         self.speaker_owner = speaker_owner
         return self
 
+    def warmup(self) -> dict[str, object]:
+        if not self.started or self.asr_owner is None:
+            raise TranscriptionError("resident model owners are unavailable")
+        if self._warmed:
+            return {
+                "performed": False,
+                "excluded_from_job_timing": False,
+                "reason": "already_performed",
+            }
+        warmup = getattr(self.asr_owner, "warmup", None)
+        if not callable(warmup):
+            raise TranscriptionError("resident FireRed owner cannot warm up")
+        warmup_result = warmup()
+        if not isinstance(warmup_result, dict):
+            raise TranscriptionError(
+                "resident FireRed owner returned invalid warmup metrics"
+            )
+        self._warmed = True
+        self.warmup_metrics = {
+            **warmup_result,
+            "performed": True,
+            "excluded_from_job_timing": False,
+        }
+        return dict(self.warmup_metrics)
+
     def close(self) -> None:
         asr_owner, speaker_owner = self.asr_owner, self.speaker_owner
         self.asr_owner = None
         self.speaker_owner = None
         self.inventories = {}
+        self._warmed = False
         self.warmup_metrics = {
             "performed": False,
-            "excluded_from_job_timing": True,
+            "excluded_from_job_timing": False,
+            "reason": "not_performed",
         }
         try:
             _close_owner(asr_owner)
@@ -791,6 +813,7 @@ class ServiceJobRunner:
         job_dir.mkdir(parents=True, exist_ok=False)
         sampler: Any | None = None
         profile_finished = False
+        cleanup_attempted = False
         previous_budget_fraction = 1.0
         diagnostics_level = self._diagnostics_level(request)
         self._capture_overlap_pid = diagnostics_level in {"resources", "deep"}
@@ -799,6 +822,35 @@ class ServiceJobRunner:
         measurement_started = perf_counter()
         sampler = self._start_resource_sampler(request, diagnostics_level)
         try:
+            asr_owner = self.hot_host.asr_owner
+            speaker_owner = self.hot_host.speaker_owner
+            if asr_owner is None or speaker_owner is None:
+                raise TranscriptionError("resident model owners are unavailable")
+            pipeline = TranscriptionPipeline(self.config)
+            diagnostics = pipeline.new_diagnostics()
+            warmup = getattr(self.hot_host, "warmup", None)
+            warmup_started = perf_counter()
+            if callable(warmup):
+                warmup_metrics = warmup()
+            else:
+                warmup_metrics = dict(
+                    getattr(self.hot_host, "warmup_metrics", {})
+                )
+            if not isinstance(warmup_metrics, dict):
+                raise TranscriptionError(
+                    "resident model warmup returned invalid metrics"
+                )
+            if bool(warmup_metrics.get("performed")):
+                diagnostics.stage_seconds["warmup"] = (
+                    perf_counter() - warmup_started
+                )
+            diagnostics.runtime["warmup"] = dict(warmup_metrics)
+            diagnostics.runtime["timing_contract"] = {
+                "excluded": ["initial_model_load"],
+                "first_job_warmup_included": True,
+                "aed_cache_cleanup_included": True,
+            }
+            diagnostics.runtime["diagnostics_level"] = diagnostics_level
             input_info = self._probe(
                 input_audio,
                 self.config.general.max_audio_seconds,
@@ -809,10 +861,6 @@ class ServiceJobRunner:
                 normalized,
                 self.config.general.max_audio_seconds,
             )
-            asr_owner = self.hot_host.asr_owner
-            speaker_owner = self.hot_host.speaker_owner
-            if asr_owner is None or speaker_owner is None:
-                raise TranscriptionError("resident model owners are unavailable")
             previous_budget_fraction = getattr(
                 asr_owner, "aed_budget_fraction", 1.0
             )
@@ -820,12 +868,6 @@ class ServiceJobRunner:
                 asr_owner.aed_budget_fraction = float(
                     request.aed_budget_fraction
                 )
-            pipeline = TranscriptionPipeline(self.config)
-            diagnostics = pipeline.new_diagnostics()
-            diagnostics.runtime["warmup"] = dict(
-                getattr(self.hot_host, "warmup_metrics", {})
-            )
-            diagnostics.runtime["diagnostics_level"] = diagnostics_level
             with diagnostics.stage("normal_model_branches"):
                 branches = run_normal_branches(
                     normalized,
@@ -894,9 +936,22 @@ class ServiceJobRunner:
                 diagnostics,
                 overlap_enhancement=enhancement,
             )
-            diagnostics.stage_seconds["end_to_end_after_warmup"] = (
-                perf_counter() - measurement_started
-            )
+            cleanup_owner = self.hot_host.asr_owner
+            cleanup = getattr(cleanup_owner, "cleanup_cuda_cache", None)
+            if not callable(cleanup):
+                raise TranscriptionError(
+                    "resident FireRed owner cannot clean CUDA cache"
+                )
+            cleanup_attempted = True
+            cleanup_started = perf_counter()
+            cleanup_metrics = cleanup()
+            cleanup_seconds = perf_counter() - cleanup_started
+            if not isinstance(cleanup_metrics, dict):
+                raise TranscriptionError(
+                    "resident FireRed owner returned invalid cache cleanup metrics"
+                )
+            diagnostics.stage_seconds["cache_cleanup"] = cleanup_seconds
+            diagnostics.runtime["cache_cleanup"] = dict(cleanup_metrics)
             if sampler is not None:
                 self._finish_resource_profile(
                     sampler,
@@ -909,6 +964,13 @@ class ServiceJobRunner:
                     include_memory_trace=diagnostics_level == "deep",
                 )
                 profile_finished = True
+            end_to_end_seconds = perf_counter() - measurement_started
+            diagnostics.stage_seconds["end_to_end_after_load"] = (
+                end_to_end_seconds
+            )
+            diagnostics.stage_seconds["end_to_end_after_warmup"] = (
+                end_to_end_seconds
+            )
             if diagnostics_level == "off":
                 diagnostics.stage_seconds.clear()
                 diagnostics.scheduler.clear()
@@ -935,6 +997,16 @@ class ServiceJobRunner:
                 asr_owner, "aed_budget_fraction"
             ):
                 asr_owner.aed_budget_fraction = previous_budget_fraction
+            if not cleanup_attempted:
+                cleanup_owner = getattr(self.hot_host, "asr_owner", None)
+                cleanup = getattr(cleanup_owner, "cleanup_cuda_cache", None)
+                if callable(cleanup):
+                    try:
+                        cleanup()
+                    except Exception:
+                        LOGGER.exception(
+                            "AED CUDA cache cleanup failed while preserving job error"
+                        )
             if sampler is not None and not profile_finished:
                 sampler.stop()
             self._active_overlap_pid = None

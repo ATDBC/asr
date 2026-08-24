@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 from io import StringIO
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -106,6 +108,88 @@ def test_warmup_process_exercises_representative_aed_shapes(tmp_path: Path, monk
     assert [len(call[0]) for call in asr.calls] == [1, 4, 1, 1]
     assert [call[1][0] for call in asr.calls] == [16000, 16000, 160000, 480000]
     assert result["shapes"] == ["short_single", "short_batch", "medium", "long"]
+
+
+def test_cleanup_cuda_cache_collects_then_synchronizes_and_empties(monkeypatch):
+    events: list[str] = []
+    allocated = iter((2_246, 2_246))
+    reserved = iter((7_104, 2_468))
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            empty_cache=lambda: events.append("empty_cache"),
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(gc, "collect", lambda: events.append("gc") or 17)
+    monkeypatch.setattr(
+        worker_module,
+        "_synchronize_cuda",
+        lambda: events.append("synchronize"),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_cuda_memory_allocated_mib",
+        lambda: next(allocated),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_cuda_reserved_memory_mib",
+        lambda: next(reserved),
+    )
+
+    result = getattr(worker_module, "_cleanup_cuda_cache")()
+
+    assert events == ["gc", "synchronize", "empty_cache", "synchronize"]
+    assert result == {
+        "gc_collected": 17,
+        "allocated_before_mib": 2_246,
+        "reserved_before_mib": 7_104,
+        "allocated_after_mib": 2_246,
+        "reserved_after_mib": 2_468,
+    }
+
+
+def test_worker_serves_cleanup_cuda_cache_without_audio(monkeypatch):
+    monkeypatch.setattr(
+        worker_module,
+        "_cleanup_cuda_cache",
+        lambda: {
+            "gc_collected": 3,
+            "allocated_before_mib": 2_246,
+            "reserved_before_mib": 6_944,
+            "allocated_after_mib": 2_246,
+            "reserved_after_mib": 2_468,
+        },
+        raising=False,
+    )
+    protocol_output = StringIO()
+    times = iter((0.0, 1.0, 10.0, 10.25))
+
+    serve(
+        StringIO(
+            '{"id":"cleanup","action":"cleanup_cuda_cache"}\n'
+            '{"id":"stop","action":"shutdown"}\n'
+        ),
+        protocol_output,
+        system_factory=lambda: SimpleNamespace(),
+        clock=lambda: next(times),
+    )
+
+    responses = [json.loads(line) for line in protocol_output.getvalue().splitlines()]
+    assert responses[0] == {
+        "id": "cleanup",
+        "ok": True,
+        "cache_cleanup": {
+            "gc_collected": 3,
+            "allocated_before_mib": 2_246,
+            "reserved_before_mib": 6_944,
+            "allocated_after_mib": 2_246,
+            "reserved_after_mib": 2_468,
+            "seconds": 0.25,
+        },
+    }
+    assert responses[1] == {"id": "stop", "ok": True, "shutdown": True}
 
 
 def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, monkeypatch):

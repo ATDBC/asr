@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from funasr_transcriber.firered_scheduler import BatchCostModel
@@ -222,6 +224,48 @@ class _FakePuncOwner(_FakeWorker):
             }
             for item in records
         ]
+
+
+def test_parallel_owner_cleanup_runs_two_aed_workers_concurrently_not_punc():
+    barrier = threading.Barrier(2)
+
+    class CleanupWorker(_FakeWorker):
+        def cleanup_cuda_cache(self):
+            self.calls.append(("cleanup", None))
+            barrier.wait(timeout=1)
+            return {
+                "seconds": 0.25,
+                "reserved_before_mib": 7_104,
+                "reserved_after_mib": 2_468,
+            }
+
+    first = CleanupWorker(pid=101)
+    second = CleanupWorker(pid=102)
+    punc = _FakePuncOwner(pid=103)
+    owner = ParallelFireRedWorkerClient(first, second, punc_owner=punc)
+
+    result = owner.cleanup_cuda_cache()
+
+    assert [call[0] for call in first.calls] == ["cleanup"]
+    assert [call[0] for call in second.calls] == ["cleanup"]
+    assert punc.calls == []
+    assert result["seconds"] >= 0
+    assert result["workers"] == [
+        {
+            "worker_index": 0,
+            "pid": 101,
+            "seconds": 0.25,
+            "reserved_before_mib": 7_104,
+            "reserved_after_mib": 2_468,
+        },
+        {
+            "worker_index": 1,
+            "pid": 102,
+            "seconds": 0.25,
+            "reserved_before_mib": 7_104,
+            "reserved_after_mib": 2_468,
+        },
+    ]
 
 
 def test_parallel_owner_uses_global_vad_two_fixed_plans_and_one_punc(tmp_path):

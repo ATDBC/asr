@@ -30,12 +30,16 @@ funasr-transcribe recording.wav
               │
        token 按所在段直接归属说话人、轮次构建、原子导出 TXT / JSON / diagnostics
               │
+       两个 AED worker 并行执行 GC / synchronize / empty_cache / synchronize
+              │
        所有热模型继续常驻，供 FIFO 中的下一个作业复用
 ```
 
 服务启动会先只读检查 GPU 0 的并行预算，然后并发加载两个 FireRed AED、一个独立 Punc owner 和 3D-Speaker；
-worker-0 只承载 FireRedVAD，worker-1 不加载 VAD/Punc，Punc owner 只加载 Punc。三个 FireRed owner 的首个 `status`
-请求完成后，服务用短音频预热 AED/Punc；预热不计入后续作业耗时。FireRed 仍在独立的
+worker-0 额外承载 FireRedVAD，worker-1 不加载 VAD/Punc，Punc owner 只加载 Punc。三个 FireRed owner 的首个 `status`
+请求完成后服务即可 ready；第一个排队作业在计时开始后用代表性形状预热 AED/Punc，后续作业不重复预热。
+每个作业结束前并行清理两个 AED worker 的未使用 CUDA allocator cache，Punc owner 继续常驻且不参与这项清理。
+只有首次模型加载排除在作业计时之外，首任务预热和逐任务 cache cleanup 都计入端到端。FireRed 仍在独立的
 `.venv-asr` 子进程；主服务进程不导入 FireRed 运行时。服务停止时会先进入 draining，
 拒绝新的提交、完成已经接受的作业，再关闭热模型；因此 `funasr-transcribe service stop`
 是释放本项目常驻显存的唯一正常操作。
@@ -71,7 +75,7 @@ FireRedVAD 在功能上归属于说话人分离阶段：它只负责把超过 10
 `.venv-asr` 子进程承载；这属于进程部署方式，不改变它在流程和指标中的说话人分离角色。
 
 服务通过严格 JSON Lines 调用 `.venv-asr` 中的 FireRed worker。每个请求都有唯一 ID，
-支持 `warmup`、`refine_vad`、固定 `aed_plan`、`punctuate`、`transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
+支持 `warmup`、`cleanup_cuda_cache`、`refine_vad`、固定 `aed_plan`、`punctuate`、`transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
 超时或 worker 提前退出都会成为转录错误，不会切换旧 ASR。
 
 生产流程先由 worker-0 对 `vad_segments_ms`（diarization 段落原样发送）执行一次全局 VAD；
@@ -117,6 +121,8 @@ token、VAD 与音频时长的一致性。
 进程 `nvidia-smi` 峰值为 6,882 MiB，PyTorch AED 实际分配峰值为 5,913 MiB，未发生
 OOM。可复核记录位于
 `outputs/measurements/20260821T-diarization-firered-vad-10s/formal-flow-batch8-summary.json`。
+这是旧计时口径的历史记录；当前口径只排除首次模型加载，并计入首任务预热与逐任务 cache cleanup，
+不能直接与该 270.397 秒数值比较。
 
 ## overlap 的受控卸载路径
 
@@ -147,7 +153,8 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
 
 启用 `resources` 后，作业的 `diagnostics.json` 额外写入：采样间隔和次数、service、speaker、
 两个 AED、Punc owner 和临时 overlap worker 的峰值显存、服务 RSS 峰值、GPU 总占用峰值、初始
-其他项目显存基线、净服务峰值，以及预热后 ASR 和 diarization 的开始/结束单调时间与耗时。`deep`
+其他项目显存基线、净服务峰值，以及 ASR 和 diarization 的开始/结束单调时间与耗时。首任务采样覆盖
+代表性预热，每个任务采样覆盖 cache cleanup。`deep`
 级别还会在 `diagnostics/` 写出完整 `scheduler.json` 和 `batch-events.jsonl`，并在
 `resource_profile.aed_memory_trace` 保存 AED 阶段的显存时序、峰值/平均利用率、达到峰值 95% 的
 样本比例，以及各 owner 的峰值/平均显存；普通摘要不会包含完整 batch 计划或时序样本。采样器

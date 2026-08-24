@@ -529,6 +529,15 @@ class FireRedWorkerClient:
             "resident_reserved_mib": response.get("resident_reserved_mib"),
         }
 
+    def cleanup_cuda_cache(self) -> dict[str, object]:
+        response = self._request("cleanup_cuda_cache")
+        cleanup = response.get("cache_cleanup")
+        if not isinstance(cleanup, dict):
+            raise TranscriptionError(
+                "FireRed worker returned invalid CUDA cache cleanup metrics"
+            )
+        return dict(cleanup)
+
     def close(self) -> None:
         process = self._process
         if process is None:

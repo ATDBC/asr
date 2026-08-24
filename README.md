@@ -127,9 +127,13 @@ worker-0 的单个 Punc 模型。`aed_worker_count = 1` 可回退到单 worker�
 并汇总到 `diagnostics.json`，因此可以直接验证“按音频段长度预测”的准确性。`100 MiB` 不作为默认余量；
 CUDA allocator 和其他用户显存变化需要更大的安全空间，当前默认 `1536 MiB`。
 
-服务启动完成模型加载后会用短音频预热 AED/Punc；预热不计入作业耗时。启用
-`--profile-resources` 时，`diagnostics.json` 的 `stage_seconds` 会记录预热后的 diarization、
-VAD、AED 计划/推理、Punc、对齐和端到端耗时；`resource_profile` 还记录 GPU 总占用峰值、
+服务启动只负责加载模型；服务生命周期内的第一个作业会执行代表性 AED/Punc 预热，并把预热计入该
+作业耗时。每个作业完成结果组装后会并行执行两个 AED worker 的
+`gc.collect() + cuda.synchronize() + empty_cache() + cuda.synchronize()`，确认完成后才结束
+端到端计时；独立 Punc owner 不参与这项逐任务清理。`diagnostics.json` 的 `stage_seconds` 记录
+`warmup`（仅首任务）、`cache_cleanup`、`end_to_end_after_load` 以及 diarization、
+VAD、AED 计划/推理、Punc、对齐；`end_to_end_after_warmup` 暂时作为同值兼容别名。启用
+`--profile-resources` 时，`resource_profile` 还记录 GPU 总占用峰值、
 本服务登记 PID 峰值，以及减去作业开始时其他项目基线后的 `net_service_peak_mib`。
 
 生产默认 `use_half = true`。FireRed 上游在 GPU 支持 BF16 时将该选项解析为
@@ -278,8 +282,9 @@ transient budget，不修改安全余量，也不管理其他项目进程：
 ```
 
 矩阵记录每次的 AED/端到端耗时、输出 fingerprint、显存峰值、预算利用率、安全余量和失败原因。
-安全余量不足、预算利用率超过 100%、OOM 或协议失败的候选不能作为生产默认值。由于 CUDA
-allocator 可能跨作业增长，正式比较应在新鲜常驻服务和代表性预热状态下进行。
+安全余量不足、预算利用率超过 100%、OOM 或协议失败的候选不能作为生产默认值。生产服务会在每项
+作业末尾清理两个 AED allocator 的未使用 cache；正式比较仍须使用同一常驻服务并保留首任务预热
+与后续任务不预热的真实差异。
 
 ## 退出码
 

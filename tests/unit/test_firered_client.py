@@ -144,6 +144,53 @@ for line in sys.stdin:
     assert result["shapes"] == ["short_single", "short_batch"]
 
 
+def test_client_cleanup_cuda_cache_returns_worker_metrics(tmp_path: Path):
+    script = tmp_path / "cleanup_worker.py"
+    script.write_text(
+        """
+import json
+import sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['action'] == 'cleanup_cuda_cache':
+        print(json.dumps({
+            'id': request['id'], 'ok': True,
+            'cache_cleanup': {
+                'seconds': 0.25,
+                'gc_collected': 3,
+                'allocated_before_mib': 2246,
+                'reserved_before_mib': 6944,
+                'allocated_after_mib': 2246,
+                'reserved_after_mib': 2468,
+            },
+        }), flush=True)
+    elif request['action'] == 'shutdown':
+        print(json.dumps({'id': request['id'], 'ok': True, 'shutdown': True}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    client = FireRedWorkerClient(
+        worker_python=Path(sys.executable),
+        model_root=tmp_path / "models",
+        device="cuda:0",
+        timeout_seconds=1.0,
+        stderr_log_path=tmp_path / "cleanup.log",
+        worker_script=script,
+    )
+
+    with client:
+        result = client.cleanup_cuda_cache()
+
+    assert result == {
+        "seconds": 0.25,
+        "gc_collected": 3,
+        "allocated_before_mib": 2_246,
+        "reserved_before_mib": 6_944,
+        "allocated_after_mib": 2_246,
+        "reserved_after_mib": 2_468,
+    }
+
+
 def test_client_verify_uses_same_stable_result(tmp_path: Path):
     with _client(tmp_path) as client:
         result = client.verify(_audio(tmp_path, "one"))

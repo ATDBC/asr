@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gc
 import json
 import logging
 from pathlib import Path
@@ -116,6 +117,27 @@ def _cuda_free_memory_mib() -> int | None:
     except ImportError:
         pass
     return None
+
+
+def _cleanup_cuda_cache() -> dict[str, object]:
+    """Release this worker's unused PyTorch CUDA allocator cache."""
+
+    import torch
+
+    allocated_before = _cuda_memory_allocated_mib()
+    reserved_before = _cuda_reserved_memory_mib()
+    collected = gc.collect()
+    _synchronize_cuda()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    _synchronize_cuda()
+    return {
+        "gc_collected": int(collected),
+        "allocated_before_mib": allocated_before,
+        "reserved_before_mib": reserved_before,
+        "allocated_after_mib": _cuda_memory_allocated_mib(),
+        "reserved_after_mib": _cuda_reserved_memory_mib(),
+    }
 
 
 def _scheduled_process(
@@ -721,6 +743,19 @@ def serve(
                     {"id": identifier, "ok": True, "shutdown": True},
                 )
                 return
+            if action == "cleanup_cuda_cache":
+                cleanup_started = clock()
+                cleanup = _cleanup_cuda_cache()
+                cleanup["seconds"] = clock() - cleanup_started
+                _write_response(
+                    protocol_output,
+                    {
+                        "id": identifier,
+                        "ok": True,
+                        "cache_cleanup": cleanup,
+                    },
+                )
+                continue
             if action == "warmup":
                 path = _validate_audio(request.get("audio_path"), audio_info)
                 warmup_started = clock()

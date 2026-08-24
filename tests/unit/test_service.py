@@ -551,9 +551,10 @@ def test_service_first_job_times_warmup_and_every_job_times_cleanup(
         cleanup = payload["runtime"]["cache_cleanup"]
         assert cleanup["workers"][0]["reserved_after_mib"] == 2_468
         assert payload["stage_seconds"]["cache_cleanup"] >= 0
+        assert payload["stage_seconds"]["output"] >= 0
         assert payload["stage_seconds"]["end_to_end_after_load"] >= payload[
             "stage_seconds"
-        ]["cache_cleanup"]
+        ]["cache_cleanup"] + payload["stage_seconds"]["output"]
         assert payload["stage_seconds"]["end_to_end_after_warmup"] == payload[
             "stage_seconds"
         ]["end_to_end_after_load"]

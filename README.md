@@ -131,8 +131,9 @@ CUDA allocator 和其他用户显存变化需要更大的安全空间，当前�
 作业耗时。每个作业完成结果组装后会并行执行两个 AED worker 的
 `gc.collect() + cuda.synchronize() + empty_cache() + cuda.synchronize()`，确认完成后才结束
 端到端计时；独立 Punc owner 不参与这项逐任务清理。`diagnostics.json` 的 `stage_seconds` 记录
-`warmup`（仅首任务）、`cache_cleanup`、`end_to_end_after_load` 以及 diarization、
-VAD、AED 计划/推理、Punc、对齐；`end_to_end_after_warmup` 暂时作为同值兼容别名。启用
+`warmup`（仅首任务）、`cache_cleanup`、`output`、`end_to_end_after_load` 以及 diarization、
+VAD、AED 计划/推理、Punc、对齐；端到端包含正式输出的持久化与目录发布，
+`end_to_end_after_warmup` 暂时作为同值兼容别名。启用
 `--profile-resources` 时，`resource_profile` 还记录 GPU 总占用峰值、
 本服务登记 PID 峰值，以及减去作业开始时其他项目基线后的 `net_service_peak_mib`。
 

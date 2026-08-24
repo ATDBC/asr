@@ -849,6 +849,7 @@ class ServiceJobRunner:
                 "excluded": ["initial_model_load"],
                 "first_job_warmup_included": True,
                 "aed_cache_cleanup_included": True,
+                "output_publish_included": True,
             }
             diagnostics.runtime["diagnostics_level"] = diagnostics_level
             input_info = self._probe(
@@ -964,24 +965,26 @@ class ServiceJobRunner:
                     include_memory_trace=diagnostics_level == "deep",
                 )
                 profile_finished = True
-            end_to_end_seconds = perf_counter() - measurement_started
-            diagnostics.stage_seconds["end_to_end_after_load"] = (
-                end_to_end_seconds
-            )
-            diagnostics.stage_seconds["end_to_end_after_warmup"] = (
-                end_to_end_seconds
-            )
             if diagnostics_level == "off":
                 diagnostics.stage_seconds.clear()
                 diagnostics.scheduler.clear()
                 diagnostics.asr.clear()
                 diagnostics.gpu_stages.clear()
+            output_started = perf_counter()
             export_transcript(
                 result.transcript,
                 staging_dir,
                 overwrite=False,
                 input_info=input_info,
             )
+            if diagnostics_level != "off":
+                preliminary_seconds = perf_counter() - measurement_started
+                diagnostics.stage_seconds["end_to_end_after_load"] = (
+                    preliminary_seconds
+                )
+                diagnostics.stage_seconds["end_to_end_after_warmup"] = (
+                    preliminary_seconds
+                )
             export_diagnostics(result.diagnostics, staging_dir, overwrite=False)
             try:
                 published = publish_output_directory(
@@ -991,6 +994,23 @@ class ServiceJobRunner:
                 )
             except OSError as exc:
                 raise OutputError(f"unable to publish output: {exc}") from exc
+            if diagnostics_level != "off":
+                output_ended = perf_counter()
+                diagnostics.stage_seconds["output"] = (
+                    output_ended - output_started
+                )
+                end_to_end_seconds = output_ended - measurement_started
+                diagnostics.stage_seconds["end_to_end_after_load"] = (
+                    end_to_end_seconds
+                )
+                diagnostics.stage_seconds["end_to_end_after_warmup"] = (
+                    end_to_end_seconds
+                )
+                export_diagnostics(
+                    result.diagnostics,
+                    published,
+                    overwrite=True,
+                )
             return {"output_dir": str(published)}
         finally:
             if "asr_owner" in locals() and asr_owner is not None and hasattr(

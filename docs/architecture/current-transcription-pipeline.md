@@ -39,7 +39,8 @@ funasr-transcribe recording.wav
 worker-0 额外承载 FireRedVAD，worker-1 不加载 VAD/Punc，Punc owner 只加载 Punc。三个 FireRed owner 的首个 `status`
 请求完成后服务即可 ready；第一个排队作业在计时开始后用代表性形状预热 AED/Punc，后续作业不重复预热。
 每个作业结束前并行清理两个 AED worker 的未使用 CUDA allocator cache，Punc owner 继续常驻且不参与这项清理。
-只有首次模型加载排除在作业计时之外，首任务预热和逐任务 cache cleanup 都计入端到端。FireRed 仍在独立的
+只有首次模型加载排除在作业计时之外，首任务预热、逐任务 cache cleanup、正式输出持久化和目录发布
+都计入端到端。FireRed 仍在独立的
 `.venv-asr` 子进程；主服务进程不导入 FireRed 运行时。服务停止时会先进入 draining，
 拒绝新的提交、完成已经接受的作业，再关闭热模型；因此 `funasr-transcribe service stop`
 是释放本项目常驻显存的唯一正常操作。

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
+
+from funasr_transcriber.firered_scheduler import BatchCostModel
 
 from funasr_transcriber.firered_parallel import (
     GpuMemorySnapshot,
@@ -57,6 +61,7 @@ def test_partition_assigns_complete_batches_to_the_least_loaded_worker():
         [(0.0, 10.0), (10.0, 9.0 + 10.0), (20.0, 25.0), (25.0, 27.0)],
         shared_budget_mib=1000,
         worker_resident_mib=(3000, 3000),
+        cost_model=BatchCostModel(seconds_per_total_frame=0, seconds_per_max_frame=0),
     )
 
     workers = partition_batches(plan, worker_count=2)
@@ -157,12 +162,15 @@ class _FakeWorker:
         return {
             "aed_results": records,
             "duration_ms": 80000,
+            "resident_allocated_mib": 2000,
+            "resident_reserved_mib": 2200,
             "batch_metrics": [
                 {
                     "batch_index": index,
                     "actual_seconds": 0.5,
                     "peak_allocated_mib": 3000,
                     "peak_reserved_mib": 3200,
+                    "resident_reserved_mib": 2200,
                 }
                 for index, _ in enumerate(plan)
             ],
@@ -218,10 +226,53 @@ class _FakePuncOwner(_FakeWorker):
         ]
 
 
+def test_parallel_owner_cleanup_runs_two_aed_workers_concurrently_not_punc():
+    barrier = threading.Barrier(2)
+
+    class CleanupWorker(_FakeWorker):
+        def cleanup_cuda_cache(self):
+            self.calls.append(("cleanup", None))
+            barrier.wait(timeout=1)
+            return {
+                "seconds": 0.25,
+                "reserved_before_mib": 7_104,
+                "reserved_after_mib": 2_468,
+            }
+
+    first = CleanupWorker(pid=101)
+    second = CleanupWorker(pid=102)
+    punc = _FakePuncOwner(pid=103)
+    owner = ParallelFireRedWorkerClient(first, second, punc_owner=punc)
+
+    result = owner.cleanup_cuda_cache()
+
+    assert [call[0] for call in first.calls] == ["cleanup"]
+    assert [call[0] for call in second.calls] == ["cleanup"]
+    assert punc.calls == []
+    assert result["seconds"] >= 0
+    assert result["workers"] == [
+        {
+            "worker_index": 0,
+            "pid": 101,
+            "seconds": 0.25,
+            "reserved_before_mib": 7_104,
+            "reserved_after_mib": 2_468,
+        },
+        {
+            "worker_index": 1,
+            "pid": 102,
+            "seconds": 0.25,
+            "reserved_before_mib": 7_104,
+            "reserved_after_mib": 2_468,
+        },
+    ]
+
+
 def test_parallel_owner_uses_global_vad_two_fixed_plans_and_one_punc(tmp_path):
     first = _FakeWorker()
     second = _FakeWorker()
     owner = ParallelFireRedWorkerClient(first, second)
+    model_before = owner.cost_model.summary()
     owner.start()
     result = owner.transcribe(
         tmp_path / "audio.wav",
@@ -240,6 +291,8 @@ def test_parallel_owner_uses_global_vad_two_fixed_plans_and_one_punc(tmp_path):
         "aed_ended_at_monotonic"
     ]
     assert owner.last_response["metrics"]["parallel"]["punc_queue_wall_seconds"] >= 0
+    assert owner.last_response["metrics"]["parallel"]["cost_model_observations"] == 0
+    assert owner.cost_model.summary() == model_before
     assert [call[0] for call in first.calls].count("punc") == 1
     assert [call[0] for call in second.calls].count("punc") == 0
     assert sorted(
@@ -268,6 +321,7 @@ def test_parallel_owner_streams_completed_aed_batches_to_single_punc(tmp_path):
         punc_owner=punc,
         gpu_memory_provider=lambda pids: next(snapshots),
     )
+    model_before = owner.cost_model.summary()
 
     result = owner.transcribe(
         tmp_path / "audio.wav",
@@ -279,6 +333,10 @@ def test_parallel_owner_streams_completed_aed_batches_to_single_punc(tmp_path):
     parallel = owner.last_response["metrics"]["parallel"]
     assert parallel["punc_batches"] >= 1
     assert parallel["punc_max_queue_depth"] >= 0
+    records = parallel["prediction_accuracy"]["records"]
+    assert records[0]["actual_reserved_incremental_mib"] == 1000
+    assert parallel["cost_model_observations"] == 0
+    assert owner.cost_model.summary() == model_before
 
 
 def test_parallel_owner_uses_post_warmup_budget_and_serial_fallback(tmp_path):
@@ -296,6 +354,7 @@ def test_parallel_owner_uses_post_warmup_budget_and_serial_fallback(tmp_path):
         gpu_safety_margin_mib=1_536,
         gpu_memory_provider=lambda pids: next(snapshots),
     )
+    owner.aed_budget_fraction = 1.0
 
     owner.transcribe(
         tmp_path / "audio.wav",

@@ -30,12 +30,17 @@ funasr-transcribe recording.wav
               │
        token 按所在段直接归属说话人、轮次构建、原子导出 TXT / JSON / diagnostics
               │
+       两个 AED worker 并行执行 GC / synchronize / empty_cache / synchronize
+              │
        所有热模型继续常驻，供 FIFO 中的下一个作业复用
 ```
 
 服务启动会先只读检查 GPU 0 的并行预算，然后并发加载两个 FireRed AED、一个独立 Punc owner 和 3D-Speaker；
-worker-0 只承载 FireRedVAD，worker-1 不加载 VAD/Punc，Punc owner 只加载 Punc。三个 FireRed owner 的首个 `status`
-请求完成后，服务用短音频预热 AED/Punc；预热不计入后续作业耗时。FireRed 仍在独立的
+worker-0 额外承载 FireRedVAD，worker-1 不加载 VAD/Punc，Punc owner 只加载 Punc。三个 FireRed owner 的首个 `status`
+请求完成后服务即可 ready；第一个排队作业在计时开始后用代表性形状预热 AED/Punc，后续作业不重复预热。
+每个作业结束前并行清理两个 AED worker 的未使用 CUDA allocator cache，Punc owner 继续常驻且不参与这项清理。
+只有首次模型加载排除在作业计时之外，首任务预热、逐任务 cache cleanup、正式输出持久化和目录发布
+都计入端到端。FireRed 仍在独立的
 `.venv-asr` 子进程；主服务进程不导入 FireRed 运行时。服务停止时会先进入 draining，
 拒绝新的提交、完成已经接受的作业，再关闭热模型；因此 `funasr-transcribe service stop`
 是释放本项目常驻显存的唯一正常操作。
@@ -71,7 +76,7 @@ FireRedVAD 在功能上归属于说话人分离阶段：它只负责把超过 10
 `.venv-asr` 子进程承载；这属于进程部署方式，不改变它在流程和指标中的说话人分离角色。
 
 服务通过严格 JSON Lines 调用 `.venv-asr` 中的 FireRed worker。每个请求都有唯一 ID，
-支持 `warmup`、`refine_vad`、固定 `aed_plan`、`punctuate`、`transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
+支持 `warmup`、`cleanup_cuda_cache`、`refine_vad`、固定 `aed_plan`、`punctuate`、`transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
 超时或 worker 提前退出都会成为转录错误，不会切换旧 ASR。
 
 生产流程先由 worker-0 对 `vad_segments_ms`（diarization 段落原样发送）执行一次全局 VAD；
@@ -87,11 +92,11 @@ FireRedASR2-AED 和 FireRedVAD；worker-1 只加载 FireRedASR2-AED；独立 Pun
 FireRedPunc。语言识别模型不加载。主进程按时长排序后用 memory-first 装箱器根据预热后的实际
 worker 常驻显存和共享预算决定每个 batch 的具体片段；任一 AED batch 完成后立即进入有界 Punc
 队列，Punc 按 token 预算组成微批，最后按原始时间索引恢复，因此响应顺序和 speaker 归属不变。
-在第一个 AED batch 开始前，两个 AED worker 和 Punc owner 预热完成、说话人分离/VAD 结束；主进程按时长排序并基于初始成本模型一次性生成完整批次计划。
-计划预算来自预热后 GPU 0 空闲显存减去 `[asr].gpu_safety_margin_mib=1536`，使用每个 worker 的实际常驻基线和预计瞬时增量显存。AED 开始前再次采样：满足两路预计峰值则并发，
+在第一个 AED batch 开始前，两个 AED worker 和 Punc owner 预热完成、说话人分离/VAD 结束；主进程按时长排序并基于固定成本模型一次性生成完整批次计划。
+普通生产请求使用预热后 GPU 0 空闲显存减去 `[asr].gpu_safety_margin_mib=1536` 后的 90% 作为计划预算，并使用每个 worker 的实际常驻基线和预计瞬时增量显存。AED 开始前再次采样：满足两路预计峰值则并发，
 只能容纳一路则按相同固定计划串行，连单个批次都放不下则提前失败；这些门控不会重排或重分批。
 两个 AED worker 后续 batch 严格按各自固定计划执行，互相没有 batch 屏障；每个完成事件立即进入有界 Punc 队列。
-batch 完成后的实际耗时和 PyTorch 峰值只用于更新诊断成本模型，不会重新排序或改变后续批次。该读取只调用 CUDA 只读接口，
+batch 完成后的实际耗时和 PyTorch 峰值只写入预测误差诊断，不在线更新成本模型，也不会影响当前或后续作业计划。该读取只调用 CUDA 只读接口，
 不枚举、暂停或操作其他项目进程。
 基础级别保留完整计划的摘要、两路分配和预热基线；逐批时间/增量显存误差只有 `deep` 级别才写入
 `diagnostics/scheduler.json` 和 `diagnostics/batch-events.jsonl`，普通 `diagnostics.json` 不嵌入完整计划。
@@ -117,6 +122,8 @@ token、VAD 与音频时长的一致性。
 进程 `nvidia-smi` 峰值为 6,882 MiB，PyTorch AED 实际分配峰值为 5,913 MiB，未发生
 OOM。可复核记录位于
 `outputs/measurements/20260821T-diarization-firered-vad-10s/formal-flow-batch8-summary.json`。
+这是旧计时口径的历史记录；当前口径只排除首次模型加载，并计入首任务预热与逐任务 cache cleanup，
+不能直接与该 270.397 秒数值比较。
 
 ## overlap 的受控卸载路径
 
@@ -147,7 +154,8 @@ pyannote/ClearVoice 的 overlap 处理显存远高于常驻 Speaker，不能与�
 
 启用 `resources` 后，作业的 `diagnostics.json` 额外写入：采样间隔和次数、service、speaker、
 两个 AED、Punc owner 和临时 overlap worker 的峰值显存、服务 RSS 峰值、GPU 总占用峰值、初始
-其他项目显存基线、净服务峰值，以及预热后 ASR 和 diarization 的开始/结束单调时间与耗时。`deep`
+其他项目显存基线、净服务峰值，以及 ASR 和 diarization 的开始/结束单调时间与耗时。首任务采样覆盖
+代表性预热，每个任务采样覆盖 cache cleanup。`deep`
 级别还会在 `diagnostics/` 写出完整 `scheduler.json` 和 `batch-events.jsonl`，并在
 `resource_profile.aed_memory_trace` 保存 AED 阶段的显存时序、峰值/平均利用率、达到峰值 95% 的
 样本比例，以及各 owner 的峰值/平均显存；普通摘要不会包含完整 batch 计划或时序样本。采样器

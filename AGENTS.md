@@ -16,11 +16,14 @@
   再与 speaker 区间求交，最后进入 AED/Punc。
 - AED 使用 memory-first 调度：预热后的 GPU 空闲显存减去安全余量，决定每个 batch 的具体片段；
   生产 batch 数量不是固定配置。完整计划必须在第一个 AED 请求前确定。
+- 普通生产请求默认使用可用瞬时预算的 90%；请求级比例只用于受控基准。成本模型在作业开始前固定，
+  已完成 batch 的实际耗时和显存只写入诊断，不在线更新模型或后续作业计划。
 - 生产默认 `use_half = true`。当前 RTX 3090 上，固定版本的 FireRed 实现会使用
   `torch.bfloat16`；`false` 才是 FP32 回退，不能默认改回 FP32。
 - overlap 默认关闭。启用时，先关闭常驻 FireRed/3D-Speaker，再运行 pyannote/ClearVoice，完成后
   在下一个排队作业前重新加载常驻模型。
-- 模型加载和显式预热不计入作业的端到端耗时。
+- 只有首次模型加载不计入作业的端到端耗时。服务生命周期内的首次代表性预热计入首个作业；
+  每个作业结束前并行清理两个 AED worker 的 CUDA cache，清理耗时也计入端到端。
 
 ## 诊断级别
 
@@ -60,8 +63,9 @@
 git diff --check
 ```
 
-GPU 实测必须排除模型加载和显式预热，记录实际精度（`torch.float32`、`torch.bfloat16` 或
-`torch.float16`），报告保存在 `outputs/measurements/`。没有新鲜命令输出时，不能声称基准结果。
+GPU 实测必须只排除首次模型加载，首任务要计入显式预热，每个任务要计入 AED cache 清理；
+记录实际精度（`torch.float32`、`torch.bfloat16` 或 `torch.float16`），报告保存在
+`outputs/measurements/`。没有新鲜命令输出时，不能声称基准结果。
 
 ## 提交
 

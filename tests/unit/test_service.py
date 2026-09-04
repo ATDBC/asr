@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sys
@@ -97,6 +98,32 @@ class FakeAsr:
     def status(self):
         return {"modules": {}}
 
+    def warmup(self):
+        self.events.append("asr:warmup")
+        return {
+            "seconds": 0.25,
+            "excluded": True,
+            "workers": [],
+        }
+
+    def cleanup_cuda_cache(self):
+        self.events.append("asr:cleanup")
+        return {
+            "seconds": 0.125,
+            "workers": [
+                {
+                    "worker_index": 0,
+                    "reserved_before_mib": 7_104,
+                    "reserved_after_mib": 2_468,
+                },
+                {
+                    "worker_index": 1,
+                    "reserved_before_mib": 7_104,
+                    "reserved_after_mib": 2_468,
+                },
+            ],
+        }
+
     def close(self):
         self.events.append("asr:close")
 
@@ -134,6 +161,9 @@ def test_hot_model_host_loads_once_and_closes_only_owned_models():
 
     host.start()
     host.start()
+    assert "asr:warmup" not in events
+    first_warmup = host.warmup()
+    second_warmup = host.warmup()
     host.close()
 
     assert events[0] == "gpu-check"
@@ -141,6 +171,14 @@ def test_hot_model_host_loads_once_and_closes_only_owned_models():
     assert events.count("speaker:start") == 1
     assert events.count("asr:close") == 1
     assert events.count("speaker:close") == 1
+    assert events.count("asr:warmup") == 1
+    assert first_warmup["performed"] is True
+    assert first_warmup["excluded_from_job_timing"] is False
+    assert second_warmup == {
+        "performed": False,
+        "excluded_from_job_timing": False,
+        "reason": "already_performed",
+    }
 
 
 class RecordingAsr:
@@ -451,6 +489,174 @@ def test_service_job_runner_exports_normal_job_from_hot_owners(
     assert not (tmp_path / "work" / "job-normal").exists()
 
 
+def test_service_first_job_times_warmup_and_every_job_times_cleanup(
+    tmp_path: Path,
+):
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+    events: list[str] = []
+    host = HotModelHost(
+        asr_factory=lambda: FakeAsr(events),
+        diarizer_factory=lambda: FakeDiarizer(events),
+        gpu_check=lambda: events.append("gpu-check"),
+    )
+
+    def normalize(source_path, destination, max_seconds):
+        destination.write_bytes(b"normalized")
+
+    runner = ServiceJobRunner(
+        config,
+        hot_host=host,
+        probe=lambda path, max_seconds: AudioInfo(
+            Path(path), 600, 16000, 1, "wav"
+        ),
+        normalize=normalize,
+        gpu_sampler=None,
+    )
+
+    try:
+        for identifier in ("first", "second"):
+            runner.run(
+                ServiceRequest(
+                    identifier=identifier,
+                    action="submit",
+                    input_audio=source,
+                    output_dir=tmp_path / identifier,
+                    config_fingerprint="test-fingerprint",
+                )
+            )
+    finally:
+        host.close()
+
+    first = json.loads(
+        (tmp_path / "first" / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    second = json.loads(
+        (tmp_path / "second" / "diagnostics.json").read_text(encoding="utf-8")
+    )
+    assert events.count("asr:warmup") == 1
+    assert events.count("asr:cleanup") == 2
+    assert events.index("asr:warmup") < events.index("speaker:diarize")
+    assert first["runtime"]["warmup"]["performed"] is True
+    assert first["runtime"]["warmup"]["excluded_from_job_timing"] is False
+    assert second["runtime"]["warmup"] == {
+        "performed": False,
+        "excluded_from_job_timing": False,
+        "reason": "already_performed",
+    }
+    for payload in (first, second):
+        cleanup = payload["runtime"]["cache_cleanup"]
+        assert cleanup["workers"][0]["reserved_after_mib"] == 2_468
+        assert payload["stage_seconds"]["cache_cleanup"] >= 0
+        assert payload["stage_seconds"]["output"] >= 0
+        assert payload["stage_seconds"]["end_to_end_after_load"] >= payload[
+            "stage_seconds"
+        ]["cache_cleanup"] + payload["stage_seconds"]["output"]
+        assert payload["stage_seconds"]["end_to_end_after_warmup"] == payload[
+            "stage_seconds"
+        ]["end_to_end_after_load"]
+    assert first["stage_seconds"]["warmup"] >= 0
+    assert "warmup" not in second["stage_seconds"]
+
+
+def test_service_attempts_aed_cache_cleanup_when_job_fails(tmp_path: Path):
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    events: list[str] = []
+    asr = FakeAsr(events)
+
+    class Host:
+        started = True
+        asr_owner = asr
+        speaker_owner = FailingDiarizer()
+
+        def warmup(self):
+            return {
+                "performed": False,
+                "excluded_from_job_timing": False,
+                "reason": "already_performed",
+            }
+
+    runner = ServiceJobRunner(
+        load_config(
+            cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+        ),
+        hot_host=Host(),
+        probe=lambda path, max_seconds: AudioInfo(
+            Path(path), 600, 16000, 1, "wav"
+        ),
+        normalize=lambda source_path, destination, max_seconds: (
+            destination.write_bytes(b"normalized")
+        ),
+        gpu_sampler=None,
+    )
+
+    with pytest.raises(TranscriptionError, match="diarization failed"):
+        runner.run(
+            ServiceRequest(
+                identifier="failed",
+                action="submit",
+                input_audio=source,
+                output_dir=tmp_path / "failed",
+                config_fingerprint="test-fingerprint",
+            )
+        )
+
+    assert events.count("asr:cleanup") == 1
+
+
+def test_service_fails_successful_job_when_aed_cache_cleanup_fails(
+    tmp_path: Path,
+):
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    events: list[str] = []
+
+    class CleanupFailAsr(FakeAsr):
+        def cleanup_cuda_cache(self):
+            events.append("asr:cleanup")
+            raise RuntimeError("cleanup failed")
+
+    host = HotModelHost(
+        asr_factory=lambda: CleanupFailAsr(events),
+        diarizer_factory=lambda: FakeDiarizer(events),
+        gpu_check=lambda: None,
+    )
+    runner = ServiceJobRunner(
+        load_config(
+            cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+        ),
+        hot_host=host,
+        probe=lambda path, max_seconds: AudioInfo(
+            Path(path), 600, 16000, 1, "wav"
+        ),
+        normalize=lambda source_path, destination, max_seconds: (
+            destination.write_bytes(b"normalized")
+        ),
+        gpu_sampler=None,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            runner.run(
+                ServiceRequest(
+                    identifier="cleanup-failed",
+                    action="submit",
+                    input_audio=source,
+                    output_dir=tmp_path / "output",
+                    config_fingerprint="test-fingerprint",
+                )
+            )
+    finally:
+        host.close()
+
+    assert events.count("asr:cleanup") == 1
+    assert not (tmp_path / "output").exists()
+
+
 def test_daemon_module_loads_config_and_delegates_to_runner(
     monkeypatch,
     tmp_path: Path,
@@ -488,6 +694,10 @@ def test_overlap_job_evicts_hot_owners_before_temporary_models(
         def transcribe(self, path, vad_segments_ms=None):
             return _result()
 
+        def cleanup_cuda_cache(self):
+            events.append("hot:cleanup")
+            return {"seconds": 0.0, "workers": []}
+
     class ResidentSpeaker:
         def diarize(self, path):
             return (SpeakerSegment(1, 0, 600),)
@@ -511,6 +721,8 @@ def test_overlap_job_evicts_hot_owners_before_temporary_models(
         def start(self):
             events.append("hot:start")
             self.started = True
+            self.asr_owner = ResidentAsr()
+            self.speaker_owner = ResidentSpeaker()
             return self
 
     class Preparer:
@@ -591,7 +803,8 @@ def test_overlap_job_evicts_hot_owners_before_temporary_models(
     assert events.index("hot:close") < events.index("overlap:detect")
     assert events.index("overlap:detect") < events.index("temporary:speaker")
     assert events.index("temporary:speaker-close") < events.index("temporary:asr")
-    assert events[-1] == "hot:start"
+    assert events.index("hot:start") < events.index("hot:cleanup")
+    assert events[-1] == "hot:cleanup"
 
 
 def _profiled_runner(tmp_path: Path, sampler_factory):
@@ -724,8 +937,9 @@ def test_deep_profile_includes_aed_memory_trace(tmp_path: Path):
         def stop(self):
             return {"sample_count": 1, "pid_observed": {}}
 
-        def trace_stage(self, started, ended):
+        def trace_stage(self, started, ended, **kwargs):
             assert (started, ended) == (10.0, 20.0)
+            assert kwargs["effective_budget_mib"] is None
             return {"sample_count": 1, "samples": [], "summary": {}}
 
     runner, source = _profiled_runner(

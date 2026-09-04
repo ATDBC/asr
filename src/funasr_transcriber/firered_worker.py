@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gc
 import json
 import logging
 from pathlib import Path
@@ -116,6 +117,27 @@ def _cuda_free_memory_mib() -> int | None:
     except ImportError:
         pass
     return None
+
+
+def _cleanup_cuda_cache() -> dict[str, object]:
+    """Release this worker's unused PyTorch CUDA allocator cache."""
+
+    import torch
+
+    allocated_before = _cuda_memory_allocated_mib()
+    reserved_before = _cuda_reserved_memory_mib()
+    collected = gc.collect()
+    _synchronize_cuda()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    _synchronize_cuda()
+    return {
+        "gc_collected": int(collected),
+        "allocated_before_mib": allocated_before,
+        "reserved_before_mib": reserved_before,
+        "allocated_after_mib": _cuda_memory_allocated_mib(),
+        "reserved_after_mib": _cuda_reserved_memory_mib(),
+    }
 
 
 def _scheduled_process(
@@ -305,6 +327,7 @@ def _explicit_aed_process(
     records: list[dict[str, object]] = []
     batch_metrics: list[dict[str, object]] = []
     resident_allocated_mib = _cuda_memory_allocated_mib()
+    resident_reserved_mib = _cuda_reserved_memory_mib()
     for batch_index, raw_batch in enumerate(batch_plan):
         batch_uttid: list[str] = []
         batch_wav: list[tuple[int, object]] = []
@@ -338,6 +361,7 @@ def _explicit_aed_process(
             "peak_allocated_mib": _cuda_peak_memory_mib(),
             "peak_reserved_mib": _cuda_peak_reserved_mib(),
             "resident_allocated_mib": resident_allocated_mib,
+            "resident_reserved_mib": resident_reserved_mib,
         })
         returned = {str(result.get("uttid")): result for result in results}
         batch_records: list[dict[str, object]] = []
@@ -370,6 +394,7 @@ def _explicit_aed_process(
         "aed_results": records,
         "batch_metrics": batch_metrics,
         "resident_allocated_mib": resident_allocated_mib,
+        "resident_reserved_mib": resident_reserved_mib,
     }
 
 
@@ -425,29 +450,44 @@ def _punctuate_aed_results(
     )
 
 
-def _warmup_process(system: FireRedSystem, wav_path: str) -> None:
+def _warmup_process(system: FireRedSystem, wav_path: str) -> dict[str, object]:
     """Exercise the resident AED/Punc CUDA paths before production timing."""
 
+    import numpy as np
     import soundfile as sf
 
     wav_np, sample_rate = sf.read(wav_path, dtype="int16")
+    shapes = [
+        ("short_single", 1, 1),
+        ("short_batch", 1, 4),
+        ("medium", 10, 1),
+        ("long", 30, 1),
+    ]
     if getattr(system, "asr", None) is not None:
-        uttid = "__firered_warmup__"
-        asr_results = system.asr.transcribe(
-            [uttid], [(sample_rate, wav_np)]
-        )
         punc = getattr(system, "punc", None)
-        if punc is not None and asr_results:
-            punc.process_with_timestamp(
-                [asr_results[0].get("timestamp", [])],
-                [uttid],
+        for shape, seconds, count in shapes:
+            samples = np.resize(wav_np, sample_rate * seconds)
+            uttids = [f"__firered_warmup_{shape}_{index}__" for index in range(count)]
+            asr_results = system.asr.transcribe(
+                uttids, [(sample_rate, samples) for _ in uttids]
             )
+            if punc is not None and asr_results:
+                punc.process_with_timestamp(
+                    [item.get("timestamp", []) for item in asr_results],
+                    uttids,
+                )
+            _synchronize_cuda()
     elif getattr(system, "punc", None) is not None:
         system.punc.process_with_timestamp(
             [[("预热", 0.0, 0.2)]],
             ["__firered_punc_warmup__"],
         )
     _synchronize_cuda()
+    return {
+        "shapes": [item[0] for item in shapes]
+        if getattr(system, "asr", None) is not None
+        else ["punc"]
+    }
 
 
 class FireRedSystem(Protocol):
@@ -703,10 +743,23 @@ def serve(
                     {"id": identifier, "ok": True, "shutdown": True},
                 )
                 return
+            if action == "cleanup_cuda_cache":
+                cleanup_started = clock()
+                cleanup = _cleanup_cuda_cache()
+                cleanup["seconds"] = clock() - cleanup_started
+                _write_response(
+                    protocol_output,
+                    {
+                        "id": identifier,
+                        "ok": True,
+                        "cache_cleanup": cleanup,
+                    },
+                )
+                continue
             if action == "warmup":
                 path = _validate_audio(request.get("audio_path"), audio_info)
                 warmup_started = clock()
-                _warmup_process(system, str(path))
+                warmup_info = _warmup_process(system, str(path))
                 resident_allocated_mib = _cuda_memory_allocated_mib()
                 resident_reserved_mib = _cuda_reserved_memory_mib()
                 _write_response(
@@ -716,6 +769,7 @@ def serve(
                         "ok": True,
                         "warmup_seconds": clock() - warmup_started,
                         "warmup_excluded": True,
+                        "warmup_shapes": warmup_info.get("shapes", []),
                         "resident_allocated_mib": resident_allocated_mib,
                         "resident_reserved_mib": resident_reserved_mib,
                     },

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from time import perf_counter
 
-from .firered_scheduler import BatchDecision, MemoryFirstBatchPacker
+from .firered_scheduler import BatchCostModel, BatchDecision, MemoryFirstBatchPacker
 from .firered_contract import normalize_official_result
 from .firered_client import parse_worker_response
 from .punc_scheduler import (
@@ -99,6 +99,7 @@ def build_global_plan(
     *,
     shared_budget_mib: int,
     worker_resident_mib: tuple[int, ...],
+    cost_model: BatchCostModel | None = None,
 ) -> tuple[BatchDecision, ...]:
     """Build the one immutable memory-first plan shared by AED workers."""
 
@@ -107,6 +108,7 @@ def build_global_plan(
             segments,
             shared_budget_mib=shared_budget_mib,
             worker_resident_mib=worker_resident_mib,
+            cost_model=cost_model or BatchCostModel(),
         ).plan()
     )
 
@@ -145,6 +147,32 @@ def partition_batches(
         loads = _loads(assignments)
         target = min(range(worker_count), key=lambda index: (loads[index], index))
         assignments[target].append(batch)
+
+    # Improve the longest-processing-time result with deterministic one-batch
+    # moves.  This preserves complete batch boundaries while fixing cases in
+    # which an early LPT choice leaves a better local split available.
+    while worker_count > 1:
+        current_loads = _loads(assignments)
+        current_makespan = max(current_loads, default=0.0)
+        source = max(range(worker_count), key=lambda i: (current_loads[i], -i))
+        target = min(range(worker_count), key=lambda i: (current_loads[i], i))
+        if source == target or not assignments[source]:
+            break
+        best_move: tuple[float, int] | None = None
+        for batch_index, batch in enumerate(assignments[source]):
+            duration = float(batch.estimate.predicted_seconds)
+            candidate_loads = list(current_loads)
+            candidate_loads[source] -= duration
+            candidate_loads[target] += duration
+            candidate_makespan = max(candidate_loads)
+            if candidate_makespan < current_makespan:
+                candidate = (candidate_makespan, batch_index)
+                if best_move is None or candidate < best_move:
+                    best_move = candidate
+        if best_move is None:
+            break
+        _, batch_index = best_move
+        assignments[target].append(assignments[source].pop(batch_index))
 
     # Preserve execution order within each worker. This is useful for stable
     # diagnostics and does not affect the load-balancing decision above.
@@ -215,6 +243,12 @@ def _prediction_accuracy(
             if isinstance(response_resident, (int, float))
             else fallback_resident
         )
+        response_reserved = response.get("resident_reserved_mib")
+        reserved = (
+            int(response_reserved)
+            if isinstance(response_reserved, (int, float))
+            else None
+        )
         for batch_index, (decision, raw) in enumerate(zip(lane, raw_metrics)):
             if not isinstance(raw, dict):
                 continue
@@ -222,6 +256,12 @@ def _prediction_accuracy(
             actual_peak = raw.get("peak_allocated_mib")
             actual_increment = (
                 None if actual_peak is None else max(0, int(actual_peak) - resident)
+            )
+            actual_reserved_peak = raw.get("peak_reserved_mib")
+            actual_reserved_increment = (
+                None
+                if actual_reserved_peak is None or reserved is None
+                else max(0, int(actual_reserved_peak) - reserved)
             )
             predicted_seconds = float(decision.estimate.predicted_seconds)
             predicted_increment = decision.estimate.predicted_incremental_mib
@@ -234,6 +274,8 @@ def _prediction_accuracy(
                 "seconds_error": actual_seconds - predicted_seconds,
                 "predicted_incremental_mib": predicted_increment,
                 "actual_incremental_mib": actual_increment,
+                "actual_allocated_incremental_mib": actual_increment,
+                "actual_reserved_incremental_mib": actual_reserved_increment,
                 "incremental_mib_error": (
                     None
                     if actual_increment is None
@@ -272,6 +314,8 @@ class ParallelFireRedWorkerClient:
             gpu_memory_provider or _default_gpu_memory_provider
         )
         self.worker_resident_mib: tuple[int, ...] = ()
+        self.cost_model = BatchCostModel()
+        self.aed_budget_fraction = 0.9
         self.last_response: dict[str, object] = {}
 
     @property
@@ -331,6 +375,29 @@ class ParallelFireRedWorkerClient:
             "seconds": max(float(item.get("seconds") or 0.0) for item in results),
             "workers": results[:2],
             "punc": results[2] if len(results) > 2 else None,
+            "cost_model": self.cost_model.summary(),
+        }
+
+    def cleanup_cuda_cache(self) -> dict[str, object]:
+        """Concurrently trim unused allocator cache in both AED workers."""
+
+        started = perf_counter()
+        workers = (self.worker0, self.worker1)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(worker.cleanup_cuda_cache)
+                for worker in workers
+            ]
+            results = [future.result() for future in futures]
+        records: list[dict[str, object]] = []
+        for index, (worker, result) in enumerate(zip(workers, results)):
+            record = dict(result)
+            record["worker_index"] = index
+            record["pid"] = getattr(worker, "pid", None)
+            records.append(record)
+        return {
+            "seconds": perf_counter() - started,
+            "workers": records,
         }
 
     def _transcribe_streaming(
@@ -495,9 +562,11 @@ class ParallelFireRedWorkerClient:
                     "worker_count": 2,
                     "planned_batches": len(plan),
                     "worker_batch_counts": [len(items) for items in assignments],
+                    "cost_model_observations": 0,
                 },
                 "scheduler": {
                     "planner": "memory_first",
+                    "model": self.cost_model.summary(),
                     "shared_budget_mib": effective_budget,
                     "lane_budget_mib": max(1, effective_budget // 2),
                     "worker_resident_mib": list(self.worker_resident_mib),
@@ -532,10 +601,11 @@ class ParallelFireRedWorkerClient:
             for start, end in refined
         ]
         before_plan = self.gpu_memory_provider(self.pids)
-        effective_budget = derive_transient_budget_mib(
+        budget_fraction = min(max(float(self.aed_budget_fraction), 0.1), 1.0)
+        effective_budget = int(round(derive_transient_budget_mib(
             before_plan,
             safety_margin_mib=self.gpu_safety_margin_mib,
-        )
+        ) * budget_fraction))
         plan_started = perf_counter()
         plan = build_global_plan(
             refined_seconds,
@@ -544,6 +614,7 @@ class ParallelFireRedWorkerClient:
                 self.worker_resident_mib
                 or tuple(before_plan.process_mib.get(pid, 0) for pid in self.pids)
             ),
+            cost_model=self.cost_model,
         )
         plan_seconds = perf_counter() - plan_started
         assignments = partition_batches(plan, worker_count=2)
@@ -552,10 +623,10 @@ class ParallelFireRedWorkerClient:
         plans = [_serialize(batches) for batches in assignments]
 
         before_dispatch = self.gpu_memory_provider(self.pids)
-        dispatch_budget = derive_transient_budget_mib(
+        dispatch_budget = int(round(derive_transient_budget_mib(
             before_dispatch,
             safety_margin_mib=self.gpu_safety_margin_mib,
-        )
+        ) * budget_fraction))
         dispatch_mode = "concurrent"
         if required_concurrent_increment_mib(assignments) > dispatch_budget:
             dispatch_mode = "serial"
@@ -664,8 +735,10 @@ class ParallelFireRedWorkerClient:
                 "worker_count": 2,
                 "planned_batches": len(plan),
                 "worker_batch_counts": [len(items) for items in assignments],
+                "cost_model_observations": 0,
                 },
                 "scheduler": {
+                "model": self.cost_model.summary(),
                 "planner": "memory_first",
                 "shared_budget_mib": effective_budget,
                 "lane_budget_mib": max(1, effective_budget // 2),

@@ -1113,7 +1113,11 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
         require_gpu_capacity(
             "cuda:0",
             minimum_total_mib=config.service.minimum_total_mib,
-            minimum_free_mib=0,
+            minimum_free_mib=(
+                0
+                if config.asr.aed_worker_count == 1
+                else config.service.minimum_free_mib
+            ),
         )
 
     return HotModelHost(

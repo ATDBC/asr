@@ -27,6 +27,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
         "timeout_seconds": 1800,
         "use_half": True,
+        "aed_scheduler": "weighted_duration",
         "aed_worker_count": 1,
         "gpu_safety_margin_mib": 1536,
         "punc_token_budget": 256,
@@ -99,6 +100,7 @@ class AsrConfig:
     worker_python: Path
     timeout_seconds: int
     use_half: bool
+    aed_scheduler: str
     aed_worker_count: int
     gpu_safety_margin_mib: int
     punc_token_budget: int
@@ -256,6 +258,9 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             ).expanduser(),
             timeout_seconds=int(values["asr"]["timeout_seconds"]),
             use_half=bool(values["asr"]["use_half"]),
+            aed_scheduler=str(
+                values["asr"]["aed_scheduler"]
+            ).strip().lower(),
             aed_worker_count=int(values["asr"]["aed_worker_count"]),
             gpu_safety_margin_mib=int(values["asr"]["gpu_safety_margin_mib"]),
             punc_token_budget=int(values["asr"]["punc_token_budget"]),
@@ -331,8 +336,20 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("max_audio_seconds must be 7200 in version 1")
     if config.asr.timeout_seconds <= 0:
         raise ValueError("ASR timeout_seconds must be positive")
+    if config.asr.aed_scheduler not in {
+        "weighted_duration",
+        "memory_first",
+    }:
+        raise ValueError(
+            "ASR aed_scheduler must be weighted_duration or memory_first"
+        )
     if config.asr.aed_worker_count not in (1, 2):
         raise ValueError("ASR aed_worker_count must be 1 or 2")
+    if (
+        config.asr.aed_scheduler == "memory_first"
+        and config.asr.aed_worker_count != 2
+    ):
+        raise ValueError("ASR memory_first aed_scheduler requires 2 AED workers")
     if config.asr.gpu_safety_margin_mib <= 0:
         raise ValueError("ASR gpu_safety_margin_mib must be positive")
     if config.asr.punc_token_budget <= 0:

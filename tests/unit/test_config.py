@@ -124,6 +124,7 @@ def test_default_asr_worker_configuration():
     )
     assert config.asr.timeout_seconds == 1800
     assert config.asr.use_half is True
+    assert config.asr.aed_scheduler == "weighted_duration"
     assert config.asr.aed_worker_count == 1
     assert config.asr.gpu_safety_margin_mib == 1536
     assert config.asr.punc_token_budget == 256
@@ -132,6 +133,53 @@ def test_default_asr_worker_configuration():
     assert not hasattr(config.asr, "segment_frame_budget")
     assert not hasattr(config.asr, "segment_memory_limit_mib")
     assert not hasattr(config.asr, "segment_memory_safety_mib")
+
+
+@pytest.mark.parametrize(
+    ("scheduler", "worker_count"),
+    (
+        ("weighted_duration", 1),
+        ("weighted_duration", 2),
+        ("memory_first", 2),
+    ),
+)
+def test_aed_scheduler_accepts_supported_worker_counts(
+    tmp_path: Path,
+    scheduler: str,
+    worker_count: int,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        (
+            "[asr]\n"
+            f'aed_scheduler = "{scheduler}"\n'
+            f"aed_worker_count = {worker_count}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.asr.aed_scheduler == scheduler
+    assert config.asr.aed_worker_count == worker_count
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        '[asr]\naed_scheduler = "unknown"\n',
+        '[asr]\naed_scheduler = "memory_first"\naed_worker_count = 1\n',
+    ),
+)
+def test_aed_scheduler_rejects_unsupported_configuration(
+    tmp_path: Path,
+    body: str,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="aed_scheduler"):
+        load_config(path)
 
 
 def test_asr_half_precision_can_be_disabled(tmp_path: Path):

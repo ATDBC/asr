@@ -1059,7 +1059,7 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
     from .firered_client import FireRedWorkerClient
     from .firered_parallel import (
         ParallelFireRedWorkerClient,
-        SingleAedPuncWorkerClient,
+        WeightedAedPuncWorkerClient,
     )
     from .speaker_diarization import SpeakerDiarizer
     warmup_audio = (
@@ -1093,25 +1093,35 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
         )
 
     def asr_factory() -> Any:
-        worker_count = int(getattr(config.asr, "aed_worker_count", 1))
-        if worker_count == 1:
-            return SingleAedPuncWorkerClient(
+        worker_count = config.asr.aed_worker_count
+        if config.asr.aed_scheduler == "weighted_duration":
+            worker0 = client(
+                "firered-worker-0.log",
+                enable_vad=True,
+                enable_punc=False,
+            )
+            worker1 = (
                 client(
-                    "firered-worker-0.log",
-                    enable_vad=True,
-                    enable_punc=False,
-                ),
-                client(
-                    "firered-punc.log",
+                    "firered-worker-1.log",
                     enable_vad=False,
-                    enable_punc=True,
-                    punc_only=True,
-                ),
+                    enable_punc=False,
+                )
+                if worker_count == 2
+                else None
+            )
+            punc_owner = client(
+                "firered-punc.log",
+                enable_vad=False,
+                enable_punc=True,
+                punc_only=True,
+            )
+            return WeightedAedPuncWorkerClient(
+                worker0,
+                punc_owner,
+                worker1=worker1,
                 punc_token_budget=config.asr.punc_token_budget,
                 punc_max_items=config.asr.punc_max_items,
             )
-        if worker_count != 2:
-            raise ValueError("aed_worker_count must be 1 or 2")
         return ParallelFireRedWorkerClient(
             client("firered-worker-0.log", enable_vad=True, enable_punc=False),
             client("firered-worker-1.log", enable_vad=False, enable_punc=False),
@@ -1132,7 +1142,7 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             minimum_total_mib=config.service.minimum_total_mib,
             minimum_free_mib=(
                 0
-                if config.asr.aed_worker_count == 1
+                if config.asr.aed_scheduler == "weighted_duration"
                 else config.service.minimum_free_mib
             ),
         )

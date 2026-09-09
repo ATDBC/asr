@@ -183,12 +183,17 @@ def test_hot_model_host_loads_once_and_closes_only_owned_models():
 
 
 @pytest.mark.parametrize(
-    ("worker_count", "expected_free_mib"),
-    ((1, 0), (2, 13 * 1024)),
+    ("scheduler", "worker_count", "expected_free_mib"),
+    (
+        ("weighted_duration", 1, 0),
+        ("weighted_duration", 2, 0),
+        ("memory_first", 2, 13 * 1024),
+    ),
 )
-def test_only_single_worker_admission_omits_free_memory_gate(
+def test_gpu_admission_depends_on_scheduler(
     tmp_path: Path,
     monkeypatch,
+    scheduler: str,
     worker_count: int,
     expected_free_mib: int,
 ):
@@ -202,7 +207,11 @@ def test_only_single_worker_admission_omits_free_memory_gate(
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        f"[asr]\naed_worker_count = {worker_count}\n",
+        (
+            "[asr]\n"
+            f'aed_scheduler = "{scheduler}"\n'
+            f"aed_worker_count = {worker_count}\n"
+        ),
         encoding="utf-8",
     )
     host = build_hot_model_host(
@@ -222,8 +231,15 @@ def test_only_single_worker_admission_omits_free_memory_gate(
     ]
 
 
-def test_single_aed_service_uses_independent_punc_owner(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize(("worker_count", "expected_clients"), ((1, 2), (2, 3)))
+def test_weighted_service_builds_selected_aed_lanes_and_one_punc(
+    tmp_path: Path,
+    monkeypatch,
+    worker_count: int,
+    expected_clients: int,
+):
     import funasr_transcriber.firered_client as client_module
+    from funasr_transcriber.firered_parallel import WeightedAedPuncWorkerClient
 
     clients = []
 
@@ -234,19 +250,62 @@ def test_single_aed_service_uses_independent_punc_owner(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(client_module, "FireRedWorkerClient", FakeClient)
 
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (
+            "[asr]\n"
+            'aed_scheduler = "weighted_duration"\n'
+            f"aed_worker_count = {worker_count}\n"
+        ),
+        encoding="utf-8",
+    )
     owner = build_hot_model_host(
-        load_config(),
+        load_config(config_path),
         ServicePaths.from_work_dir(tmp_path),
     )._asr_factory()
 
+    assert isinstance(owner, WeightedAedPuncWorkerClient)
+    assert len(owner.aed_workers) == worker_count
+    assert len(clients) == expected_clients
     assert owner.worker0 is clients[0]
-    assert owner.punc_owner is clients[1]
+    assert owner.punc_owner is clients[-1]
     assert clients[0].options["enable_vad"] is True
     assert clients[0].options["enable_punc"] is False
     assert clients[0].options["punc_only"] is False
-    assert clients[1].options["enable_vad"] is False
-    assert clients[1].options["enable_punc"] is True
-    assert clients[1].options["punc_only"] is True
+    if worker_count == 2:
+        assert clients[1].options["enable_vad"] is False
+        assert clients[1].options["enable_punc"] is False
+        assert clients[1].options["punc_only"] is False
+    assert clients[-1].options["enable_vad"] is False
+    assert clients[-1].options["enable_punc"] is True
+    assert clients[-1].options["punc_only"] is True
+
+
+def test_memory_first_service_retains_parallel_owner(tmp_path: Path, monkeypatch):
+    import funasr_transcriber.firered_client as client_module
+    from funasr_transcriber.firered_parallel import ParallelFireRedWorkerClient
+
+    class FakeClient:
+        def __init__(self, **options):
+            self.options = options
+
+    monkeypatch.setattr(client_module, "FireRedWorkerClient", FakeClient)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (
+            "[asr]\n"
+            'aed_scheduler = "memory_first"\n'
+            "aed_worker_count = 2\n"
+        ),
+        encoding="utf-8",
+    )
+
+    owner = build_hot_model_host(
+        load_config(config_path),
+        ServicePaths.from_work_dir(tmp_path),
+    )._asr_factory()
+
+    assert type(owner) is ParallelFireRedWorkerClient
 
 
 class RecordingAsr:

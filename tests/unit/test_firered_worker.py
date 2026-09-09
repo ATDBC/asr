@@ -270,7 +270,45 @@ def test_explicit_aed_process_emits_completed_batch_event(tmp_path: Path, monkey
     assert events[0]["aed_results"][0]["index"] == 0
 
 
-def test_scheduled_process_restores_original_result_order(tmp_path: Path):
+def test_plan_aed_batches_uses_server_weighted_relocation():
+    durations_s = [46.0, 54.0, 48.0, 55.0, 31.0, 44.0]
+    cursor = 0.0
+    segments = []
+    for duration_s in durations_s:
+        segments.append((cursor, cursor + duration_s))
+        cursor += duration_s
+
+    batches = worker_module.plan_aed_batches(segments)
+
+    assert [[item.index for item in batch] for batch in batches] == [
+        [0, 5, 4],
+        [3, 1, 2],
+    ]
+
+
+def test_plan_aed_batches_limits_size_without_losing_segments():
+    segments = [(float(index), float(index + 1)) for index in range(33)]
+
+    first = worker_module.plan_aed_batches(segments)
+    second = worker_module.plan_aed_batches(segments)
+
+    assert first == second
+    assert [len(batch) for batch in first] == [1, 32]
+    assert sorted(item.index for batch in first for item in batch) == list(range(33))
+
+
+def test_plan_aed_batches_uses_exact_millisecond_capacity():
+    segments = [(876.084, 970.734), (1148.031, 1253.381)]
+
+    batches = worker_module.plan_aed_batches(segments)
+
+    assert [[item.index for item in batch] for batch in batches] == [[1, 0]]
+
+
+def test_scheduled_process_uses_weighted_plan_without_gpu_memory_budget(
+    tmp_path: Path,
+    monkeypatch,
+):
     wav = tmp_path / "normalized.wav"
     sf.write(wav, np.zeros(7 * 16_000, dtype=np.int16), 16_000, subtype="PCM_16")
 
@@ -316,6 +354,7 @@ def test_scheduled_process_restores_original_result_order(tmp_path: Path):
             asr_config=SimpleNamespace(return_timestamp=True),
         ),
     )
+    monkeypatch.setattr(worker_module, "_cuda_free_memory_mib", lambda: None)
     raw = _scheduled_process(
         system,
         str(wav),
@@ -323,9 +362,9 @@ def test_scheduled_process_restores_original_result_order(tmp_path: Path):
         [(0.0, 3.0), (3.0, 4.0), (4.0, 6.0), (6.0, 7.0)],
     )
 
-    assert [batch[0].split("_s", 1)[1].split("_e", 1)[0] for batch in asr.batches] == [
-        "3000",
-    ]
+    assert [batch[0].split("_s", 1)[1].split("_e", 1)[0] for batch in asr.batches] == ["0"]
+    assert raw["_scheduler"]["planner"] == "weighted_duration_single_worker"
+    assert "shared_budget_mib" not in raw["_scheduler"]
     assert [sentence["start_ms"] for sentence in raw["sentences"]] == [
         0,
         3000,
@@ -340,8 +379,8 @@ def test_scheduled_process_matches_dropped_aed_items_by_uttid(tmp_path: Path):
 
     class Asr:
         def transcribe(self, uttids, wavs):
-            # Simulate the pinned feature extractor dropping the first item.
-            uttid = uttids[-1]
+            # Simulate the pinned feature extractor returning one non-positional item.
+            uttid = next(item for item in uttids if "_s1000_e5000" in item)
             start_ms = int(uttid.split("_s", 1)[1].split("_e", 1)[0])
             end_ms = int(uttid.rsplit("_e", 1)[1])
             return [

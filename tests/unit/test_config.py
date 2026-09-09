@@ -124,7 +124,7 @@ def test_default_asr_worker_configuration():
     )
     assert config.asr.timeout_seconds == 1800
     assert config.asr.use_half is True
-    assert config.asr.aed_worker_count == 2
+    assert config.asr.aed_worker_count == 1
     assert config.asr.gpu_safety_margin_mib == 1536
     assert config.asr.punc_token_budget == 256
     assert config.asr.punc_max_items == 16

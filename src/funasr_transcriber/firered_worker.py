@@ -19,7 +19,7 @@ from typing import Any, Callable, IO, Protocol
 from types import SimpleNamespace
 
 from .firered_contract import normalize_official_result
-from .firered_scheduler import MemoryFirstBatchPacker
+from .firered_scheduler import ScheduledItem
 from .punc_scheduler import (
     DEFAULT_PUNC_MAX_ITEMS,
     DEFAULT_PUNC_TOKEN_BUDGET,
@@ -34,6 +34,11 @@ LOGGER = logging.getLogger(__name__)
 SCRIPTED_VAD_THRESHOLD_SECONDS = 10.0
 PUNC_INTERNAL_BATCH_SIZE = DEFAULT_PUNC_MAX_ITEMS
 PUNC_TOKEN_BUDGET = DEFAULT_PUNC_TOKEN_BUDGET
+AED_BATCH_DURATION_LIMIT_MS = 200_000
+AED_BATCH_SIZE = 32
+# Train-only fit from 726 repeat-median solo server batches (GPU 0, BF16).
+AED_LONGEST_WEIGHT = 0.12854663332839417
+AED_PADDED_WEIGHT = 0.008409640427755745
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +46,128 @@ class AudioInfo:
     sample_rate: int
     channels: int
     subtype: str
+
+
+def _item_duration_ms(item: ScheduledItem) -> int:
+    return int(round(item.duration_s * 1000))
+
+
+def _batch_duration_ms(batch: list[ScheduledItem]) -> int:
+    return sum(_item_duration_ms(item) for item in batch)
+
+
+def _batch_cost(batch: list[ScheduledItem]) -> float:
+    longest = max(_item_duration_ms(item) for item in batch) / 1000
+    return longest * (AED_LONGEST_WEIGHT + AED_PADDED_WEIGHT * len(batch))
+
+
+def plan_aed_batches(
+    segments: list[tuple[float, float]],
+) -> list[list[ScheduledItem]]:
+    """Port the Mac duration-capacity planner with server-fitted weights."""
+
+    items = sorted(
+        (
+            ScheduledItem(index, float(start), float(end))
+            for index, (start, end) in enumerate(segments)
+        ),
+        key=lambda item: (-_item_duration_ms(item), item.index),
+    )
+    batches: list[list[ScheduledItem]] = []
+    for item in items:
+        duration_ms = _item_duration_ms(item)
+        if duration_ms > AED_BATCH_DURATION_LIMIT_MS:
+            raise ValueError("AED segment exceeds batch duration limit")
+        candidates = [
+            (
+                AED_BATCH_DURATION_LIMIT_MS
+                - _batch_duration_ms(batch)
+                - duration_ms,
+                index,
+            )
+            for index, batch in enumerate(batches)
+            if len(batch) < AED_BATCH_SIZE
+            and _batch_duration_ms(batch) + duration_ms
+            <= AED_BATCH_DURATION_LIMIT_MS
+        ]
+        if candidates:
+            batches[min(candidates)[1]].append(item)
+        else:
+            batches.append([item])
+
+    # ponytail: O(n^3) best-single-move search; replace only if planning is visible.
+    while True:
+        best_delta = 0.0
+        best_move = None
+        for source_index, source in enumerate(batches):
+            if len(source) <= 1:
+                continue
+            for item_index, item in enumerate(source):
+                for target_index, target in enumerate(batches):
+                    if source_index == target_index or len(target) >= AED_BATCH_SIZE:
+                        continue
+                    if (
+                        _batch_duration_ms(target) + _item_duration_ms(item)
+                        > AED_BATCH_DURATION_LIMIT_MS
+                    ):
+                        continue
+                    new_source = source[:item_index] + source[item_index + 1 :]
+                    new_target = [*target, item]
+                    delta = (
+                        _batch_cost(new_source)
+                        + _batch_cost(new_target)
+                        - _batch_cost(source)
+                        - _batch_cost(target)
+                    )
+                    if delta < best_delta - 1e-9:
+                        best_delta = delta
+                        best_move = (
+                            source_index,
+                            target_index,
+                            new_source,
+                            new_target,
+                        )
+        if best_move is None:
+            break
+        source_index, target_index, new_source, new_target = best_move
+        batches[source_index] = new_source
+        batches[target_index] = new_target
+
+    return [
+        batch
+        for _, batch in sorted(
+            enumerate(batches),
+            key=lambda pair: (
+                max(_item_duration_ms(item) for item in pair[1]),
+                _batch_duration_ms(pair[1]),
+                pair[0],
+            ),
+        )
+    ]
+
+
+def _aed_plan_summary(plan: list[list[ScheduledItem]]) -> dict[str, object]:
+    return {
+        "planner": "weighted_duration_single_worker",
+        "duration_limit_seconds": AED_BATCH_DURATION_LIMIT_MS / 1000,
+        "max_items": AED_BATCH_SIZE,
+        "longest_weight": AED_LONGEST_WEIGHT,
+        "padded_weight": AED_PADDED_WEIGHT,
+        "planned_batches": len(plan),
+        "planned_items": sum(len(batch) for batch in plan),
+        "plan": [
+            {
+                "item_count": len(batch),
+                "indices": [item.index for item in batch],
+                "total_duration_seconds": _batch_duration_ms(batch) / 1000,
+                "max_duration_seconds": (
+                    max(_item_duration_ms(item) for item in batch) / 1000
+                ),
+                "predicted_seconds": round(_batch_cost(batch), 6),
+            }
+            for batch in plan
+        ],
+    }
 
 
 def _synchronize_cuda() -> None:
@@ -145,8 +272,6 @@ def _scheduled_process(
     wav_path: str,
     uttid: str,
     vad_segments: list[tuple[float, float]],
-    free_memory_provider: Callable[[], int | None] | None = None,
-    safety_margin_mib: int = 1_536,
     clock: Callable[[], float] = time.perf_counter,
 ) -> dict[str, object]:
     """Run the pinned modules with duration-aware AED batches.
@@ -163,18 +288,8 @@ def _scheduled_process(
     duration_s = wav_np.shape[0] / sample_rate
     config = system.config
     records: list[tuple[int, dict[str, object], object]] = []
-    free_memory = (free_memory_provider or _cuda_free_memory_mib)()
-    if free_memory is None:
-        raise RuntimeError("GPU free memory is unavailable for memory-first packing")
-    resident = _cuda_memory_allocated_mib() or 0
-    packer = MemoryFirstBatchPacker(
-        vad_segments,
-        shared_budget_mib=max(1, int(free_memory) - int(safety_margin_mib)),
-        worker_resident_mib=(resident,),
-    )
-    plan = packer.plan()
-    for decision in plan:
-        batch = list(decision.items)
+    plan = plan_aed_batches(vad_segments)
+    for batch in plan:
         batch_uttid: list[str] = []
         batch_wav: list[tuple[int, object]] = []
         for item in batch:
@@ -305,7 +420,7 @@ def _scheduled_process(
         "dur_s": duration_s,
         "words": words,
         "wav_path": wav_path,
-        "_scheduler": packer.summary(),
+        "_scheduler": _aed_plan_summary(plan),
     }
 
 

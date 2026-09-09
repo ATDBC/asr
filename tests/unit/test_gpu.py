@@ -29,7 +29,7 @@ GPU_OUTPUT = "\n".join(
 
 def _runner(output: str = GPU_OUTPUT, returncode: int = 0):
     def run(command, **kwargs):
-        assert command[0] == "nvidia-smi"
+        assert command[:2] == ["nvidia-smi", "--id=0"]
         return Result(output, returncode, "nvidia-smi failed")
 
     return run

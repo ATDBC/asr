@@ -48,6 +48,7 @@ def query_gpu(
     completed = runner(
         [
             "nvidia-smi",
+            f"--id={index}",
             "--query-gpu=index,name,memory.total,memory.free,driver_version",
             "--format=csv,noheader,nounits",
         ],

@@ -27,7 +27,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "worker_python": "/opt/funasr-transcriber/.venv-asr/bin/python",
         "timeout_seconds": 1800,
         "use_half": True,
-        "aed_worker_count": 2,
+        "aed_worker_count": 1,
         "gpu_safety_margin_mib": 1536,
         "punc_token_budget": 256,
         "punc_max_items": 16,

@@ -12,8 +12,8 @@ work_dir = "/var/tmp/funasr-transcriber"
 worker_python = "/opt/funasr-transcriber/.venv-asr/bin/python"
 timeout_seconds = 1800
 use_half = true
-aed_worker_count = 2
-# Free GPU 0 after warm-up minus this margin is the shared AED transient budget.
+aed_worker_count = 1
+# Compatibility-only for explicitly selected legacy two-worker mode.
 gpu_safety_margin_mib = 1536
 punc_token_budget = 256
 punc_max_items = 16

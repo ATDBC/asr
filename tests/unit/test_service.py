@@ -18,6 +18,7 @@ from funasr_transcriber.schemas import (
     TimedToken,
 )
 from funasr_transcriber.service import (
+    build_hot_model_host,
     DaemonService,
     HotModelHost,
     ServiceJobRunner,
@@ -179,6 +180,32 @@ def test_hot_model_host_loads_once_and_closes_only_owned_models():
         "excluded_from_job_timing": False,
         "reason": "already_performed",
     }
+
+
+def test_single_worker_admission_does_not_gate_on_free_memory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        service_module,
+        "require_gpu_capacity",
+        lambda device, **kwargs: calls.append((device, kwargs)),
+        raising=False,
+    )
+
+    host = build_hot_model_host(
+        load_config(),
+        ServicePaths.from_work_dir(tmp_path),
+    )
+    host._gpu_check()
+
+    assert calls == [
+        (
+            "cuda:0",
+            {"minimum_total_mib": 23 * 1024, "minimum_free_mib": 0},
+        )
+    ]
 
 
 class RecordingAsr:

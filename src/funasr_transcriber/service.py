@@ -31,7 +31,7 @@ from .exporters import export_transcript, publish_output_directory
 from .gpu import (
     build_gpu_stage_record,
     query_gpu,
-    require_concurrent_gpu_capacity,
+    require_gpu_capacity,
 )
 from .overlap import (
     JsonOverlapWorkerClient,
@@ -1110,10 +1110,10 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
         )
 
     def gpu_check() -> None:
-        require_concurrent_gpu_capacity(
+        require_gpu_capacity(
             "cuda:0",
             minimum_total_mib=config.service.minimum_total_mib,
-            required_free_mib=config.service.minimum_free_mib,
+            minimum_free_mib=0,
         )
 
     return HotModelHost(

@@ -173,7 +173,6 @@ def _run_once(
                 str(audio),
                 request_id,
                 scheduled_segments,
-                batch_size,
             )
         _synchronize(torch)
         elapsed = time.perf_counter() - started

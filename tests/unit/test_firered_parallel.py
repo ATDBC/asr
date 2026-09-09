@@ -289,7 +289,7 @@ def test_single_aed_owner_overlaps_weighted_batches_with_punc_and_records_peaks(
 
     aed = StreamingWorker(pid=101)
     punc = PuncOwner(pid=102)
-    owner = parallel_module.SingleAedPuncWorkerClient(
+    owner = parallel_module.WeightedAedPuncWorkerClient(
         aed,
         punc,
         punc_max_items=1,
@@ -318,6 +318,119 @@ def test_single_aed_owner_overlaps_weighted_batches_with_punc_and_records_peaks(
     assert scheduler["planner"] == "weighted_duration_single_worker"
     assert scheduler["planned_batches"] == 2
     assert "shared_budget_mib" not in scheduler
+
+
+def test_weighted_dual_aed_partitions_fixed_batches_and_streams_one_punc(
+    tmp_path,
+):
+    punc_completed = threading.Event()
+
+    class DualStreamingWorker(_StreamingWorker):
+        def run_aed_plan_stream(self, path, plan, vad, on_event):
+            response = super().run_aed_plan_stream(
+                path,
+                plan,
+                vad,
+                on_event,
+            )
+            assert punc_completed.wait(timeout=1)
+            return response
+
+    class DualPuncOwner(_FakePuncOwner):
+        def punctuate_chunk(self, path, records):
+            result = super().punctuate_chunk(path, records)
+            punc_completed.set()
+            return result
+
+    first = DualStreamingWorker(pid=101)
+    second = DualStreamingWorker(pid=102)
+    punc = DualPuncOwner(pid=103)
+    owner = parallel_module.WeightedAedPuncWorkerClient(
+        first,
+        punc,
+        worker1=second,
+        punc_max_items=1,
+    )
+    owner.gpu_memory_provider = lambda *_: pytest.fail(
+        "weighted mode must not query GPU memory"
+    )
+
+    result = owner.transcribe(
+        tmp_path / "audio.wav",
+        [[index * 1_000, (index + 1) * 1_000] for index in range(64)],
+    )
+
+    plans = [
+        call[1]
+        for worker in (first, second)
+        for call in worker.calls
+        if call[0] == "aed"
+    ]
+    planned_indices = sorted(
+        item["index"]
+        for lane in plans
+        for batch in lane
+        for item in batch
+    )
+    punc_indices = {
+        index
+        for action, indices in punc.calls
+        if action == "punc_chunk"
+        for index in indices
+    }
+
+    assert result.text
+    assert owner.pids == (101, 102)
+    assert owner.status()["worker_count"] == 2
+    assert len(plans) == 2
+    assert all(plans)
+    assert planned_indices == list(range(64))
+    assert punc_indices == set(range(64))
+    parallel = owner.last_response["metrics"]["parallel"]
+    assert parallel["dispatch_mode"] == "concurrent"
+    assert "memory" not in parallel
+    assert "shared_budget_mib" not in owner.last_response["metrics"]["scheduler"]
+
+
+def test_weighted_dual_aed_lifecycle_covers_both_lanes(tmp_path):
+    class LifecycleWorker(_FakeWorker):
+        def warmup(self, path):
+            self.calls.append(("warmup", path))
+            return {
+                "excluded": True,
+                "seconds": 0.1,
+                "resident_allocated_mib": 100,
+            }
+
+        def cleanup_cuda_cache(self):
+            self.calls.append(("cleanup", None))
+            return {"seconds": 0.1}
+
+    class LifecyclePunc(_FakePuncOwner):
+        def warmup(self, path):
+            self.calls.append(("warmup", path))
+            return {
+                "excluded": True,
+                "seconds": 0.1,
+                "resident_allocated_mib": 50,
+            }
+
+    first = LifecycleWorker(pid=101)
+    second = LifecycleWorker(pid=102)
+    punc = LifecyclePunc(pid=103)
+    owner = parallel_module.WeightedAedPuncWorkerClient(
+        first,
+        punc,
+        worker1=second,
+    )
+
+    warmup = owner.warmup(tmp_path / "warmup.wav")
+    cleanup = owner.cleanup_cuda_cache()
+
+    assert len(warmup["workers"]) == 2
+    assert warmup["punc"] is not None
+    assert [record["pid"] for record in cleanup["workers"]] == [101, 102]
+    assert not any(call[0] == "cleanup" for call in punc.calls)
 
 
 def test_parallel_owner_cleanup_runs_two_aed_workers_concurrently_not_punc():

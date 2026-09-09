@@ -830,23 +830,27 @@ class ParallelFireRedWorkerClient:
         self.close()
 
 
-class SingleAedPuncWorkerClient(ParallelFireRedWorkerClient):
-    """One weighted AED lane streaming into one independent Punc owner."""
+class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
+    """One or two weighted AED lanes streaming into one Punc owner."""
 
     def __init__(
         self,
         worker0: Any,
         punc_owner: Any,
         *,
+        worker1: Any | None = None,
         punc_token_budget: int = DEFAULT_PUNC_TOKEN_BUDGET,
         punc_max_items: int = DEFAULT_PUNC_MAX_ITEMS,
     ):
         super().__init__(
             worker0,
-            worker0,
+            worker1 or worker0,
             punc_owner=punc_owner,
             punc_token_budget=punc_token_budget,
             punc_max_items=punc_max_items,
+        )
+        self.aed_workers = (
+            (worker0,) if worker1 is None else (worker0, worker1)
         )
         self.cost_model = BatchCostModel(
             base_transient_mib=0,
@@ -860,40 +864,58 @@ class SingleAedPuncWorkerClient(ParallelFireRedWorkerClient):
 
     @property
     def pids(self) -> tuple[int, ...]:
-        pid = self.pid
-        return (pid,) if isinstance(pid, int) and pid > 0 else ()
+        return tuple(
+            pid
+            for worker in self.aed_workers
+            if isinstance((pid := getattr(worker, "pid", None)), int)
+            and pid > 0
+        )
 
     def status(self) -> dict[str, object]:
         return {
-            "workers": [self.worker0.status()],
+            "workers": [worker.status() for worker in self.aed_workers],
             "punc": self.punc_owner.status(),
-            "worker_count": 1,
+            "worker_count": len(self.aed_workers),
         }
 
     def warmup(self, audio_path: Path | None = None) -> dict[str, object]:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        clients = (*self.aed_workers, self.punc_owner)
+        with ThreadPoolExecutor(max_workers=len(clients)) as executor:
             futures = [
                 executor.submit(client.warmup, audio_path)
-                for client in (self.worker0, self.punc_owner)
+                for client in clients
             ]
             results = [future.result() for future in futures]
-        self.worker_resident_mib = (
-            int(results[0].get("resident_allocated_mib") or 0),
+        worker_count = len(self.aed_workers)
+        self.worker_resident_mib = tuple(
+            int(result.get("resident_allocated_mib") or 0)
+            for result in results[:worker_count]
         )
         return {
             "excluded": all(bool(item.get("excluded")) for item in results),
             "seconds": max(float(item.get("seconds") or 0.0) for item in results),
-            "workers": results[:1],
-            "punc": results[1],
+            "workers": results[:worker_count],
+            "punc": results[-1],
             "cost_model": self.cost_model.summary(),
         }
 
     def cleanup_cuda_cache(self) -> dict[str, object]:
         started = perf_counter()
-        result = dict(self.worker0.cleanup_cuda_cache())
-        result["worker_index"] = 0
-        result["pid"] = self.pid
-        return {"seconds": perf_counter() - started, "workers": [result]}
+        with ThreadPoolExecutor(max_workers=len(self.aed_workers)) as executor:
+            futures = [
+                executor.submit(worker.cleanup_cuda_cache)
+                for worker in self.aed_workers
+            ]
+            results = [future.result() for future in futures]
+        records = []
+        for index, (worker, result) in enumerate(
+            zip(self.aed_workers, results)
+        ):
+            record = dict(result)
+            record["worker_index"] = index
+            record["pid"] = getattr(worker, "pid", None)
+            records.append(record)
+        return {"seconds": perf_counter() - started, "workers": records}
 
     def transcribe(
         self,
@@ -901,7 +923,7 @@ class SingleAedPuncWorkerClient(ParallelFireRedWorkerClient):
         vad_segments_ms: list[list[int]] | None = None,
     ) -> AsrResult:
         if vad_segments_ms is None:
-            raise ValueError("single AED/Punc streaming requires VAD segments")
+            raise ValueError("weighted AED/Punc streaming requires VAD segments")
 
         started = perf_counter()
         vad_started = perf_counter()
@@ -921,15 +943,24 @@ class SingleAedPuncWorkerClient(ParallelFireRedWorkerClient):
             for batch in batches
         )
         plan_seconds = perf_counter() - plan_started
-        assignments = (plan,)
+        worker_count = len(self.aed_workers)
+        assignments = (
+            (plan,)
+            if worker_count == 1
+            else partition_batches(plan, worker_count=worker_count)
+        )
+        worker_plans = [
+            serialize_batch_plan(worker_plan)
+            for worker_plan in assignments
+        ]
         empty_memory = GpuMemorySnapshot(0, 0, {})
         result = self._transcribe_streaming(
             audio_path,
             refined,
             plan,
             assignments,
-            [serialize_batch_plan(plan)],
-            "single",
+            worker_plans,
+            "single" if worker_count == 1 else "concurrent",
             empty_memory,
             empty_memory,
             0,
@@ -941,6 +972,23 @@ class SingleAedPuncWorkerClient(ParallelFireRedWorkerClient):
         parallel = self.last_response["metrics"]["parallel"]
         parallel.pop("memory", None)
         parallel.pop("prediction_accuracy", None)
-        parallel["worker_count"] = 1
-        self.last_response["metrics"]["scheduler"] = _aed_plan_summary(batches)
+        parallel["worker_count"] = worker_count
+        scheduler = _aed_plan_summary(batches)
+        if worker_count == 2:
+            scheduler.update({
+                "planner": "weighted_duration_dual_worker",
+                "worker_count": worker_count,
+                "worker_batch_counts": [
+                    len(worker_plan) for worker_plan in assignments
+                ],
+                "worker_predicted_seconds": [
+                    summary.predicted_seconds
+                    for summary in summarize_partition(assignments)
+                ],
+                "worker_plans": worker_plans,
+            })
+        self.last_response["metrics"]["scheduler"] = scheduler
         return result
+
+
+SingleAedPuncWorkerClient = WeightedAedPuncWorkerClient

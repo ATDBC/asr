@@ -222,6 +222,33 @@ def test_only_single_worker_admission_omits_free_memory_gate(
     ]
 
 
+def test_single_aed_service_uses_independent_punc_owner(tmp_path: Path, monkeypatch):
+    import funasr_transcriber.firered_client as client_module
+
+    clients = []
+
+    class FakeClient:
+        def __init__(self, **options):
+            self.options = options
+            clients.append(self)
+
+    monkeypatch.setattr(client_module, "FireRedWorkerClient", FakeClient)
+
+    owner = build_hot_model_host(
+        load_config(),
+        ServicePaths.from_work_dir(tmp_path),
+    )._asr_factory()
+
+    assert owner.worker0 is clients[0]
+    assert owner.punc_owner is clients[1]
+    assert clients[0].options["enable_vad"] is True
+    assert clients[0].options["enable_punc"] is False
+    assert clients[0].options["punc_only"] is False
+    assert clients[1].options["enable_vad"] is False
+    assert clients[1].options["enable_punc"] is True
+    assert clients[1].options["punc_only"] is True
+
+
 class RecordingAsr:
     def __init__(self):
         self.received_segments = None

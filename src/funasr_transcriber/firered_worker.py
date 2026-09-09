@@ -993,13 +993,26 @@ def serve(
                 raw_results = request.get("aed_results")
                 if not isinstance(raw_results, list):
                     raise ValueError("punctuate_chunk requires aed_results")
+                resident_allocated_mib = _cuda_memory_allocated_mib()
+                resident_reserved_mib = _cuda_reserved_memory_mib()
+                _reset_cuda_peak_memory()
+                punc_started = clock()
                 response = _punctuate_aed_items(system, raw_results)
+                _synchronize_cuda()
+                punc_metrics = {
+                    "actual_seconds": clock() - punc_started,
+                    "peak_allocated_mib": _cuda_peak_memory_mib(),
+                    "peak_reserved_mib": _cuda_peak_reserved_mib(),
+                    "resident_allocated_mib": resident_allocated_mib,
+                    "resident_reserved_mib": resident_reserved_mib,
+                }
                 _write_response(
                     protocol_output,
                     {
                         "id": identifier,
                         "ok": True,
                         "punc_results": response,
+                        "punc_metrics": punc_metrics,
                     },
                 )
                 continue

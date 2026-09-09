@@ -4,6 +4,7 @@ import threading
 
 import pytest
 
+import funasr_transcriber.firered_parallel as parallel_module
 from funasr_transcriber.firered_scheduler import BatchCostModel
 
 from funasr_transcriber.firered_parallel import (
@@ -224,6 +225,99 @@ class _FakePuncOwner(_FakeWorker):
             }
             for item in records
         ]
+
+
+def test_single_aed_owner_overlaps_weighted_batches_with_punc_and_records_peaks(
+    tmp_path,
+):
+    punc_completed = threading.Event()
+
+    class StreamingWorker(_FakeWorker):
+        def run_aed_plan_stream(self, path, plan, vad, on_event):
+            self.calls.append(("aed_stream", plan))
+            all_records = []
+            batch_metrics = []
+            for batch_index, batch in enumerate(plan):
+                records = [
+                    {
+                        "index": item["index"],
+                        "result": {
+                            "uttid": (
+                                f"job_s{item['start_ms']}_e{item['end_ms']}"
+                            ),
+                            "text": str(item["index"]),
+                            "confidence": 0.9,
+                            "timestamp": [(str(item["index"]), 0.0, 0.5)],
+                        },
+                    }
+                    for item in batch
+                ]
+                metric = {
+                    "batch_index": batch_index,
+                    "actual_seconds": 0.5,
+                    "peak_allocated_mib": 3_000,
+                    "peak_reserved_mib": 3_200,
+                }
+                all_records.extend(records)
+                batch_metrics.append(metric)
+                on_event({
+                    "batch_index": batch_index,
+                    "aed_results": records,
+                    "batch_metrics": metric,
+                })
+                if batch_index == 0:
+                    assert punc_completed.wait(timeout=1)
+            return {
+                "aed_results": all_records,
+                "duration_ms": 33_000,
+                "vad_segments_ms": vad,
+                "batch_metrics": batch_metrics,
+            }
+
+    class PuncOwner(_FakePuncOwner):
+        def punctuate_chunk(self, path, records):
+            result = super().punctuate_chunk(path, records)
+            self.last_response = {
+                "punc_metrics": {
+                    "actual_seconds": 0.1,
+                    "peak_allocated_mib": 900,
+                    "peak_reserved_mib": 1_000,
+                }
+            }
+            punc_completed.set()
+            return result
+
+    aed = StreamingWorker(pid=101)
+    punc = PuncOwner(pid=102)
+    owner = parallel_module.SingleAedPuncWorkerClient(
+        aed,
+        punc,
+        punc_max_items=1,
+    )
+
+    owner.start()
+    result = owner.transcribe(
+        tmp_path / "audio.wav",
+        [[index * 1_000, (index + 1) * 1_000] for index in range(33)],
+    )
+    owner.close()
+
+    assert result.text == "".join(f"{index}。" for index in range(33))
+    assert aed.started == punc.started == 1
+    assert aed.closed == punc.closed == 1
+    assert owner.pids == (101,)
+    assert [call[0] for call in punc.calls] == ["punc_chunk", "punc_chunk"]
+    metrics = owner.last_response["metrics"]["parallel"]
+    assert metrics["worker_count"] == 1
+    assert metrics["punc_batches"] == 2
+    assert metrics["memory_peaks"] == {
+        "aed": {"allocated_mib": 3_000, "reserved_mib": 3_200},
+        "punc": {"allocated_mib": 900, "reserved_mib": 1_000},
+    }
+    scheduler = owner.last_response["metrics"]["scheduler"]
+    assert scheduler["planner"] == "weighted_duration_single_worker"
+    assert scheduler["planned_batches"] == 2
+    assert "shared_budget_mib" not in scheduler
 
 
 def test_parallel_owner_cleanup_runs_two_aed_workers_concurrently_not_punc():

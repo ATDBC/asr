@@ -1057,7 +1057,10 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
     """Construct the persistent AED owner and 3D-Speaker owner."""
 
     from .firered_client import FireRedWorkerClient
-    from .firered_parallel import ParallelFireRedWorkerClient
+    from .firered_parallel import (
+        ParallelFireRedWorkerClient,
+        SingleAedPuncWorkerClient,
+    )
     from .speaker_diarization import SpeakerDiarizer
     warmup_audio = (
         Path(config.paths.model_dir)
@@ -1092,7 +1095,21 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
     def asr_factory() -> Any:
         worker_count = int(getattr(config.asr, "aed_worker_count", 1))
         if worker_count == 1:
-            return client("firered-worker.log", enable_vad=True, enable_punc=True)
+            return SingleAedPuncWorkerClient(
+                client(
+                    "firered-worker-0.log",
+                    enable_vad=True,
+                    enable_punc=False,
+                ),
+                client(
+                    "firered-punc.log",
+                    enable_vad=False,
+                    enable_punc=True,
+                    punc_only=True,
+                ),
+                punc_token_budget=config.asr.punc_token_budget,
+                punc_max_items=config.asr.punc_max_items,
+            )
         if worker_count != 2:
             raise ValueError("aed_worker_count must be 1 or 2")
         return ParallelFireRedWorkerClient(

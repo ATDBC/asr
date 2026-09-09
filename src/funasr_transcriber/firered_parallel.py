@@ -12,6 +12,12 @@ from time import perf_counter
 from .firered_scheduler import BatchCostModel, BatchDecision, MemoryFirstBatchPacker
 from .firered_contract import normalize_official_result
 from .firered_client import parse_worker_response
+from .firered_worker import (
+    AED_LONGEST_WEIGHT,
+    AED_PADDED_WEIGHT,
+    _aed_plan_summary,
+    plan_aed_batches,
+)
 from .punc_scheduler import (
     DEFAULT_PUNC_MAX_ITEMS,
     DEFAULT_PUNC_TOKEN_BUDGET,
@@ -421,6 +427,7 @@ class ParallelFireRedWorkerClient:
         sentinel = object()
         queue: Queue[object] = Queue(maxsize=8)
         punc_items: list[dict[str, object]] = []
+        punc_batch_metrics: list[dict[str, object]] = []
         punc_batches = 0
         punc_model_seconds = 0.0
         max_queue_depth = 0
@@ -434,6 +441,10 @@ class ParallelFireRedWorkerClient:
             punc_model_seconds += perf_counter() - punc_started
             punc_batches += 1
             punc_items.extend(chunk)
+            response = getattr(self.punc_owner, "last_response", {})
+            metrics = response.get("punc_metrics") if isinstance(response, dict) else None
+            if isinstance(metrics, dict):
+                punc_batch_metrics.append(dict(metrics))
             pending.clear()
 
         def consume_punc() -> dict[str, object]:
@@ -507,8 +518,8 @@ class ParallelFireRedWorkerClient:
                 )
             ]
             timed_responses = [future.result() for future in futures]
+            aed_ended = perf_counter()
             punc_metrics = punc_future.result()
-        aed_ended = perf_counter()
         aed_wall_seconds = aed_ended - aed_started
         responses = [item[0] for item in timed_responses]
         worker_aed_seconds = [float(item[1]) for item in timed_responses]
@@ -524,6 +535,21 @@ class ParallelFireRedWorkerClient:
         normalized = normalize_official_result("parallel", raw)
         result = parse_worker_response(normalized)
         normalization_seconds = perf_counter() - raw_started
+        aed_batch_metrics = [
+            metric
+            for response in responses
+            for metric in response.get("batch_metrics", ())
+            if isinstance(metric, dict)
+        ]
+
+        def peak(records: list[dict[str, object]], key: str) -> int | None:
+            values = [
+                int(record[key])
+                for record in records
+                if isinstance(record.get(key), (int, float))
+            ]
+            return max(values, default=None)
+
         self.last_response = {
             "metrics": {
                 "parallel": {
@@ -558,6 +584,24 @@ class ParallelFireRedWorkerClient:
                     "punc_max_queue_depth": int(punc_metrics["max_queue_depth"]),
                     "punc_token_budget": self.punc_token_budget,
                     "punc_max_items": self.punc_max_items,
+                    "memory_peaks": {
+                        "aed": {
+                            "allocated_mib": peak(
+                                aed_batch_metrics, "peak_allocated_mib"
+                            ),
+                            "reserved_mib": peak(
+                                aed_batch_metrics, "peak_reserved_mib"
+                            ),
+                        },
+                        "punc": {
+                            "allocated_mib": peak(
+                                punc_batch_metrics, "peak_allocated_mib"
+                            ),
+                            "reserved_mib": peak(
+                                punc_batch_metrics, "peak_reserved_mib"
+                            ),
+                        },
+                    },
                     "total_seconds": perf_counter() - started,
                     "worker_count": 2,
                     "planned_batches": len(plan),
@@ -784,3 +828,119 @@ class ParallelFireRedWorkerClient:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
+
+
+class SingleAedPuncWorkerClient(ParallelFireRedWorkerClient):
+    """One weighted AED lane streaming into one independent Punc owner."""
+
+    def __init__(
+        self,
+        worker0: Any,
+        punc_owner: Any,
+        *,
+        punc_token_budget: int = DEFAULT_PUNC_TOKEN_BUDGET,
+        punc_max_items: int = DEFAULT_PUNC_MAX_ITEMS,
+    ):
+        super().__init__(
+            worker0,
+            worker0,
+            punc_owner=punc_owner,
+            punc_token_budget=punc_token_budget,
+            punc_max_items=punc_max_items,
+        )
+        self.cost_model = BatchCostModel(
+            base_transient_mib=0,
+            memory_per_padded_frame_mib=0,
+            base_seconds=0,
+            seconds_per_padded_frame=AED_PADDED_WEIGHT / 100,
+            seconds_per_total_frame=0,
+            seconds_per_max_frame=AED_LONGEST_WEIGHT / 100,
+            seconds_per_item=0,
+        )
+
+    @property
+    def pids(self) -> tuple[int, ...]:
+        pid = self.pid
+        return (pid,) if isinstance(pid, int) and pid > 0 else ()
+
+    def status(self) -> dict[str, object]:
+        return {
+            "workers": [self.worker0.status()],
+            "punc": self.punc_owner.status(),
+            "worker_count": 1,
+        }
+
+    def warmup(self, audio_path: Path | None = None) -> dict[str, object]:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(client.warmup, audio_path)
+                for client in (self.worker0, self.punc_owner)
+            ]
+            results = [future.result() for future in futures]
+        self.worker_resident_mib = (
+            int(results[0].get("resident_allocated_mib") or 0),
+        )
+        return {
+            "excluded": all(bool(item.get("excluded")) for item in results),
+            "seconds": max(float(item.get("seconds") or 0.0) for item in results),
+            "workers": results[:1],
+            "punc": results[1],
+            "cost_model": self.cost_model.summary(),
+        }
+
+    def cleanup_cuda_cache(self) -> dict[str, object]:
+        started = perf_counter()
+        result = dict(self.worker0.cleanup_cuda_cache())
+        result["worker_index"] = 0
+        result["pid"] = self.pid
+        return {"seconds": perf_counter() - started, "workers": [result]}
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        vad_segments_ms: list[list[int]] | None = None,
+    ) -> AsrResult:
+        if vad_segments_ms is None:
+            raise ValueError("single AED/Punc streaming requires VAD segments")
+
+        started = perf_counter()
+        vad_started = perf_counter()
+        refined = self.worker0.refine_vad(audio_path, vad_segments_ms)
+        vad_seconds = perf_counter() - vad_started
+        plan_started = perf_counter()
+        batches = plan_aed_batches([
+            (float(start) / 1000.0, float(end) / 1000.0)
+            for start, end in refined
+        ])
+        plan = tuple(
+            BatchDecision(
+                items=tuple(batch),
+                estimate=self.cost_model.estimate(batch),
+                decision="weighted_duration",
+            )
+            for batch in batches
+        )
+        plan_seconds = perf_counter() - plan_started
+        assignments = (plan,)
+        empty_memory = GpuMemorySnapshot(0, 0, {})
+        result = self._transcribe_streaming(
+            audio_path,
+            refined,
+            plan,
+            assignments,
+            [serialize_batch_plan(plan)],
+            "single",
+            empty_memory,
+            empty_memory,
+            0,
+            0,
+            started,
+            vad_seconds,
+            plan_seconds,
+        )
+        parallel = self.last_response["metrics"]["parallel"]
+        parallel.pop("memory", None)
+        parallel.pop("prediction_accuracy", None)
+        parallel["worker_count"] = 1
+        self.last_response["metrics"]["scheduler"] = _aed_plan_summary(batches)
+        return result

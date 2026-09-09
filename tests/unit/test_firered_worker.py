@@ -192,6 +192,66 @@ def test_worker_serves_cleanup_cuda_cache_without_audio(monkeypatch):
     assert responses[1] == {"id": "stop", "ok": True, "shutdown": True}
 
 
+def test_worker_reports_punc_chunk_cuda_peaks(tmp_path: Path, monkeypatch):
+    wav = tmp_path / "normalized.wav"
+    sf.write(wav, np.zeros(16_000, dtype=np.int16), 16_000, subtype="PCM_16")
+
+    class Punc:
+        def process_with_timestamp(self, timestamps, uttids):
+            return [
+                {
+                    "uttid": uttids[0],
+                    "punc_sentences": [
+                        {"punc_text": "测试。", "start_s": 0, "end_s": 1}
+                    ],
+                }
+            ]
+
+    monkeypatch.setattr(worker_module, "_reset_cuda_peak_memory", lambda: None)
+    monkeypatch.setattr(worker_module, "_synchronize_cuda", lambda: None)
+    monkeypatch.setattr(worker_module, "_cuda_peak_memory_mib", lambda: 900)
+    monkeypatch.setattr(worker_module, "_cuda_peak_reserved_mib", lambda: 1_000)
+    monkeypatch.setattr(worker_module, "_cuda_memory_allocated_mib", lambda: 800)
+    monkeypatch.setattr(worker_module, "_cuda_reserved_memory_mib", lambda: 850)
+    request = {
+        "id": "punc",
+        "action": "punctuate_chunk",
+        "audio_path": str(wav),
+        "aed_results": [
+            {
+                "index": 0,
+                "result": {
+                    "uttid": "job_s0_e1000",
+                    "timestamp": [["测试", 0.0, 1.0]],
+                    "confidence": 0.9,
+                },
+            }
+        ],
+    }
+    protocol_output = StringIO()
+    times = iter((0.0, 1.0, 10.0, 10.25))
+
+    serve(
+        StringIO(json.dumps(request) + "\n" + _request("stop", "shutdown")),
+        protocol_output,
+        system_factory=lambda: SimpleNamespace(
+            punc=Punc(),
+            punc_token_budget=256,
+            punc_max_items=16,
+        ),
+        clock=lambda: next(times),
+    )
+
+    response = json.loads(protocol_output.getvalue().splitlines()[0])
+    assert response["punc_metrics"] == {
+        "actual_seconds": 0.25,
+        "peak_allocated_mib": 900,
+        "peak_reserved_mib": 1_000,
+        "resident_allocated_mib": 800,
+        "resident_reserved_mib": 850,
+    }
+
+
 def test_explicit_aed_process_reports_per_batch_cuda_metrics(tmp_path: Path, monkeypatch):
     wav = tmp_path / "normalized.wav"
     sf.write(wav, np.zeros(16_000, dtype=np.int16), 16_000, subtype="PCM_16")

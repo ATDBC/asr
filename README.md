@@ -130,6 +130,11 @@ models/fireredasr2s/
 └── FireRedPunc/
 ```
 
+默认下载只包含 FireRedVAD/VAD、FireRedASR2-AED、FireRedPunc 的 PyTorch
+权重、FSMN-VAD 和 CAMPPlus；不下载语言识别权重、FireRedVAD 的其他变体或
+FireRedPunc 的 TensorFlow 权重。`overlap.enabled = false` 时也不会下载
+pyannote/ClearVoice 模型，只有显式启用 overlap 后才按需获取。
+
 模型默认从 ModelScope 获取。只有对应资产无法从 ModelScope 获取时，才使用
 Hugging Face fallback；token 只从环境变量读取，不写入配置或日志。
 

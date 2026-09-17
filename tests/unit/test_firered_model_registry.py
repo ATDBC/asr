@@ -21,12 +21,16 @@ class GitResult:
 def test_acquisition_uses_modelscope_and_atomic_sibling_directories(
     tmp_path: Path,
 ):
-    downloads: list[tuple[str, Path]] = []
+    downloads: list[tuple[str, Path, tuple[str, ...]]] = []
     commands: list[tuple[tuple[str, ...], Path | None]] = []
 
-    def snapshot_download(model_id: str, local_dir: str):
+    def snapshot_download(
+        model_id: str,
+        local_dir: str,
+        ignore_patterns: list[str] | None = None,
+    ):
         target = Path(local_dir)
-        downloads.append((model_id, target))
+        downloads.append((model_id, target, tuple(ignore_patterns or ())))
         target.mkdir(parents=True, exist_ok=True)
         (target / "model.pth.tar").write_bytes(b"model")
         if model_id == FIRERED_MODELS["vad"][0]:
@@ -50,11 +54,20 @@ def test_acquisition_uses_modelscope_and_atomic_sibling_directories(
     )
 
     assert paths == resolve_firered_paths(tmp_path, require_existing=True)
-    assert [item[0] for item in downloads] == [
+    assert [model_id for model_id, _, _ in downloads] == [
         FIRERED_MODELS[key][0] for key in ("vad", "aed", "punc")
     ]
-    assert all("FireRedLID" not in model_id for model_id, _ in downloads)
-    assert all(".download-" in target.name for _, target in downloads)
+    assert {
+        model_id: ignored for model_id, _, ignored in downloads
+    } == {
+        FIRERED_MODELS["vad"][0]: ("AED/**", "Stream-VAD/**"),
+        FIRERED_MODELS["aed"][0]: (),
+        FIRERED_MODELS["punc"][0]: (
+            "chinese-lert-base/tf_model.h5",
+        ),
+    }
+    assert all("FireRedLID" not in model_id for model_id, _, _ in downloads)
+    assert all(".download-" in target.name for _, target, _ in downloads)
     assert any(command[0] == "clone" for command, _ in commands)
     assert any(
         command == ("checkout", "--detach", FIRERED_COMMIT)
@@ -78,10 +91,14 @@ def test_acquisition_refuses_existing_invalid_target(tmp_path: Path):
 
 
 def test_huggingface_is_only_used_when_explicit(tmp_path: Path):
-    downloaded: list[str] = []
+    downloaded: list[tuple[str, tuple[str, ...]]] = []
 
-    def hf_download(repo_id: str, local_dir: str):
-        downloaded.append(repo_id)
+    def hf_download(
+        repo_id: str,
+        local_dir: str,
+        ignore_patterns: list[str] | None = None,
+    ):
+        downloaded.append((repo_id, tuple(ignore_patterns or ())))
         target = Path(local_dir)
         target.mkdir(parents=True, exist_ok=True)
         (target / "model.pth.tar").write_bytes(b"model")
@@ -105,7 +122,11 @@ def test_huggingface_is_only_used_when_explicit(tmp_path: Path):
         git_runner=git_runner,
     )
 
-    assert downloaded == [
-        FIRERED_MODELS[key][1] for key in ("vad", "aed", "punc")
-    ]
-    assert all("FireRedLID" not in model_id for model_id in downloaded)
+    assert dict(downloaded) == {
+        FIRERED_MODELS["vad"][1]: ("AED/**", "Stream-VAD/**"),
+        FIRERED_MODELS["aed"][1]: (),
+        FIRERED_MODELS["punc"][1]: (
+            "chinese-lert-base/tf_model.h5",
+        ),
+    }
+    assert all("FireRedLID" not in model_id for model_id, _ in downloaded)

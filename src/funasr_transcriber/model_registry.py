@@ -33,6 +33,11 @@ FIRERED_MODELS = {
     ),
 }
 FIRERED_MODEL_NAMES = ("vad", "aed", "punc")
+FIRERED_MODEL_IGNORE_PATTERNS = {
+    "vad": ("AED/**", "Stream-VAD/**"),
+    "aed": (),
+    "punc": ("chinese-lert-base/tf_model.h5",),
+}
 OVERLAP_MODELS = (
     (
         "pyannote/speaker-diarization-3.1",
@@ -386,12 +391,14 @@ def acquire_firered_assets(
                 snapshot_download(
                     FIRERED_MODELS[name][0],
                     local_dir=str(temporary),
+                    ignore_patterns=list(FIRERED_MODEL_IGNORE_PATTERNS[name]),
                 )
             else:
                 assert hf_download is not None
                 hf_download(
                     FIRERED_MODELS[name][1],
                     local_dir=str(temporary),
+                    ignore_patterns=list(FIRERED_MODEL_IGNORE_PATTERNS[name]),
                 )
             if not _valid_firered_asset(name, temporary):
                 raise ModelError(

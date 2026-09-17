@@ -16,3 +16,4 @@ artifacts/concat_eval/
 validation_results/
 outputs/
 audio_test/
+artifacts/

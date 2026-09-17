@@ -208,7 +208,10 @@ def _measure_case(client: object, case: object) -> dict[str, object]:
         [segments],
         vad_segments_ms=[
             [int(segment["start_ms"]), int(segment["end_ms"])]
-            for segment in segments
+            for segment in sorted(
+                segments,
+                key=lambda item: (item["start_ms"], item["end_ms"]),
+            )
         ],
     )
     results = response.get("aed_results")

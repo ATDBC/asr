@@ -132,6 +132,35 @@ def test_aed_output_fingerprint_ignores_request_and_timing_metadata():
     assert tool._aed_output_fingerprint(first) != tool._aed_output_fingerprint(second)
 
 
+def test_measure_case_sends_monotonic_vad_without_reordering_batch():
+    tool = _load_tool()
+    case = SimpleNamespace(
+        audio_path=Path("/audio.wav"),
+        segments=(
+            {"index": 1, "start_ms": 300, "end_ms": 400},
+            {"index": 0, "start_ms": 100, "end_ms": 200},
+        ),
+    )
+
+    class Client:
+        def run_aed_plan(self, audio_path, batch_plan, vad_segments_ms=None):
+            assert [item["index"] for item in batch_plan[0]] == [1, 0]
+            assert vad_segments_ms == [[100, 200], [300, 400]]
+            return {
+                "aed_results": [
+                    {"index": item["index"], "result": {"text": "ok"}}
+                    for item in batch_plan[0]
+                ],
+                "batch_metrics": [{
+                    "actual_seconds": 1.0,
+                    "peak_allocated_mib": 1,
+                    "peak_reserved_mib": 2,
+                }],
+            }
+
+    tool._measure_case(Client(), case)
+
+
 def test_tool_collects_artifact_and_resume_skips_completed_cases(
     tmp_path: Path,
     monkeypatch,

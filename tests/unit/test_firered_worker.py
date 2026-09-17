@@ -77,6 +77,54 @@ def test_firered_inventory_excludes_lid_module():
     assert set(inventory["modules"]) == {"vad", "asr", "punc"}
 
 
+def test_firered_inventory_reports_actual_aed_runtime(monkeypatch):
+    class Tensor:
+        device = SimpleNamespace(type="cuda")
+        dtype = "torch.bfloat16"
+
+        def numel(self):
+            return 4
+
+        def element_size(self):
+            return 2
+
+    class Module:
+        def parameters(self):
+            return (Tensor(),)
+
+        def buffers(self):
+            return ()
+
+    fake_torch = SimpleNamespace(
+        __version__="2.test",
+        version=SimpleNamespace(cuda="12.test"),
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            current_device=lambda: 0,
+            get_device_capability=lambda index: (8, 6),
+            memory_allocated=lambda: 10,
+            memory_reserved=lambda: 20,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    module = Module()
+    system = SimpleNamespace(
+        vad=SimpleNamespace(vad_model=module),
+        asr=SimpleNamespace(model=module),
+        punc=SimpleNamespace(model=module),
+    )
+
+    inventory = firered_inventory(system)
+
+    assert inventory["runtime"] == {
+        "device": "cuda:0",
+        "dtype": "torch.bfloat16",
+        "compute_capability": "8.6",
+        "torch_version": "2.test",
+        "cuda_version": "12.test",
+    }
+
+
 def test_worker_half_precision_switch_defaults_off_and_can_be_enabled(tmp_path: Path):
     parser = _parser()
 

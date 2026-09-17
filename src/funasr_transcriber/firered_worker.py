@@ -827,17 +827,41 @@ def firered_inventory(system: FireRedSystem) -> dict[str, object]:
         "allocated_bytes": None,
         "reserved_bytes": None,
     }
+    runtime: dict[str, object] = {
+        "device": None,
+        "dtype": None,
+        "compute_capability": None,
+        "torch_version": None,
+        "cuda_version": None,
+    }
     try:
         import torch
 
         if torch.cuda.is_available():
+            parameter_groups = modules.get("asr", {}).get("parameters", {})
+            dtypes = {
+                str(key).split(":", 1)[1]
+                for key, group in parameter_groups.items()
+                if int(group.get("elements", 0)) > 0
+            }
+            if len(dtypes) > 1:
+                raise RuntimeError("FireRed AED uses multiple parameter dtypes")
+            device_index = int(torch.cuda.current_device())
+            major, minor = torch.cuda.get_device_capability(device_index)
+            runtime = {
+                "device": f"cuda:{device_index}",
+                "dtype": None if not dtypes else f"torch.{dtypes.pop()}",
+                "compute_capability": f"{major}.{minor}",
+                "torch_version": str(torch.__version__),
+                "cuda_version": str(torch.version.cuda),
+            }
             memory = {
                 "allocated_bytes": int(torch.cuda.memory_allocated()),
                 "reserved_bytes": int(torch.cuda.memory_reserved()),
             }
     except ImportError:
         pass
-    return {"modules": modules, "memory": memory}
+    return {"modules": modules, "memory": memory, "runtime": runtime}
 
 
 def serve(

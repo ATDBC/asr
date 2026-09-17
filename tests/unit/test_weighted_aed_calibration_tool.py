@@ -111,6 +111,27 @@ def _gpu():
     )
 
 
+def test_aed_output_fingerprint_ignores_request_and_timing_metadata():
+    tool = _load_tool()
+    first = [{
+        "index": 0,
+        "result": {
+            "uttid": "request-a_s0_e1000",
+            "rtf": "0.1",
+            "text": "相同",
+            "confidence": 0.9,
+            "timestamp": [["相", 0.0, 0.5], ["同", 0.5, 1.0]],
+        },
+    }]
+    second = json.loads(json.dumps(first, ensure_ascii=False))
+    second[0]["result"]["uttid"] = "request-b_s0_e1000"
+    second[0]["result"]["rtf"] = "0.2"
+
+    assert tool._aed_output_fingerprint(first) == tool._aed_output_fingerprint(second)
+    second[0]["result"]["text"] = "不同"
+    assert tool._aed_output_fingerprint(first) != tool._aed_output_fingerprint(second)
+
+
 def test_tool_collects_artifact_and_resume_skips_completed_cases(
     tmp_path: Path,
     monkeypatch,

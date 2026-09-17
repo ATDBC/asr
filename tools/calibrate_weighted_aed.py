@@ -184,6 +184,23 @@ def _validate_worker_runtime(
     return {**expected, **runtime}
 
 
+def _aed_output_fingerprint(results: Sequence[object]) -> str:
+    semantic = []
+    for item in results:
+        if not isinstance(item, Mapping) or not isinstance(
+            item.get("result"), Mapping
+        ):
+            raise ValueError("FireRed worker returned invalid AED results")
+        result = item["result"]
+        semantic.append({
+            "index": int(item["index"]),
+            "text": str(result.get("text") or ""),
+            "confidence": result.get("confidence"),
+            "timestamp": result.get("timestamp"),
+        })
+    return canonical_sha256(semantic)
+
+
 def _measure_case(client: object, case: object) -> dict[str, object]:
     segments = [dict(segment) for segment in case.segments]
     response = client.run_aed_plan(
@@ -213,7 +230,7 @@ def _measure_case(client: object, case: object) -> dict[str, object]:
         raise ValueError("FireRed worker returned invalid AED timing")
     return {
         "actual_seconds": actual,
-        "output_fingerprint": canonical_sha256(results),
+        "output_fingerprint": _aed_output_fingerprint(results),
         "peak_allocated_mib": metric.get("peak_allocated_mib"),
         "peak_reserved_mib": metric.get("peak_reserved_mib"),
     }

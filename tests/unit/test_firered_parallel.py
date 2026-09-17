@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -225,6 +226,19 @@ class _FakePuncOwner(_FakeWorker):
             }
             for item in records
         ]
+
+
+def test_weighted_owner_uses_explicit_weights():
+    owner = parallel_module.WeightedAedPuncWorkerClient(
+        _FakeWorker(),
+        _FakePuncOwner(),
+        weights=SimpleNamespace(longest_weight=0.25, padded_weight=0.015),
+        weight_source="artifact",
+        weight_artifact_checksum="a" * 64,
+    )
+
+    assert owner.cost_model.seconds_per_max_frame == pytest.approx(0.0025)
+    assert owner.cost_model.seconds_per_padded_frame == pytest.approx(0.00015)
 
 
 def test_single_aed_owner_overlaps_weighted_batches_with_punc_and_records_peaks(

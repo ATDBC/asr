@@ -346,6 +346,25 @@ def test_plan_aed_batches_uses_server_weighted_relocation():
     ]
 
 
+def test_plan_aed_batches_uses_explicit_weights():
+    durations_s = [46.0, 54.0, 48.0, 55.0, 31.0, 44.0]
+    cursor = 0.0
+    segments = []
+    for duration_s in durations_s:
+        segments.append((cursor, cursor + duration_s))
+        cursor += duration_s
+
+    batches = worker_module.plan_aed_batches(
+        segments,
+        weights=SimpleNamespace(longest_weight=0.01, padded_weight=1.0),
+    )
+
+    assert [[item.index for item in batch] for batch in batches] == [
+        [0, 5, 4, 2],
+        [3, 1],
+    ]
+
+
 def test_plan_aed_batches_limits_size_without_losing_segments():
     segments = [(float(index), float(index + 1)) for index in range(33)]
 

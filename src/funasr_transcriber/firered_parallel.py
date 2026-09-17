@@ -13,10 +13,12 @@ from .firered_scheduler import BatchCostModel, BatchDecision, MemoryFirstBatchPa
 from .firered_contract import normalize_official_result
 from .firered_client import parse_worker_response
 from .firered_worker import (
-    AED_LONGEST_WEIGHT,
-    AED_PADDED_WEIGHT,
     _aed_plan_summary,
     plan_aed_batches,
+)
+from .weighted_aed_calibration import (
+    DEFAULT_WEIGHTED_AED_WEIGHTS,
+    WeightedAedWeights,
 )
 from .punc_scheduler import (
     DEFAULT_PUNC_MAX_ITEMS,
@@ -839,6 +841,10 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
         punc_owner: Any,
         *,
         worker1: Any | None = None,
+        weights: WeightedAedWeights = DEFAULT_WEIGHTED_AED_WEIGHTS,
+        weight_source: str = "builtin",
+        weight_artifact_checksum: str | None = None,
+        weight_warnings: tuple[str, ...] = (),
         punc_token_budget: int = DEFAULT_PUNC_TOKEN_BUDGET,
         punc_max_items: int = DEFAULT_PUNC_MAX_ITEMS,
     ):
@@ -852,13 +858,17 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
         self.aed_workers = (
             (worker0,) if worker1 is None else (worker0, worker1)
         )
+        self.weights = weights
+        self.weight_source = str(weight_source)
+        self.weight_artifact_checksum = weight_artifact_checksum
+        self.weight_warnings = tuple(str(item) for item in weight_warnings)
         self.cost_model = BatchCostModel(
             base_transient_mib=0,
             memory_per_padded_frame_mib=0,
             base_seconds=0,
-            seconds_per_padded_frame=AED_PADDED_WEIGHT / 100,
+            seconds_per_padded_frame=weights.padded_weight / 100,
             seconds_per_total_frame=0,
-            seconds_per_max_frame=AED_LONGEST_WEIGHT / 100,
+            seconds_per_max_frame=weights.longest_weight / 100,
             seconds_per_item=0,
         )
 
@@ -930,10 +940,13 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
         refined = self.worker0.refine_vad(audio_path, vad_segments_ms)
         vad_seconds = perf_counter() - vad_started
         plan_started = perf_counter()
-        batches = plan_aed_batches([
-            (float(start) / 1000.0, float(end) / 1000.0)
-            for start, end in refined
-        ])
+        batches = plan_aed_batches(
+            [
+                (float(start) / 1000.0, float(end) / 1000.0)
+                for start, end in refined
+            ],
+            weights=self.weights,
+        )
         plan = tuple(
             BatchDecision(
                 items=tuple(batch),
@@ -973,7 +986,13 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
         parallel.pop("memory", None)
         parallel.pop("prediction_accuracy", None)
         parallel["worker_count"] = worker_count
-        scheduler = _aed_plan_summary(batches)
+        scheduler = _aed_plan_summary(
+            batches,
+            weights=self.weights,
+            source=self.weight_source,
+            artifact_checksum=self.weight_artifact_checksum,
+            warnings=self.weight_warnings,
+        )
         if worker_count == 2:
             scheduler.update({
                 "planner": "weighted_duration_dual_worker",

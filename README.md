@@ -287,7 +287,8 @@ Punc 与临时 overlap owner 的资源峰值；`--diagnostics deep` 还会写出
 `--audio-root`。命令只读取音频与片段边界，不读取转录标签。它固定使用物理
 GPU0（`cuda:0`）、一个 AED worker，并关闭 VAD/Punc；计划为 create-only，记录为
 append-only。中断后对同一输出目录增加 `--resume`，已经完成的 case 不会重跑，已记录的
-失败也不会被覆盖。
+失败也不会被覆盖。每个 case 先执行一次不计入拟合的预热，再记录三次正式测量，避免把
+新 shape 的首次初始化开销误判成稳态推理噪声。
 
 成功且重复测量稳定时，输出目录中的 `weighted-aed-calibration.json` 可显式部署：
 

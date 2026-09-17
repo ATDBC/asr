@@ -230,6 +230,9 @@ def test_tool_collects_artifact_and_resume_skips_completed_cases(
     assert (output / "records.jsonl").is_file()
     assert (output / "calibration-report.json").is_file()
     assert (output / "weighted-aed-calibration.json").is_file()
+    plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+    assert plan["warmups_per_case"] == 1
+    assert FakeClient.calls == len(plan["cases"]) * (args.repeats + 1)
     first_calls = FakeClient.calls
     constructed = FakeClient.constructed
 

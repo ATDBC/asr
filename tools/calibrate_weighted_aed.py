@@ -120,6 +120,7 @@ def _plan_body(
         "device": "cuda:0",
         "manifest_checksum": manifest_checksum,
         "repeats": int(repeats),
+        "warmups_per_case": 1,
         "use_half": bool(use_half),
         "requested_runtime_identity": dict(runtime_identity),
         "coverage": dict(coverage),
@@ -331,9 +332,9 @@ def run(
             if actual_runtime is not None and worker_runtime != actual_runtime:
                 raise ValueError("FireRed worker runtime changed during resume")
             actual_runtime = worker_runtime
-            _measure_case(client, pending[0])
             runtime_checksum = canonical_sha256(actual_runtime)
             for current_case in pending:
+                _measure_case(client, current_case)
                 measurements = [
                     _measure_case(client, current_case)
                     for _ in range(int(args.repeats))
@@ -404,6 +405,7 @@ def run(
         "gpu0": {"start": _gpu_dict(gpu_start), "end": _gpu_dict(gpu_end)},
         "outcomes": {
             "batches": len(cases) * int(args.repeats),
+            "excluded_warmup_batches": len(cases),
             "failure_records": 0,
             "oom_records": 0,
             "safety_violations": 0,

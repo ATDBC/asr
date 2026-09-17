@@ -218,13 +218,16 @@ def _measure_case(client: object, case: object) -> dict[str, object]:
     metrics = response.get("batch_metrics")
     if not isinstance(results, list) or not isinstance(metrics, list) or len(metrics) != 1:
         raise ValueError("FireRed worker returned invalid AED calibration result")
-    expected_indexes = sorted(int(segment["index"]) for segment in segments)
+    expected_indexes = {int(segment["index"]) for segment in segments}
     try:
-        returned_indexes = sorted(int(item["index"]) for item in results)
+        returned_indexes = [int(item["index"]) for item in results]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("FireRed worker returned invalid AED result indexes") from exc
-    if returned_indexes != expected_indexes:
-        raise ValueError("FireRed worker returned incomplete AED calibration results")
+    if (
+        len(returned_indexes) != len(set(returned_indexes))
+        or not set(returned_indexes).issubset(expected_indexes)
+    ):
+        raise ValueError("FireRed worker returned invalid AED result indexes")
     metric = metrics[0]
     if not isinstance(metric, Mapping):
         raise ValueError("FireRed worker returned invalid AED batch metrics")

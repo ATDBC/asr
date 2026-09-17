@@ -161,6 +161,28 @@ def test_measure_case_sends_monotonic_vad_without_reordering_batch():
     tool._measure_case(Client(), case)
 
 
+def test_measure_case_accepts_results_filtered_by_worker():
+    tool = _load_tool()
+    case = SimpleNamespace(
+        audio_path=Path("/audio.wav"),
+        segments=(
+            {"index": 0, "start_ms": 100, "end_ms": 200},
+            {"index": 1, "start_ms": 300, "end_ms": 400},
+        ),
+    )
+
+    class Client:
+        def run_aed_plan(self, *args, **kwargs):
+            return {
+                "aed_results": [{"index": 1, "result": {"text": "ok"}}],
+                "batch_metrics": [{"actual_seconds": 1.0}],
+            }
+
+    measurement = tool._measure_case(Client(), case)
+
+    assert measurement["actual_seconds"] == 1.0
+
+
 def test_tool_collects_artifact_and_resume_skips_completed_cases(
     tmp_path: Path,
     monkeypatch,

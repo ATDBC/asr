@@ -267,6 +267,42 @@ Punc 与临时 overlap owner 的资源峰值；`--diagnostics deep` 还会写出
 事件 trace。旧的 `--profile-resources` 等价于 `--diagnostics resources`。所有资源采样只包含本项目
 登记的 PID，不包含其他项目进程。
 
+### AED 设备权重校准
+
+新设备只需提供代表性的已切分片段清单，即可离线计算
+`longest_weight` 和 `padded_weight`：
+
+```bash
+.venv/bin/python tools/calibrate_weighted_aed.py \
+  --manifest /data/calibration/segments-plan.json \
+  --audio-root /data/calibration/audio \
+  --model-dir /opt/funasr-transcriber/models \
+  --worker-python /opt/funasr-transcriber/.venv-asr/bin/python \
+  --output /var/lib/funasr-transcriber/device-calibration
+```
+
+清单沿用计划文件的 `metadata.source_inventory`，每个源录音需要提供
+`audio_path`、`source_recording_group`、`source_checksum`、`segments_checksum`
+以及包含 `index/start_ms/end_ms` 的 `segments`；相对音频路径才需要
+`--audio-root`。命令只读取音频与片段边界，不读取转录标签。它固定使用物理
+GPU0（`cuda:0`）、一个 AED worker，并关闭 VAD/Punc；计划为 create-only，记录为
+append-only。中断后对同一输出目录增加 `--resume`，已经完成的 case 不会重跑，已记录的
+失败也不会被覆盖。
+
+成功且重复测量稳定时，输出目录中的 `weighted-aed-calibration.json` 可显式部署：
+
+```toml
+[asr]
+aed_scheduler = "weighted_duration"
+aed_weight_artifact = "/etc/funasr-transcriber/weighted-aed-calibration.json"
+```
+
+服务启动时校验设备、精度、FireRed 源码和 AED checkpoint 身份。artifact 缺失、损坏或
+严格身份不匹配时会记录 warning 并回退到内置权重；driver、CUDA 或 Torch 版本差异会记录
+warning，但不会单独拒绝 artifact。校准只估计时间权重，不估计显存容量、双 worker 争用或
+VAD/Punc 成本；200 秒总时长和 32 条片段仍是固定装箱边界。若校准 case 发生 OOM，说明该
+设备不支持当前固定 shape，不能靠调整这两个时间权重解决。
+
 ### AED 预算矩阵
 
 需要比较同一常驻服务下不同瞬时预算比例时，使用专用工具。它通过请求级比例控制 AED

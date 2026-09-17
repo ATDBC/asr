@@ -55,6 +55,10 @@ from .service_protocol import (
     read_message,
 )
 from .schemas import AsrResult, SpeakerSegment
+from .weighted_aed_calibration import (
+    build_expected_runtime_identity,
+    load_weight_artifact,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1115,10 +1119,32 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
                 enable_punc=True,
                 punc_only=True,
             )
+            weight_options: dict[str, object] = {}
+            if config.asr.aed_weight_artifact is not None:
+                gpu = query_gpu("cuda:0")
+                runtime = build_expected_runtime_identity(
+                    config.paths.model_dir,
+                    gpu_name=gpu.name,
+                    driver_version=gpu.driver_version,
+                    use_half=config.asr.use_half,
+                )
+                selection = load_weight_artifact(
+                    config.asr.aed_weight_artifact,
+                    runtime,
+                )
+                for warning in selection.warnings:
+                    LOGGER.warning("%s", warning)
+                weight_options = {
+                    "weights": selection.weights,
+                    "weight_source": selection.source,
+                    "weight_artifact_checksum": selection.artifact_checksum,
+                    "weight_warnings": selection.warnings,
+                }
             return WeightedAedPuncWorkerClient(
                 worker0,
                 punc_owner,
                 worker1=worker1,
+                **weight_options,
                 punc_token_budget=config.asr.punc_token_budget,
                 punc_max_items=config.asr.punc_max_items,
             )

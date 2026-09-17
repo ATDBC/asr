@@ -281,6 +281,71 @@ def test_weighted_service_builds_selected_aed_lanes_and_one_punc(
     assert clients[-1].options["punc_only"] is True
 
 
+@pytest.mark.parametrize("source", ("artifact", "builtin_fallback"))
+def test_weighted_service_uses_configured_weight_selection(
+    tmp_path: Path,
+    monkeypatch,
+    source: str,
+):
+    import funasr_transcriber.firered_client as client_module
+    from funasr_transcriber.weighted_aed_calibration import (
+        WeightedAedWeights,
+        WeightSelection,
+    )
+
+    class FakeClient:
+        def __init__(self, **options):
+            self.options = options
+
+    artifact = tmp_path / "weights.json"
+    artifact.write_text("{}", encoding="utf-8")
+    selection = WeightSelection(
+        weights=WeightedAedWeights(0.3, 0.02),
+        source=source,
+        artifact_checksum="a" * 64 if source == "artifact" else None,
+        warnings=("runtime warning",),
+    )
+    loaded = []
+    monkeypatch.setattr(client_module, "FireRedWorkerClient", FakeClient)
+    monkeypatch.setattr(
+        service_module,
+        "query_gpu",
+        lambda device: type(
+            "Gpu",
+            (),
+            {"name": "NVIDIA Test", "driver_version": "580.1"},
+        )(),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "build_expected_runtime_identity",
+        lambda *args, **kwargs: {"device": "cuda:0"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "load_weight_artifact",
+        lambda path, runtime: loaded.append((path, runtime)) or selection,
+        raising=False,
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[asr]\naed_weight_artifact = "{artifact}"\n',
+        encoding="utf-8",
+    )
+
+    owner = build_hot_model_host(
+        load_config(config_path),
+        ServicePaths.from_work_dir(tmp_path),
+    )._asr_factory()
+
+    assert loaded == [(artifact, {"device": "cuda:0"})]
+    assert owner.weights == selection.weights
+    assert owner.weight_source == source
+    assert owner.weight_artifact_checksum == selection.artifact_checksum
+    assert owner.weight_warnings == selection.warnings
+
+
 def test_memory_first_service_retains_parallel_owner(tmp_path: Path, monkeypatch):
     import funasr_transcriber.firered_client as client_module
     from funasr_transcriber.firered_parallel import ParallelFireRedWorkerClient

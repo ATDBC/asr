@@ -29,6 +29,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "use_half": True,
         "aed_scheduler": "weighted_duration",
         "aed_worker_count": 1,
+        "aed_weight_artifact": "",
         "gpu_safety_margin_mib": 1536,
         "punc_token_budget": 256,
         "punc_max_items": 16,
@@ -102,6 +103,7 @@ class AsrConfig:
     use_half: bool
     aed_scheduler: str
     aed_worker_count: int
+    aed_weight_artifact: Path | None
     gpu_safety_margin_mib: int
     punc_token_budget: int
     punc_max_items: int
@@ -262,6 +264,11 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
                 values["asr"]["aed_scheduler"]
             ).strip().lower(),
             aed_worker_count=int(values["asr"]["aed_worker_count"]),
+            aed_weight_artifact=(
+                Path(str(values["asr"]["aed_weight_artifact"])).expanduser()
+                if str(values["asr"]["aed_weight_artifact"]).strip()
+                else None
+            ),
             gpu_safety_margin_mib=int(values["asr"]["gpu_safety_margin_mib"]),
             punc_token_budget=int(values["asr"]["punc_token_budget"]),
             punc_max_items=int(values["asr"]["punc_max_items"]),

@@ -14,6 +14,7 @@ timeout_seconds = 1800
 use_half = true
 aed_scheduler = "weighted_duration"
 aed_worker_count = 1
+aed_weight_artifact = ""
 # Compatibility-only for explicitly selected legacy two-worker mode.
 gpu_safety_margin_mib = 1536
 punc_token_budget = 256

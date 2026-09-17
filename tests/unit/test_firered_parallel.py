@@ -228,17 +228,32 @@ class _FakePuncOwner(_FakeWorker):
         ]
 
 
-def test_weighted_owner_uses_explicit_weights():
+def test_weighted_owner_uses_explicit_weights(tmp_path):
     owner = parallel_module.WeightedAedPuncWorkerClient(
-        _FakeWorker(),
+        _StreamingWorker(),
         _FakePuncOwner(),
         weights=SimpleNamespace(longest_weight=0.25, padded_weight=0.015),
         weight_source="artifact",
         weight_artifact_checksum="a" * 64,
+        weight_warnings=("version warning",),
     )
 
     assert owner.cost_model.seconds_per_max_frame == pytest.approx(0.0025)
     assert owner.cost_model.seconds_per_padded_frame == pytest.approx(0.00015)
+    owner.transcribe(
+        tmp_path / "audio.wav",
+        [[index * 1_000, (index + 1) * 1_000] for index in range(33)],
+    )
+    scheduler = owner.last_response["metrics"]["scheduler"]
+    assert scheduler["weight_source"] == "artifact"
+    assert scheduler["weight_artifact_checksum"] == "a" * 64
+    assert scheduler["weight_warnings"] == ["version warning"]
+    for batch in scheduler["plan"]:
+        expected = batch["max_duration_seconds"] * 100 * (
+            owner.cost_model.seconds_per_max_frame
+            + owner.cost_model.seconds_per_padded_frame * batch["item_count"]
+        )
+        assert batch["predicted_seconds"] == pytest.approx(expected)
 
 
 def test_single_aed_owner_overlaps_weighted_batches_with_punc_and_records_peaks(

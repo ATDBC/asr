@@ -129,10 +129,23 @@ def test_default_asr_worker_configuration():
     assert config.asr.gpu_safety_margin_mib == 1536
     assert config.asr.punc_token_budget == 256
     assert config.asr.punc_max_items == 16
+    assert config.asr.aed_weight_artifact is None
     assert not hasattr(config.asr, "segment_batch_size")
     assert not hasattr(config.asr, "segment_frame_budget")
     assert not hasattr(config.asr, "segment_memory_limit_mib")
     assert not hasattr(config.asr, "segment_memory_safety_mib")
+
+
+def test_aed_weight_artifact_is_optional_and_expands_user(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[asr]\naed_weight_artifact = "~/weights.json"\n',
+        encoding="utf-8",
+    )
+
+    assert load_config(path).asr.aed_weight_artifact == Path(
+        "~/weights.json"
+    ).expanduser()
 
 
 @pytest.mark.parametrize(

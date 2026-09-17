@@ -52,9 +52,11 @@ def _write_manifest(tmp_path: Path) -> Path:
 class FakeClient:
     constructed = 0
     calls = 0
+    worker_pythons = []
 
     def __init__(self, **options):
         type(self).constructed += 1
+        type(self).worker_pythons.append(options["worker_python"])
         assert options["device"] == "cuda:0"
         assert options["enable_vad"] is False
         assert options["enable_punc"] is False
@@ -117,8 +119,10 @@ def test_tool_collects_artifact_and_resume_skips_completed_cases(
     manifest = _write_manifest(tmp_path)
     model_dir = tmp_path / "models"
     model_dir.mkdir()
+    real_python = tmp_path / "python-real"
+    real_python.write_text("", encoding="utf-8")
     worker_python = tmp_path / "python"
-    worker_python.write_text("", encoding="utf-8")
+    worker_python.symlink_to(real_python)
     output = tmp_path / "output"
     runtime = {
         "device": "cuda:0",
@@ -146,8 +150,10 @@ def test_tool_collects_artifact_and_resume_skips_completed_cases(
     )
     FakeClient.constructed = 0
     FakeClient.calls = 0
+    FakeClient.worker_pythons = []
 
     assert tool.run(args, client_factory=FakeClient, gpu_query=lambda _: _gpu()) == 0
+    assert FakeClient.worker_pythons == [worker_python.absolute()]
     assert (output / "plan.json").is_file()
     assert (output / "records.jsonl").is_file()
     assert (output / "calibration-report.json").is_file()

@@ -228,7 +228,7 @@ def run(
     manifest = Path(args.manifest).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
     model_dir = Path(args.model_dir).expanduser().resolve()
-    worker_python = Path(args.worker_python).expanduser().resolve()
+    worker_python = Path(args.worker_python).expanduser().absolute()
     plan_path = output / "plan.json"
     records_path = output / "records.jsonl"
     report_path = output / "calibration-report.json"

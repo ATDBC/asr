@@ -50,6 +50,9 @@ def merge_oversegmented_clusters(
     threshold: float,
     min_fraction: float = 0.6,
     relative_ratio: float = 0.55,
+    major_cluster_min_fraction: float = 0.10,
+    major_cluster_merge_threshold: float = 0.88,
+    min_major_items: int = 16,
 ) -> list[int]:
     """Merge over-split clusters whose similarity is high AND stable.
 
@@ -67,12 +70,30 @@ def merge_oversegmented_clusters(
     for index, label in enumerate(labels):
         members.setdefault(label, []).append(index)
     groups = {label: list(indexes) for label, indexes in members.items()}
+    total_items = max(1, len(labels))
     while len(groups) > 1:
         ids = list(groups)
         best_pair: tuple[int, int] | None = None
         best_value = -1.0
         for left_index, left in enumerate(ids):
             for right in ids[left_index + 1:]:
+                len_left = len(groups[left])
+                len_right = len(groups[right])
+                is_major_pair = (
+                    len_left >= min_major_items
+                    and len_right >= min_major_items
+                    and (len_left / total_items) >= major_cluster_min_fraction
+                    and (len_right / total_items) >= major_cluster_min_fraction
+                )
+                if is_major_pair:
+                    centroid_left = normalized[groups[left]].mean(axis=0)
+                    centroid_left = centroid_left / (np.linalg.norm(centroid_left) + 1e-8)
+                    centroid_right = normalized[groups[right]].mean(axis=0)
+                    centroid_right = centroid_right / (np.linalg.norm(centroid_right) + 1e-8)
+                    centroid_sim = float(centroid_left @ centroid_right)
+                    if centroid_sim < major_cluster_merge_threshold:
+                        continue
+
                 cross = normalized[groups[left]] @ normalized[groups[right]].T
                 value = float(cross.mean())
                 if value < threshold:
@@ -306,7 +327,7 @@ class SpeakerDiarizer:
                 "obj": "speakerlab.process.cluster.CommonClustering",
                 "args": {
                     "cluster_type": "spectral",
-                    "mer_cos": 0.8,
+                    "mer_cos": None,
                     "min_num_spks": diarization.min_speakers,
                     "max_num_spks": diarization.max_speakers,
                     "min_cluster_size": 4,
@@ -397,6 +418,8 @@ class SpeakerDiarizer:
                 self.config.diarization.merge_cosine,
                 self.config.diarization.merge_min_fraction,
                 self.config.diarization.merge_relative_ratio,
+                major_cluster_min_fraction=self.config.diarization.major_cluster_min_fraction,
+                major_cluster_merge_threshold=self.config.diarization.major_cluster_merge_threshold,
             )
             labels = relabel_by_first_appearance(labels)
             raw_segments = [

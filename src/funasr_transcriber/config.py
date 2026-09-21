@@ -38,11 +38,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "speaker_count": "auto",
         "min_speakers": 1,
         "max_speakers": 10,
-        "chunk_seconds": 1.0,
-        "chunk_step_seconds": 0.5,
+        "chunk_seconds": 1.5,
+        "chunk_step_seconds": 0.75,
         "merge_cosine": 0.23,
         "merge_min_fraction": 0.6,
         "merge_relative_ratio": 0.55,
+        "major_cluster_min_fraction": 0.10,
+        "major_cluster_merge_threshold": 0.88,
     },
     "vad": {
         "speech_noise_thres": 0.45,
@@ -119,6 +121,8 @@ class DiarizationConfig:
     merge_cosine: float
     merge_min_fraction: float
     merge_relative_ratio: float
+    major_cluster_min_fraction: float
+    major_cluster_merge_threshold: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +288,12 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             merge_relative_ratio=float(
                 values["diarization"]["merge_relative_ratio"]
             ),
+            major_cluster_min_fraction=float(
+                values["diarization"]["major_cluster_min_fraction"]
+            ),
+            major_cluster_merge_threshold=float(
+                values["diarization"]["major_cluster_merge_threshold"]
+            ),
         ),
         vad=VadConfig(
             speech_noise_thres=float(values["vad"]["speech_noise_thres"]),
@@ -378,6 +388,10 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("merge_min_fraction must stay within 0..1")
     if not 0.0 < diarization.merge_relative_ratio <= 1.0:
         raise ValueError("merge_relative_ratio must stay within 0..1")
+    if not 0.0 < diarization.major_cluster_min_fraction <= 1.0:
+        raise ValueError("major_cluster_min_fraction must stay within 0..1")
+    if not 0.0 < diarization.major_cluster_merge_threshold <= 1.0:
+        raise ValueError("major_cluster_merge_threshold must stay within 0..1")
     if config.turns.merge_gap_seconds != 1.0:
         raise ValueError("merge_gap_seconds must be 1.0 in version 1")
     service = config.service

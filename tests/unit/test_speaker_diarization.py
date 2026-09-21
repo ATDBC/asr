@@ -139,3 +139,66 @@ def test_speaker_inventory_reports_embedding_and_uninspectable_vad():
 
     assert inventory["embedding"]["parameter_count"] == 3
     assert inventory["vad"] == {"available": False}
+
+
+def test_merge_protects_major_clusters_from_aggressive_merging():
+    # Two large clusters (20 items each) with centroid cosine ~ 0.82.
+    # Without major cluster guard, a liberal threshold/ratio would merge them.
+    # Major cluster guard blocks merge because 0.82 < 0.88.
+    rng = np.random.RandomState(42)
+    c0 = np.tile([1.0, 0.0], (20, 1)) + rng.normal(0, 0.02, (20, 2))
+    c1 = np.tile([0.82, 0.57], (20, 1)) + rng.normal(0, 0.02, (20, 2))
+    embeddings = np.vstack([c0, c1]).astype("float32")
+    labels = np.array([0] * 20 + [1] * 20)
+
+    merged = merge_oversegmented_clusters(
+        embeddings,
+        labels,
+        threshold=0.23,
+        relative_ratio=0.55,
+        major_cluster_min_fraction=0.10,
+        major_cluster_merge_threshold=0.88,
+        min_major_items=16,
+    )
+    assert len(set(merged)) == 2
+
+
+def test_merge_allows_major_clusters_if_truly_identical():
+    # Two large clusters with near-identical centroids (cosine ~ 0.99 >= 0.88).
+    rng = np.random.RandomState(42)
+    c0 = np.tile([1.0, 0.0], (20, 1)) + rng.normal(0, 0.01, (20, 2))
+    c1 = np.tile([0.999, 0.01], (20, 1)) + rng.normal(0, 0.01, (20, 2))
+    embeddings = np.vstack([c0, c1]).astype("float32")
+    labels = np.array([0] * 20 + [1] * 20)
+
+    merged = merge_oversegmented_clusters(
+        embeddings,
+        labels,
+        threshold=0.23,
+        relative_ratio=0.55,
+        major_cluster_min_fraction=0.10,
+        major_cluster_merge_threshold=0.88,
+        min_major_items=16,
+    )
+    assert len(set(merged)) == 1
+
+
+def test_merge_absorbs_minor_oversegmented_cluster():
+    # Cluster 0 is major (30 items), cluster 1 is minor fragment (4 items).
+    # Even though centroid cosine is 0.82 < 0.88, cluster 1 is minor, so it is absorbed.
+    rng = np.random.RandomState(42)
+    c0 = np.tile([1.0, 0.0], (30, 1)) + rng.normal(0, 0.02, (30, 2))
+    c1 = np.tile([0.82, 0.57], (4, 1)) + rng.normal(0, 0.02, (4, 2))
+    embeddings = np.vstack([c0, c1]).astype("float32")
+    labels = np.array([0] * 30 + [1] * 4)
+
+    merged = merge_oversegmented_clusters(
+        embeddings,
+        labels,
+        threshold=0.23,
+        relative_ratio=0.55,
+        major_cluster_min_fraction=0.10,
+        major_cluster_merge_threshold=0.88,
+        min_major_items=16,
+    )
+    assert len(set(merged)) == 1

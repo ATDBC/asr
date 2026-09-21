@@ -224,3 +224,25 @@ def test_asr_config_rejects_invalid_limits(
 
     with pytest.raises(ValueError, match=message):
         load_config(path)
+
+
+def test_default_diarization_configuration_includes_major_cluster_guard():
+    config = load_config()
+
+    assert config.diarization.chunk_seconds == 1.5
+    assert config.diarization.chunk_step_seconds == 0.75
+    assert config.diarization.major_cluster_min_fraction == 0.10
+    assert config.diarization.major_cluster_merge_threshold == 0.88
+
+
+def test_config_rejects_invalid_major_cluster_guard_params(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("[diarization]\nmajor_cluster_min_fraction = 0.0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="major_cluster_min_fraction"):
+        load_config(path)
+
+    path.write_text("[diarization]\nmajor_cluster_merge_threshold = 1.5\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="major_cluster_merge_threshold"):
+        load_config(path)

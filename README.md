@@ -10,7 +10,6 @@ TXT、结构化 JSON 与诊断文件。
 ## 1. 使用前确认
 
 - Linux、Python 3.11、Git、FFmpeg、NVIDIA GPU。
-- GPU 总显存至少 23 GiB；当前生产目标为 RTX 3090 24 GiB。
 - 只支持物理 GPU 0，不要用 `CUDA_VISIBLE_DEVICES` 把其他 GPU 重映射成
   `cuda:0`。
 - 支持 WAV、MP3、M4A、FLAC、AAC、OGG，单个输入最长两小时。

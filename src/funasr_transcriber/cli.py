@@ -255,11 +255,15 @@ def _run_service(args: argparse.Namespace) -> int:
 def _run_models(action: str, args: argparse.Namespace) -> int:
     config = load_config(args.config)
     if action == "download":
-        download_models(config.paths.model_dir)
+        download_models(
+            config.paths.model_dir, speaker_backend=config.diarization.backend
+        )
         if config.overlap.enabled:
             acquire_overlap_assets(config.paths.model_dir)
     else:
-        result = verify_models(config.paths.model_dir)
+        result = verify_models(
+            config.paths.model_dir, speaker_backend=config.diarization.backend
+        )
         if not result.ok:
             from .errors import ModelError
 

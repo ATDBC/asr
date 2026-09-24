@@ -11,6 +11,7 @@ def test_local_runtime_artifacts_are_gitignored():
         ".venv/",
         ".venv-asr/",
         ".venv-overlap/",
+        ".venv-nemotron/",
         "models/",
         ".pytest_cache/",
         "artifacts/release_validation_corpus/",
@@ -148,3 +149,57 @@ def test_install_script_smoke_imports_overlap_runtime():
         "assert torch.cuda.is_available(), 'overlap CUDA is unavailable'"
         in script
     )
+
+
+def test_optional_nemotron_installer_only_creates_its_own_venv(tmp_path):
+    import os
+    import shutil
+    import subprocess
+
+    root = Path(__file__).parents[2]
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copy2(
+        root / "scripts" / "install_nemotron_linux.sh",
+        scripts / "install_nemotron_linux.sh",
+    )
+    (tmp_path / "requirements-nemotron.txt").write_text(
+        "", encoding="utf-8"
+    )
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\n' \"$*\" >> \"$NEMOTRON_TEST_LOG\"\n"
+        "if [ \"$1\" = -m ] && [ \"$2\" = venv ]; then\n"
+        "  mkdir -p \"$3/bin\"\n"
+        "  cp \"$0\" \"$3/bin/python\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    log = tmp_path / "calls.log"
+    env = {
+        **os.environ,
+        "PYTHON_BIN": str(fake_python),
+        "NEMOTRON_TEST_LOG": str(log),
+        "TORCH_INDEX_URL": "https://example.invalid/cu128",
+    }
+
+    result = subprocess.run(
+        ["bash", str(scripts / "install_nemotron_linux.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / ".venv-nemotron" / "bin" / "python").is_file()
+    assert not (tmp_path / ".venv").exists()
+    assert not (tmp_path / ".venv-asr").exists()
+    assert not (tmp_path / ".venv-overlap").exists()
+    calls = log.read_text(encoding="utf-8")
+    assert "torch==2.8.0" in calls
+    assert "torchaudio==2.8.0" in calls
+    assert "f324707307757d9c0b8dac1c4462eceff911fa2f" in calls
+    assert "requirements-nemotron.txt" in calls

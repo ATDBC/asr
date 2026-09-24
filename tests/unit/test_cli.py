@@ -354,3 +354,25 @@ def test_nemotron_cli_rejects_effective_overlap_request(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="Nemotron.*overlap"):
         cli._service_request(args, config)
+
+@pytest.mark.parametrize("backend", ["3d_speaker", "nemotron3"])
+def test_models_command_uses_only_selected_speaker_backend(
+    monkeypatch, tmp_path, backend
+):
+    from argparse import Namespace
+
+    selected = []
+    config = SimpleNamespace(
+        paths=SimpleNamespace(model_dir=tmp_path),
+        diarization=SimpleNamespace(backend=backend),
+        overlap=SimpleNamespace(enabled=False),
+    )
+    monkeypatch.setattr(cli, "load_config", lambda path: config)
+    monkeypatch.setattr(
+        cli,
+        "download_models",
+        lambda model_dir, speaker_backend: selected.append(speaker_backend),
+    )
+
+    assert cli._run_models("download", Namespace(config=None)) == 0
+    assert selected == [backend]

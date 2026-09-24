@@ -154,3 +154,55 @@ def test_acquire_overlap_assets_rejects_incomplete_existing_directory(
 
     with pytest.raises(ModelError, match="incomplete overlap asset"):
         acquire_overlap_assets(tmp_path, snapshot_download=lambda *args: None)
+
+def test_selected_nemotron_verification_requires_no_3d_assets(
+    monkeypatch, tmp_path: Path
+):
+    import funasr_transcriber.model_registry as registry
+
+    _complete_layout(tmp_path)
+    monkeypatch.setattr(
+        registry, "_source_head", lambda path, runner=None: FIRERED_COMMIT
+    )
+    monkeypatch.setattr(
+        registry, "verify_nemotron_snapshot", lambda root: tmp_path
+    )
+
+    result = registry.verify_models(tmp_path, speaker_backend="nemotron3")
+
+    assert result.ok
+    assert result.missing == ()
+
+
+def test_selected_nemotron_download_skips_3d_assets(
+    monkeypatch, tmp_path: Path
+):
+    import sys
+    from types import SimpleNamespace
+    import funasr_transcriber.model_registry as registry
+
+    called = []
+    monkeypatch.setitem(
+        sys.modules,
+        "modelscope",
+        SimpleNamespace(snapshot_download=lambda *a, **k: called.append("3d")),
+    )
+    monkeypatch.setattr(
+        registry,
+        "acquire_firered_assets",
+        lambda root, snapshot_download: called.append("firered"),
+    )
+    monkeypatch.setattr(
+        registry,
+        "acquire_nemotron_snapshot",
+        lambda root: called.append("nemotron"),
+    )
+    monkeypatch.setattr(
+        registry,
+        "verify_models",
+        lambda root, speaker_backend: registry.ModelVerification(True, ()),
+    )
+
+    registry.download_models(tmp_path, speaker_backend="nemotron3")
+
+    assert called == ["firered", "nemotron"]

@@ -10,6 +10,7 @@ from typing import Any, Callable
 import uuid
 
 from .errors import ModelError
+from .nemotron_assets import acquire_nemotron_snapshot, verify_nemotron_snapshot
 
 
 MODEL_DIRS = {
@@ -265,7 +266,12 @@ def _valid_firered_asset(name: str, path: Path) -> bool:
     return (path / "model.pth.tar").is_file()
 
 
-def verify_models(model_dir: Path) -> ModelVerification:
+def verify_models(
+    model_dir: Path,
+    speaker_backend: str = "3d_speaker",
+) -> ModelVerification:
+    if speaker_backend not in {"3d_speaker", "nemotron3"}:
+        raise ValueError(f"unknown speaker backend: {speaker_backend}")
     root = Path(model_dir).expanduser().resolve()
     paths = resolve_firered_paths(root, require_existing=False)
     missing: list[str] = []
@@ -280,6 +286,13 @@ def verify_models(model_dir: Path) -> ModelVerification:
     for name in FIRERED_MODEL_NAMES:
         if not _valid_firered_asset(name, getattr(paths, name)):
             missing.append(f"firered_{name}")
+    if speaker_backend == "nemotron3":
+        try:
+            verify_nemotron_snapshot(root)
+        except ModelError:
+            missing.append("nemotron3")
+        return ModelVerification(not missing, tuple(missing))
+
     speaker_vad = root / "modelscope" / "iic" / SPEAKER_VAD_DIR
     if not _directory_has_files(speaker_vad):
         missing.append("speaker_vad")
@@ -412,7 +425,12 @@ def acquire_firered_assets(
     return resolve_firered_paths(root, require_existing=True)
 
 
-def download_models(model_dir: Path) -> ModelVerification:
+def download_models(
+    model_dir: Path,
+    speaker_backend: str = "3d_speaker",
+) -> ModelVerification:
+    if speaker_backend not in {"3d_speaker", "nemotron3"}:
+        raise ValueError(f"unknown speaker backend: {speaker_backend}")
     try:
         from modelscope import snapshot_download
     except ImportError as exc:
@@ -420,6 +438,16 @@ def download_models(model_dir: Path) -> ModelVerification:
 
     root = Path(model_dir).expanduser().resolve()
     acquire_firered_assets(root, snapshot_download=snapshot_download)
+    if speaker_backend == "nemotron3":
+        acquire_nemotron_snapshot(root)
+        result = verify_models(root, speaker_backend=speaker_backend)
+        if not result.ok:
+            raise ModelError(
+                "model download completed with missing components: "
+                + ", ".join(result.missing)
+            )
+        return result
+
     iic_root = root / "modelscope" / "iic"
     iic_root.mkdir(parents=True, exist_ok=True)
     snapshot_download(

@@ -1,6 +1,7 @@
 .venv/
 .venv-asr/
 .venv-overlap/
+.venv-nemotron/
 .worktrees/
 .tools/
 models/

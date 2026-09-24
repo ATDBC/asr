@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import json
 import math
 import os
@@ -186,7 +187,8 @@ class NemotronRuntime:
 
 
 def serve(model_dir: Path, allowed_root: Path) -> int:
-    runtime = NemotronRuntime(model_dir)
+    with redirect_stdout(sys.stderr):
+        runtime = NemotronRuntime(model_dir)
     for line in sys.stdin:
         request: Any = None
         try:
@@ -205,7 +207,8 @@ def serve(model_dir: Path, allowed_root: Path) -> int:
                 }
             elif action == "diarize":
                 path = Path(str(request.get("audio_path", "")))
-                segments, metrics = runtime.diarize(path, allowed_root)
+                with redirect_stdout(sys.stderr):
+                    segments, metrics = runtime.diarize(path, allowed_root)
                 result = {
                     "id": request_id,
                     "ok": True,

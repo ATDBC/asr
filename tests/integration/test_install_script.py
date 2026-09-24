@@ -203,3 +203,18 @@ def test_optional_nemotron_installer_only_creates_its_own_venv(tmp_path):
     assert "torchaudio==2.8.0" in calls
     assert "f324707307757d9c0b8dac1c4462eceff911fa2f" in calls
     assert "requirements-nemotron.txt" in calls
+
+def test_nemotron_requirements_include_feature_extractor_backend():
+    requirements = (
+        Path(__file__).parents[2] / "requirements-nemotron.txt"
+    ).read_text(encoding="utf-8").splitlines()
+
+    assert "librosa==0.10.2.post1" in requirements
+
+
+def test_nemotron_requirements_match_pinned_transformers_safetensors():
+    requirements = (
+        Path(__file__).parents[2] / "requirements-nemotron.txt"
+    ).read_text(encoding="utf-8").splitlines()
+
+    assert "safetensors==0.8.0" in requirements

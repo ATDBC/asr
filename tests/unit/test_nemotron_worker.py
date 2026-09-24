@@ -55,3 +55,42 @@ def test_worker_accepts_only_existing_job_wav_under_own_root(tmp_path: Path):
     outside = tmp_path.parent / "outside.wav"
     with pytest.raises(TranscriptionError):
         validate_job_wav_path(outside, tmp_path)
+
+
+def test_worker_stdout_contains_only_json_when_runtime_prints(
+    tmp_path: Path, monkeypatch
+):
+    import io
+    import json
+    import sys
+
+    import funasr_transcriber.nemotron_worker as worker
+
+    class NoisyRuntime:
+        def __init__(self, model_dir):
+            print("[ERROR] library import diagnostic")
+            self.identity = {"device": "cuda:0"}
+
+        def diarize(self, path, allowed_root):
+            print("library inference diagnostic")
+            return (SpeakerSegment(1, 0, 1000),), {"inference_seconds": 0.1}
+
+    output = io.StringIO()
+    errors = io.StringIO()
+    monkeypatch.setattr(worker, "NemotronRuntime", NoisyRuntime)
+    monkeypatch.setattr(
+        sys, "stdin",
+        io.StringIO(
+            '{"id":"one","action":"status"}\n'
+            '{"id":"two","action":"diarize","audio_path":"/tmp/input.wav"}\n'
+            '{"id":"three","action":"close"}\n'
+        ),
+    )
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+
+    assert worker.serve(tmp_path, tmp_path) == 0
+    messages = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [message["id"] for message in messages] == ["one", "two", "three"]
+    assert "[ERROR] library import diagnostic" in errors.getvalue()
+    assert "library inference diagnostic" in errors.getvalue()

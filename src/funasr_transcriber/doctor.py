@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import tempfile
 from typing import Any, Callable
 
+from .audio import normalize_audio
 from .config import AppConfig
 from .errors import EnvironmentError as TranscriberEnvironmentError
 from .errors import ModelError
@@ -17,6 +19,7 @@ from .gpu import (
     require_gpu_capacity,
 )
 from .model_registry import resolve_firered_paths, verify_models
+from .nemotron_client import NemotronWorkerClient
 from .overlap import JsonOverlapWorkerClient
 from .schemas import AsrResult
 from .speaker_diarization import SpeakerDiarizer
@@ -131,8 +134,18 @@ def run_doctor(
                 f"{config.overlap.worker_python}"
             )
         checks.append("overlap_venv: ok")
+    if config.diarization.backend == "nemotron3":
+        if not config.nemotron.worker_python.is_file():
+            raise TranscriberEnvironmentError(
+                "Nemotron worker Python is missing: "
+                f"{config.nemotron.worker_python}"
+            )
+        checks.append("nemotron_venv: ok")
 
-    verification = verify_models(config.paths.model_dir)
+    verification = verify_models(
+        config.paths.model_dir,
+        speaker_backend=config.diarization.backend,
+    )
     if not verification.ok:
         raise ModelError(
             "model verification failed: " + ", ".join(verification.missing)
@@ -176,13 +189,39 @@ def run_doctor(
     _require_released(before, gpu_sampler("cuda:0"), "firered_worker")
     checks.append("firered_worker: verified")
 
-    speaker_owner_factory = speaker_factory or (
-        lambda: SpeakerDiarizer.from_config(config)
-    )
+    if config.diarization.backend == "nemotron3":
+        speaker_owner_factory = speaker_factory or (
+            lambda: NemotronWorkerClient(
+                worker_python=config.nemotron.worker_python,
+                model_dir=config.paths.model_dir,
+                timeout_seconds=config.nemotron.timeout_seconds,
+                stderr_log_path=(
+                    config.paths.work_dir / "service" / "doctor-nemotron.log"
+                ),
+            )
+        )
+    else:
+        speaker_owner_factory = speaker_factory or (
+            lambda: SpeakerDiarizer.from_config(config)
+        )
     before = gpu_capacity_check("cuda:0")
     try:
-        with speaker_owner_factory():
-            pass
+        if config.diarization.backend == "nemotron3":
+            with tempfile.TemporaryDirectory(
+                prefix="job-doctor-nemotron-",
+                dir=config.paths.work_dir,
+            ) as temporary:
+                normalized = Path(temporary) / "normalized.wav"
+                normalize_audio(doctor_audio, normalized)
+                with speaker_owner_factory() as owner:
+                    segments = owner.diarize(normalized)
+                    if not segments:
+                        raise ModelError(
+                            "Nemotron smoke diarization returned no speech"
+                        )
+        else:
+            with speaker_owner_factory():
+                pass
     except Exception as exc:
         raise ModelError(f"speaker model verification failed: {exc}") from exc
     _require_released(before, gpu_sampler("cuda:0"), "speaker_models")

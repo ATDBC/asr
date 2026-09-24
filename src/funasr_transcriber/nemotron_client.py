@@ -36,6 +36,12 @@ class NemotronWorkerClient:
             return None
         return process.pid
 
+    def __enter__(self) -> "NemotronWorkerClient":
+        return self.start()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
     def start(self) -> "NemotronWorkerClient":
         if self.pid is not None:
             return self

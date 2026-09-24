@@ -624,8 +624,9 @@ class ServiceJobRunner:
             return os.getpid()
 
         def speaker_pid() -> int:
-            # SpeakerDiarizer is hosted by the service process.
-            return os.getpid()
+            owner = self.hot_host.speaker_owner
+            pid = getattr(owner, "pid", None)
+            return pid if isinstance(pid, int) and pid > 0 else os.getpid()
 
         def aed_pid(index: int) -> int | None:
             owner = self.hot_host.asr_owner
@@ -1058,7 +1059,7 @@ def _require_physical_gpu_zero(config: AppConfig) -> None:
 
 
 def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost:
-    """Construct the persistent AED owner and 3D-Speaker owner."""
+    """Construct the persistent AED owner and selected speaker owner."""
 
     from .firered_client import FireRedWorkerClient
     from .firered_parallel import (
@@ -1066,6 +1067,7 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
         WeightedAedPuncWorkerClient,
     )
     from .speaker_diarization import SpeakerDiarizer
+    from .nemotron_client import NemotronWorkerClient
     warmup_audio = (
         Path(config.paths.model_dir)
         / "fireredasr2s"
@@ -1167,15 +1169,26 @@ def build_hot_model_host(config: AppConfig, paths: ServicePaths) -> HotModelHost
             "cuda:0",
             minimum_total_mib=config.service.minimum_total_mib,
             minimum_free_mib=(
-                0
-                if config.asr.aed_scheduler == "weighted_duration"
-                else config.service.minimum_free_mib
+                config.service.minimum_free_mib
+                if config.diarization.backend == "nemotron3"
+                or config.asr.aed_scheduler != "weighted_duration"
+                else 0
             ),
+        )
+
+    def speaker_factory() -> Any:
+        if config.diarization.backend == "3d_speaker":
+            return SpeakerDiarizer.from_config(config)
+        return NemotronWorkerClient(
+            worker_python=config.nemotron.worker_python,
+            model_dir=config.paths.model_dir,
+            timeout_seconds=config.nemotron.timeout_seconds,
+            stderr_log_path=paths.directory / "nemotron-worker.log",
         )
 
     return HotModelHost(
         asr_factory=asr_factory,
-        diarizer_factory=lambda: SpeakerDiarizer.from_config(config),
+        diarizer_factory=speaker_factory,
         gpu_check=gpu_check,
     )
 

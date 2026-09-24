@@ -57,7 +57,7 @@ def _patch_environment(monkeypatch):
     )
     monkeypatch.setattr(
         "funasr_transcriber.doctor.verify_models",
-        lambda path: ModelVerification(True, ()),
+        lambda path, speaker_backend="3d_speaker": ModelVerification(True, ()),
     )
 
 
@@ -119,7 +119,7 @@ def test_doctor_rejects_invalid_firered_assets(
     _patch_environment(monkeypatch)
     monkeypatch.setattr(
         "funasr_transcriber.doctor.verify_models",
-        lambda path: ModelVerification(False, missing),
+        lambda path, speaker_backend="3d_speaker": ModelVerification(False, missing),
     )
 
     with pytest.raises(ModelError, match=message):

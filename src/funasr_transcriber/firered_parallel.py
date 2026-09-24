@@ -1099,7 +1099,8 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
                 for worker, lane in zip(self.aed_workers, lanes)
             ]
             lane_results = [future.result() for future in futures]
-        aed_wall_seconds = perf_counter() - aed_started
+        aed_ended = perf_counter()
+        aed_wall_seconds = aed_ended - aed_started
         by_index = {
             crop.index: (crop, response)
             for responses, _ in lane_results
@@ -1175,6 +1176,8 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
                     "subpiece_count": plan.subpiece_count,
                     "plan_seconds": planning_seconds,
                     "aed_wall_seconds": aed_wall_seconds,
+                    "aed_started_at_monotonic": aed_started,
+                    "aed_ended_at_monotonic": aed_ended,
                     "aed_worker_seconds": [
                         seconds for _, seconds in lane_results
                     ],

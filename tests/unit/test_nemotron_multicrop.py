@@ -75,6 +75,8 @@ def test_multicrop_uses_one_audio_path_per_aed_and_punc_request(tmp_path):
     assert aed.paths == [crop.path for crop in plan.crops]
     assert punc.paths == [crop.path for crop in plan.crops]
     assert [item.crop.speaker_id for item in results] == [1, 2]
+    parallel = owner.last_response["metrics"]["parallel"]
+    assert parallel["aed_ended_at_monotonic"] >= parallel["aed_started_at_monotonic"]
 
 
 def test_two_lanes_keep_each_crop_on_one_path(tmp_path):

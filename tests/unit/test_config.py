@@ -246,3 +246,59 @@ def test_config_rejects_invalid_major_cluster_guard_params(tmp_path: Path):
 
     with pytest.raises(ValueError, match="major_cluster_merge_threshold"):
         load_config(path)
+
+def test_nemotron_auto_mode_keeps_3d_speaker_default_unchanged():
+    normal = load_config()
+    selected = load_config(cli_overrides={"diarization.backend": "nemotron3"})
+    assert normal.diarization.backend == "3d_speaker"
+    assert selected.diarization.backend == "nemotron3"
+    assert selected.diarization.speaker_count is None
+    assert selected.diarization.max_speakers == 10
+    assert selected.nemotron.activity_threshold == 0.5
+
+
+def test_nemotron_selection_rejects_legacy_overlap():
+    with pytest.raises(ValueError, match="Nemotron.*overlap"):
+        load_config(cli_overrides={
+            "diarization.backend": "nemotron3",
+            "overlap.enabled": True,
+        })
+
+
+def test_nemotron_rejects_ninth_configured_speaker():
+    with pytest.raises(ValueError, match="eight"):
+        load_config(cli_overrides={
+            "diarization.backend": "nemotron3",
+            "diarization.speaker_count": 9,
+        })
+
+
+def test_nemotron_rejects_memory_first():
+    with pytest.raises(ValueError, match="memory_first"):
+        load_config(cli_overrides={
+            "diarization.backend": "nemotron3",
+            "asr.aed_scheduler": "memory_first",
+            "asr.aed_worker_count": 2,
+        })
+
+
+@pytest.mark.parametrize("backend", ["unknown", "", "Nemotron-3"])
+def test_unknown_speaker_backend_is_rejected(backend: str):
+    with pytest.raises(ValueError, match="diarization backend must be"):
+        load_config(cli_overrides={"diarization.backend": backend})
+
+
+def test_nemotron_threshold_is_locked_to_tested_value():
+    with pytest.raises(ValueError, match="activity_threshold"):
+        load_config(cli_overrides={
+            "diarization.backend": "nemotron3",
+            "nemotron.activity_threshold": 0.6,
+        })
+
+
+def test_nemotron_timeout_must_be_positive():
+    with pytest.raises(ValueError, match="Nemotron.*timeout"):
+        load_config(cli_overrides={
+            "diarization.backend": "nemotron3",
+            "nemotron.timeout_seconds": 0,
+        })

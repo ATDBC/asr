@@ -120,3 +120,11 @@ def test_protocol_rejects_unsafe_aed_budget_fraction():
                 "aed_budget_fraction": 0.05,
             }
         )
+
+def test_speaker_backend_changes_service_fingerprint():
+    from funasr_transcriber.config import load_config
+    from funasr_transcriber.service_protocol import config_fingerprint
+
+    normal = load_config()
+    selected = load_config(cli_overrides={"diarization.backend": "nemotron3"})
+    assert config_fingerprint(normal) != config_fingerprint(selected)

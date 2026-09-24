@@ -119,6 +119,8 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
         if getattr(args, "disable_overlap", False)
         else config.overlap.enabled
     )
+    if config.diarization.backend == "nemotron3" and overlap_enabled:
+        raise ValueError("Nemotron and legacy overlap cannot run together")
     diagnostics_level = getattr(args, "diagnostics", None)
     if diagnostics_level is None:
         diagnostics_level = (

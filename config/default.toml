@@ -21,6 +21,7 @@ punc_token_budget = 256
 punc_max_items = 16
 
 [diarization]
+backend = "3d_speaker"
 speaker_count = "auto"
 min_speakers = 1
 max_speakers = 10
@@ -31,6 +32,11 @@ merge_min_fraction = 0.6
 merge_relative_ratio = 0.55
 major_cluster_min_fraction = 0.10
 major_cluster_merge_threshold = 0.88
+
+[nemotron]
+worker_python = "/opt/funasr-transcriber/.venv-nemotron/bin/python"
+timeout_seconds = 1800
+activity_threshold = 0.5
 
 [vad]
 speech_noise_thres = 0.45

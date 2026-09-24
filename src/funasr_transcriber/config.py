@@ -35,6 +35,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "punc_max_items": 16,
     },
     "diarization": {
+        "backend": "3d_speaker",
         "speaker_count": "auto",
         "min_speakers": 1,
         "max_speakers": 10,
@@ -45,6 +46,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "merge_relative_ratio": 0.55,
         "major_cluster_min_fraction": 0.10,
         "major_cluster_merge_threshold": 0.88,
+    },
+    "nemotron": {
+        "worker_python": "/opt/funasr-transcriber/.venv-nemotron/bin/python",
+        "timeout_seconds": 1800,
+        "activity_threshold": 0.5,
     },
     "vad": {
         "speech_noise_thres": 0.45,
@@ -113,6 +119,7 @@ class AsrConfig:
 
 @dataclass(frozen=True, slots=True)
 class DiarizationConfig:
+    backend: str
     speaker_count: int | None
     min_speakers: int
     max_speakers: int
@@ -123,6 +130,13 @@ class DiarizationConfig:
     merge_relative_ratio: float
     major_cluster_min_fraction: float
     major_cluster_merge_threshold: float
+
+
+@dataclass(frozen=True, slots=True)
+class NemotronConfig:
+    worker_python: Path
+    timeout_seconds: int
+    activity_threshold: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +194,7 @@ class AppConfig:
     paths: PathConfig
     asr: AsrConfig
     diarization: DiarizationConfig
+    nemotron: NemotronConfig
     vad: VadConfig
     alignment: AlignmentConfig
     turns: TurnConfig
@@ -278,6 +293,7 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             punc_max_items=int(values["asr"]["punc_max_items"]),
         ),
         diarization=DiarizationConfig(
+            backend=str(values["diarization"]["backend"]).strip().lower(),
             speaker_count=speaker_count,
             min_speakers=int(values["diarization"]["min_speakers"]),
             max_speakers=int(values["diarization"]["max_speakers"]),
@@ -294,6 +310,11 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             major_cluster_merge_threshold=float(
                 values["diarization"]["major_cluster_merge_threshold"]
             ),
+        ),
+        nemotron=NemotronConfig(
+            worker_python=Path(values["nemotron"]["worker_python"]).expanduser(),
+            timeout_seconds=int(values["nemotron"]["timeout_seconds"]),
+            activity_threshold=float(values["nemotron"]["activity_threshold"]),
         ),
         vad=VadConfig(
             speech_noise_thres=float(values["vad"]["speech_noise_thres"]),
@@ -374,14 +395,28 @@ def validate(config: AppConfig) -> AppConfig:
     if config.asr.punc_max_items <= 0:
         raise ValueError("ASR punc_max_items must be positive")
     diarization = config.diarization
-    if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
-        raise ValueError("min_speakers/max_speakers must stay within 1..10")
-    if diarization.speaker_count is not None and not (
-        diarization.min_speakers
-        <= diarization.speaker_count
-        <= diarization.max_speakers
-    ):
-        raise ValueError("speaker_count must stay within min_speakers/max_speakers")
+    if diarization.backend not in {"3d_speaker", "nemotron3"}:
+        raise ValueError("diarization backend must be 3d_speaker or nemotron3")
+    if config.nemotron.timeout_seconds <= 0:
+        raise ValueError("Nemotron timeout_seconds must be positive")
+    if config.nemotron.activity_threshold != 0.5:
+        raise ValueError("Nemotron activity_threshold must be 0.5")
+    if diarization.backend == "3d_speaker":
+        if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
+            raise ValueError("min_speakers/max_speakers must stay within 1..10")
+        if diarization.speaker_count is not None and not (
+            diarization.min_speakers
+            <= diarization.speaker_count
+            <= diarization.max_speakers
+        ):
+            raise ValueError("speaker_count must stay within min_speakers/max_speakers")
+    else:
+        if diarization.speaker_count is not None and not 1 <= diarization.speaker_count <= 8:
+            raise ValueError("Nemotron supports one to eight configured speakers")
+        if config.overlap.enabled:
+            raise ValueError("Nemotron and legacy overlap cannot run together")
+        if config.asr.aed_scheduler == "memory_first":
+            raise ValueError("Nemotron does not support memory_first")
     if not 0.0 < diarization.merge_cosine <= 1.0:
         raise ValueError("merge_cosine must stay within 0..1")
     if not 0.0 < diarization.merge_min_fraction <= 1.0:

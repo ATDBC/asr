@@ -3,13 +3,15 @@
 Linux 上的独立普通话录音转录工具。输入音频，输出带毫秒时间戳和匿名说话人编号的
 TXT、结构化 JSON 与诊断文件。
 
-生产流程为：3D-Speaker 说话人分离 → 对超过 10 秒的说话人区间使用 FireRedVAD
-细分 → FireRed AED → FireRedPunc。默认常驻两个 AED worker 和一个独立 Punc owner，
-使用物理 GPU 0（`cuda:0`）与 BF16。
+默认流程为：3D-Speaker 说话人分离 → 对超过 10 秒的说话人区间使用 FireRedVAD
+细分 → FireRed AED → FireRedPunc。AED 可配置一个或两个常驻 worker，并由一个独立 Punc
+owner 处理标点；使用物理 GPU 0（`cuda:0`）与 BF16。Nemotron 3 是显式选择的可选说话人后端，
+不会取代默认 3D-Speaker。
 
 ## 1. 使用前确认
 
-- Linux、Python 3.11、Git、FFmpeg、NVIDIA GPU。
+- Linux、Python 3.11、Git、FFmpeg、NVIDIA GPU。启动前要求 GPU0 总显存至少 23 GiB；
+  Nemotron 与常驻 FireRed 共驻时，还要求当前空闲显存至少 13,312 MiB。
 - 只支持物理 GPU 0，不要用 `CUDA_VISIBLE_DEVICES` 把其他 GPU 重映射成
   `cuda:0`。
 - 支持 WAV、MP3、M4A、FLAC、AAC、OGG，单个输入最长两小时。
@@ -139,6 +141,77 @@ Hugging Face fallback；token 只从环境变量读取，不写入配置或日�
 
 `doctor` 会实际检查主环境、FireRed worker、说话人分离和 overlap 环境。它失败时先
 修复对应问题，不要用 `--skip-cuda` 作为生产通过证据。
+
+### 5.1 可选 Nemotron 3 说话人后端
+
+默认安装和默认 `models download` **不会**安装或下载 Nemotron。只有明确选择该后端时，
+才执行下面的额外步骤。其隔离环境只为 Nemotron 服务，不改变 .venv、.venv-asr 或默认
+3D-Speaker 路径：
+
+```bash
+bash scripts/install_nemotron_linux.sh
+```
+
+此脚本沿用 `PYTHON_BIN`（Python 3.11）和 `TORCH_INDEX_URL`，创建
+`.venv-nemotron`，固定 PyTorch 2.8.0、Transformers 提交
+`f324707307757d9c0b8dac1c4462eceff911fa2f`。模型固定为 Hugging Face
+`nvidia/Nemotron-3-Diarization` 的修订版
+`a435e9867d79e789e90053f9b6d6834053af564a`；该可选资产不是从
+ModelScope 下载。只有下面显式选择的 `models download` 才会获取快照，并验证
+checkpoint SHA-256；运行时只读本地快照、禁止联网下载。
+
+在专用 `outputs/runtime/nemotron.toml` 中复制上述本机配置，保留绝对路径，并设置：
+
+```toml
+[diarization]
+backend = "nemotron3"
+speaker_count = "auto"
+
+[nemotron]
+worker_python = "/absolute/path/to/standalone_transcriber/.venv-nemotron/bin/python"
+activity_threshold = 0.5
+
+[asr]
+aed_scheduler = "weighted_duration"
+aed_worker_count = 1  # 也可用 2；不能选择 memory_first
+
+[overlap]
+enabled = false
+```
+
+`[paths].model_dir`、`[paths].work_dir` 和 `[asr].worker_python` 仍需指向实际
+绝对路径。使用选中配置显式下载、验证和冒烟检查：
+
+```bash
+.venv/bin/funasr-transcribe models download --config "$PWD/outputs/runtime/nemotron.toml"
+.venv/bin/funasr-transcribe models verify --config "$PWD/outputs/runtime/nemotron.toml"
+.venv/bin/funasr-transcribe doctor --config "$PWD/outputs/runtime/nemotron.toml"
+.venv/bin/funasr-transcribe /data/recording.wav --config "$PWD/outputs/runtime/nemotron.toml"
+```
+
+Nemotron 最多提供八个说话人通道，不能可靠发现未被模型观察到的第九人。每段说话人区间
+都从**原始归一化混合音频**单独裁剪给 AED；例如 0–6 秒与 5–8 秒会产生两份输入，
+5–6 秒重叠声音在两份中都保留。这里不做 ClearVoice 波形分离、重叠去重或重新匹配
+说话人。`--enable-overlap` 与 Nemotron 互斥。短于 100 ms 的预测区间会跳过；
+超过 10 秒的区间先尝试 FireRedVAD，失败或不安全时固定切为不超过 10 秒的片段，
+不是模型的 30 秒上限。JSON/TXT 可以保留同时发生的两条说话人转写，全文可能含重复词。
+这是可选验证路径，不代表生产准确率已获验收。
+
+需要一次 GPU0 验收时，设置一个**从未使用过**的输出目录，显式执行：
+
+```bash
+RUN_NEMOTRON_GPU_TEST=1 \
+NEMOTRON_BENCHMARK_CONFIG="$PWD/outputs/runtime/nemotron.toml" \
+NEMOTRON_BENCHMARK_OUTPUT_ROOT="$PWD/outputs/measurements/nemotron-direct-crop-unique-run" \
+.venv/bin/python -m pytest -q tests/integration/test_nemotron_gpu_smoke.py
+```
+
+该入口只运行本项目的 GPU0 作业，并在新目录保留设备准入/结束快照、各阶段耗时、
+本项目 owner 的显存峰值和转录结果。真实重叠片段的人工文字只在推理结束后用于观察性
+对照，不参与训练或调参；粗粒度参考时间不支持宣称生产准确率通过。
+
+要回退，先用**当前配置**停止本项目服务，再改用原来的 `backend = "3d_speaker"`
+配置重新启动。不要关闭或管理其他项目进程。
 
 ## 6. 在新设备上初始化 AED 两个时间权重
 

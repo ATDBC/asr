@@ -191,3 +191,58 @@ recording_transcript/
 - `src/funasr_transcriber/overlap.py`：检测/分离、轨道匹配与替换应用。
 - `src/funasr_transcriber/resource_profile.py`：只观察本项目 PID 的可选采样器。
 - `src/funasr_transcriber/cli.py`：自动启动、提交和 `service status|stop` 命令。
+
+
+## 可选 Nemotron 3 直接裁剪路径（验证阶段）
+
+仅当 `[diarization].backend = "nemotron3"` 时选用；默认仍是 3D-Speaker。
+服务在 GPU0 准入通过后常驻一个隔离的 `.venv-nemotron` 子进程，
+与选定的一或两个 FireRed AED worker、独立 Punc owner 共驻。该子进程的模型快照
+固定在 `models/nemotron3/a435e9867d79e789e90053f9b6d6834053af564a/`，
+运行时只读本地文件且启用 HF/Transformers 离线模式，使用物理 `cuda:0`、
+实际模型精度 `torch.float32` 和活动阈值 0.5。模型最多输出八路说话人活动，
+30.4 秒的离线 buffer 不是输出区间或输入录音长度上限。
+
+```text
+归一化 WAV → Nemotron 全局说话人活动区间
+            → 按每个区间从原始混合音频独立裁剪
+            → 长于 10 秒：FireRedVAD 细分或安全的 10 秒固定片段
+            → 先冻结全部裁剪的 AED batch 计划和双 lane 分配
+            → 每个裁剪作为单独音频路径送入 AED，随后由唯一 Punc owner 处理
+            → 以裁剪的原说话人和绝对偏移直接归属 token → TXT/JSON
+```
+
+例如说话人 1 为 0–6 秒，说话人 2 为 5–8 秒，5–6 秒的混合波形在两份 AED
+输入中均存在。系统不运行 ClearVoice、不分离波形、不丢弃任一方转写，也不按 midpoint
+重新分配说话人。输出的两个 turn 可以交叉、同一词也可能出现两次；标记 overlap 的依据
+是 token 是否与**其他说话人**的原区间相交。短于 100 ms 的区间跳过；所有裁剪均
+无语音时作业明确失败。Nemotron 与旧的 `--enable-overlap` 互斥，
+`memory_first` 调度也在配置期被拒绝。
+
+GPU0 入场检查至少要求 23 GiB 总显存和 13,312 MiB 当前空闲显存；不足时不加载
+任何新 owner，也不管理其他项目进程。诊断记录固定模型修订版、checkpoint SHA-256、
+实际 dtype、说话人/裁剪/子片段数、重叠时长、短片段与无语音数、各阶段时间和本项目
+登记 PID 的峰值。完整裁剪至 lane 的映射仅在 `deep` 下进入
+`diagnostics/scheduler.json` 与 `batch-events.jsonl`，不塞入普通
+`diagnostics.json`。本路径目前是可选验证，不是生产准确率背书。
+
+实现分别位于 `nemotron_assets.py`、`nemotron_worker.py`、
+`nemotron_client.py`、`speaker_crops.py`、`crop_attribution.py` 和
+`firered_parallel.py` 的独立多裁剪入口；默认 3D-Speaker 路径维持原有行为。
+
+### 2026-09-24 GPU0 验证记录
+
+两次 create-only 测量分别保存在
+`outputs/measurements/20260924T-nemotron3-direct-crop-acceptance/` 和
+`outputs/measurements/20260924T-nemotron3-direct-crop-benchmark/`；
+两个 `transcript.json` 在同一输入上的 SHA-256 各自一致。两次准入与结束快照均为
+`GPU0: 24576 MiB total / 17477 MiB free`，没有 OOM。第二次实测：
+8 秒真实重叠样本检出 2 位说话人、4 个有效 crop、4010 ms 重叠时间，
+端到端 10.33 秒（含首次预热），AED 1.99 秒；21 分钟拼接样本检出 6 位说话人、
+590 个有效 crop，端到端 254.78 秒，AED 219.85 秒。项目登记进程的合计峰值
+分别约 4498/4476 MiB；Nemotron 为 `torch.float32`，FireRed AED 为
+`torch.bfloat16`。
+
+这证明了链路能完成并保留重叠区的双路时间，但**不证明转写质量达标**：
+真实重叠样本相对人工文本仍有明显赘字、重复音节和串入内容；
+21 分钟样本也可见重复。人工参考只在推理之后用于观察，不用于阈值调节、训练或校准。

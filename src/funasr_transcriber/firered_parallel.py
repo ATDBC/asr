@@ -26,6 +26,8 @@ from .punc_scheduler import (
     assemble_punc_items,
 )
 from .schemas import AsrResult
+from .speaker_crops import CropPlan, SpeakerCrop
+from .errors import TranscriptionError
 
 
 @dataclass(frozen=True, slots=True)
@@ -832,6 +834,12 @@ class ParallelFireRedWorkerClient:
         self.close()
 
 
+@dataclass(frozen=True, slots=True)
+class CropTranscript:
+    crop: SpeakerCrop
+    result: AsrResult
+
+
 class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
     """One or two weighted AED lanes streaming into one Punc owner."""
 
@@ -1008,6 +1016,212 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
             })
         self.last_response["metrics"]["scheduler"] = scheduler
         return result
+
+
+    def transcribe_crops(
+        self, plan: CropPlan
+    ) -> tuple[CropTranscript, ...]:
+        """Freeze independent crop plans before issuing any AED request."""
+        started = perf_counter()
+        planning_started = perf_counter()
+        prepared: list[
+            tuple[SpeakerCrop, list[list[dict[str, int]]], float]
+        ] = []
+        for crop in plan.crops:
+            if not crop.pieces_ms:
+                raise TranscriptionError(
+                    f"speaker crop {crop.index} has no AED pieces"
+                )
+            batches = plan_aed_batches(
+                [
+                    (start / 1000.0, end / 1000.0)
+                    for start, end in crop.pieces_ms
+                ],
+                weights=self.weights,
+            )
+            decisions = tuple(
+                BatchDecision(
+                    items=tuple(batch),
+                    estimate=self.cost_model.estimate(batch),
+                    decision="weighted_duration",
+                )
+                for batch in batches
+            )
+            predicted = sum(
+                float(batch.estimate.predicted_seconds)
+                for batch in decisions
+            )
+            prepared.append(
+                (crop, serialize_batch_plan(decisions), predicted)
+            )
+        worker_count = len(self.aed_workers)
+        lanes: list[list[
+            tuple[SpeakerCrop, list[list[dict[str, int]]], float]
+        ]] = [[] for _ in range(worker_count)]
+        loads = [0.0] * worker_count
+        for item in sorted(
+            prepared, key=lambda value: (-value[2], value[0].index)
+        ):
+            lane = min(
+                range(worker_count), key=lambda index: (loads[index], index)
+            )
+            lanes[lane].append(item)
+            loads[lane] += item[2]
+        for lane in lanes:
+            lane.sort(key=lambda item: item[0].index)
+        planning_seconds = perf_counter() - planning_started
+
+        def run_lane(
+            worker: Any,
+            lane: list[
+                tuple[SpeakerCrop, list[list[dict[str, int]]], float]
+            ],
+        ) -> tuple[list[tuple[SpeakerCrop, dict[str, object]]], float]:
+            lane_started = perf_counter()
+            responses = []
+            for crop, batches, _ in lane:
+                response = worker.run_aed_plan(
+                    crop.path,
+                    batches,
+                    [list(piece) for piece in crop.pieces_ms],
+                )
+                if not isinstance(response, dict):
+                    raise TranscriptionError(
+                        f"AED crop {crop.index} returned invalid response"
+                    )
+                responses.append((crop, response))
+            return responses, perf_counter() - lane_started
+
+        aed_started = perf_counter()
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(run_lane, worker, lane)
+                for worker, lane in zip(self.aed_workers, lanes)
+            ]
+            lane_results = [future.result() for future in futures]
+        aed_wall_seconds = perf_counter() - aed_started
+        by_index = {
+            crop.index: (crop, response)
+            for responses, _ in lane_results
+            for crop, response in responses
+        }
+
+        punc_started = perf_counter()
+        transcripts: list[CropTranscript] = []
+        no_speech_count = 0
+        aed_metrics: list[dict[str, object]] = []
+        for crop in plan.crops:
+            _, response = by_index[crop.index]
+            records = response.get("aed_results")
+            if not isinstance(records, list):
+                raise TranscriptionError(
+                    f"AED crop {crop.index} omitted results"
+                )
+            aed_metrics.extend(
+                item
+                for item in response.get("batch_metrics", ())
+                if isinstance(item, dict)
+            )
+            if not records:
+                no_speech_count += 1
+                result = AsrResult(
+                    "", (), duration_ms=crop.end_ms - crop.start_ms
+                )
+            else:
+                if not all(isinstance(item, dict) for item in records):
+                    raise TranscriptionError(
+                        f"AED crop {crop.index} returned invalid records"
+                    )
+                result = self.punc_owner.punctuate(
+                    crop.path,
+                    records,
+                    crop.end_ms - crop.start_ms,
+                    [list(piece) for piece in crop.pieces_ms],
+                )
+                if not isinstance(result, AsrResult):
+                    raise TranscriptionError(
+                        f"Punc crop {crop.index} returned invalid response"
+                    )
+                if not result.text.strip() or not result.tokens:
+                    no_speech_count += 1
+            transcripts.append(CropTranscript(crop, result))
+        punc_seconds = perf_counter() - punc_started
+        def peak(records: list[dict[str, object]], key: str) -> int | None:
+            values = [
+                int(item[key])
+                for item in records
+                if isinstance(item.get(key), (int, float))
+            ]
+            return max(values, default=None)
+
+        worker_batch_metrics = [
+            [
+                metric
+                for _, response in responses
+                for metric in response.get("batch_metrics", ())
+                if isinstance(metric, dict)
+            ]
+            for responses, _ in lane_results
+        ]
+        self.last_response = {
+            "metrics": {
+                "parallel": {
+                    "dispatch_mode": (
+                        "single" if worker_count == 1 else "concurrent"
+                    ),
+                    "worker_count": worker_count,
+                    "crop_count": len(plan.crops),
+                    "no_speech_crop_count": no_speech_count,
+                    "subpiece_count": plan.subpiece_count,
+                    "plan_seconds": planning_seconds,
+                    "aed_wall_seconds": aed_wall_seconds,
+                    "aed_worker_seconds": [
+                        seconds for _, seconds in lane_results
+                    ],
+                    "punc_model_seconds": punc_seconds,
+                    "total_seconds": perf_counter() - started,
+                    "memory_peaks": {
+                        "aed": {
+                            "allocated_mib": peak(aed_metrics, "peak_allocated_mib"),
+                            "reserved_mib": peak(aed_metrics, "peak_reserved_mib"),
+                        },
+                        "aed_workers": [
+                            {
+                                "allocated_mib": peak(items, "peak_allocated_mib"),
+                                "reserved_mib": peak(items, "peak_reserved_mib"),
+                            }
+                            for items in worker_batch_metrics
+                        ],
+                    },
+                },
+                "scheduler": {
+                    "planner": "weighted_duration_multi_crop",
+                    "weight_source": self.weight_source,
+                    "weight_artifact_checksum": (
+                        self.weight_artifact_checksum
+                    ),
+                    "worker_predicted_seconds": loads,
+                    "worker_crop_indexes": [
+                        [item[0].index for item in lane]
+                        for lane in lanes
+                    ],
+                    "crop_plans": [
+                        {
+                            "crop_index": crop.index,
+                            "speaker_id": crop.speaker_id,
+                            "path": str(crop.path),
+                            "batches": batches,
+                        }
+                        for crop, batches, _ in prepared
+                    ],
+                },
+            }
+        }
+        if no_speech_count == len(transcripts):
+            raise TranscriptionError(
+                "all Nemotron speaker crops produced no speech"
+            )
+        return tuple(transcripts)
 
 
 SingleAedPuncWorkerClient = WeightedAedPuncWorkerClient

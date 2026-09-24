@@ -22,6 +22,8 @@ def _lower_confidence(
 def build_turns(
     tokens: tuple[AttributedToken, ...],
     merge_gap_ms: int,
+    *,
+    preserve_input_ties: bool = False,
 ) -> tuple[Turn, ...]:
     if merge_gap_ms < 0:
         raise ValueError("merge_gap_ms must be non-negative")
@@ -29,7 +31,11 @@ def build_turns(
     accumulated: list[dict] = []
     for token in sorted(
         tokens,
-        key=lambda item: (item.start_ms, item.speaker_id, item.end_ms),
+        key=lambda item: (
+            (item.start_ms, item.speaker_id)
+            if preserve_input_ties
+            else (item.start_ms, item.speaker_id, item.end_ms)
+        ),
     ):
         previous = accumulated[-1] if accumulated else None
         gap_ms = token.start_ms - previous["end_ms"] if previous else None

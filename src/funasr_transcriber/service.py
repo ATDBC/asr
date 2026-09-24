@@ -19,6 +19,8 @@ from typing import Any, Callable
 from .alignment import attribute_by_segment
 from .audio import normalize_audio, probe_audio
 from .config import AppConfig, load_config
+from .crop_attribution import attribute_crop_results
+from .speaker_crops import CropPlan, build_crop_plan
 from .diagnostics import export_diagnostics
 from .diagnostic_traces import compact_scheduler_summary, write_deep_traces
 from .errors import (
@@ -253,6 +255,73 @@ def run_normal_branches(
         speaker_segments=speaker_segments,
         speaker_metrics=speaker_metrics,
         branch_metrics=branch_metrics,
+    )
+
+
+def run_nemotron_branches(
+    normalized: Path,
+    asr_owner: Any,
+    speaker_owner: Any,
+    crop_dir: Path,
+    profile_enabled: bool = False,
+) -> tuple[NormalBranchResult, tuple[Any, ...], CropPlan]:
+    """Keep Nemotron speaker intervals and AED crop paths independent."""
+    branch_metrics: dict[str, dict[str, object]] = {}
+    speaker_started = perf_counter()
+    segments, speaker_metrics = _run_speaker(
+        speaker_owner, Path(normalized), profile_enabled
+    )
+    branch_metrics["diarization"] = {
+        "seconds": perf_counter() - speaker_started,
+    }
+    if speaker_metrics:
+        branch_metrics["diarization"]["memory"] = speaker_metrics
+    if not segments:
+        raise TranscriptionError(
+            "Nemotron speaker diarization returned no segments"
+        )
+    crop_started = perf_counter()
+    worker0 = getattr(asr_owner, "worker0", None)
+    refine_vad = getattr(worker0, "refine_vad", None)
+    crop_plan = build_crop_plan(
+        Path(normalized),
+        segments,
+        crop_dir,
+        refine_vad if callable(refine_vad) else None,
+    )
+    branch_metrics["crops"] = {
+        "seconds": perf_counter() - crop_started,
+        "count": len(crop_plan.crops),
+    }
+    transcribe_crops = getattr(asr_owner, "transcribe_crops", None)
+    if not callable(transcribe_crops):
+        raise TranscriptionError(
+            "resident FireRed owner does not support independent AED crops"
+        )
+    asr_started = perf_counter()
+    crop_results = transcribe_crops(crop_plan)
+    asr_result, attributed = attribute_crop_results(
+        tuple(crop_results), segments, crop_plan.duration_ms
+    )
+    branch_metrics["asr"] = {
+        "seconds": perf_counter() - asr_started,
+    }
+    response = getattr(asr_owner, "last_response", {})
+    if isinstance(response, dict):
+        metrics = response.get("metrics")
+        if isinstance(metrics, dict):
+            for key in ("scheduler", "parallel"):
+                if isinstance(metrics.get(key), dict):
+                    branch_metrics["asr"][key] = metrics[key]
+    return (
+        NormalBranchResult(
+            asr_result,
+            segments,
+            speaker_metrics,
+            branch_metrics,
+        ),
+        attributed,
+        crop_plan,
     )
 
 
@@ -806,6 +875,13 @@ class ServiceJobRunner:
             raise ValueError("service job runner requires a submit request")
         if request.input_audio is None or request.output_dir is None:
             raise ValueError("submit request is missing audio or output path")
+        if (
+            self.config.diarization.backend == "nemotron3"
+            and request.overlap_enabled
+        ):
+            raise TranscriptionError(
+                "Nemotron and legacy overlap cannot run together"
+            )
         input_audio = Path(request.input_audio).expanduser().resolve()
         output_dir = Path(request.output_dir).expanduser().resolve()
         if output_dir.exists() and not request.overwrite:
@@ -857,6 +933,9 @@ class ServiceJobRunner:
                 "output_publish_included": True,
             }
             diagnostics.runtime["diagnostics_level"] = diagnostics_level
+            diagnostics.runtime["speaker_backend"] = (
+                self.config.diarization.backend
+            )
             input_info = self._probe(
                 input_audio,
                 self.config.general.max_audio_seconds,
@@ -874,13 +953,28 @@ class ServiceJobRunner:
                 asr_owner.aed_budget_fraction = float(
                     request.aed_budget_fraction
                 )
+            direct_attributed = None
+            crop_plan = None
             with diagnostics.stage("normal_model_branches"):
-                branches = run_normal_branches(
-                    normalized,
-                    asr_owner,
-                    speaker_owner,
-                    profile_enabled=diagnostics_level in {"resources", "deep"},
-                )
+                if self.config.diarization.backend == "nemotron3":
+                    branches, direct_attributed, crop_plan = (
+                        run_nemotron_branches(
+                            normalized,
+                            asr_owner,
+                            speaker_owner,
+                            job_dir / "speaker-crops",
+                            profile_enabled=diagnostics_level
+                            in {"resources", "deep"},
+                        )
+                    )
+                else:
+                    branches = run_normal_branches(
+                        normalized,
+                        asr_owner,
+                        speaker_owner,
+                        profile_enabled=diagnostics_level
+                        in {"resources", "deep"},
+                    )
             for branch_name, branch in branches.branch_metrics.items():
                 seconds = branch.get("seconds")
                 if isinstance(seconds, (int, float)):
@@ -911,6 +1005,21 @@ class ServiceJobRunner:
             parallel_metrics = branches.branch_metrics.get("asr", {}).get("parallel")
             if isinstance(parallel_metrics, dict):
                 diagnostics.scheduler["parallel"] = parallel_metrics
+            if crop_plan is not None:
+                diagnostics.runtime["nemotron"] = dict(
+                    self.hot_host.inventories.get("speaker") or {}
+                )
+                diagnostics.runtime["nemotron"]["speaker_metrics"] = dict(
+                    branches.speaker_metrics
+                )
+                diagnostics.scheduler["speaker_crops"] = {
+                    "count": len(crop_plan.crops),
+                    "short_count": crop_plan.short_count,
+                    "subpiece_count": crop_plan.subpiece_count,
+                    "overlap_duration_ms": crop_plan.overlap_duration_ms,
+                }
+                for warning in crop_plan.warnings:
+                    diagnostics.warn(warning)
             if diagnostics_level == "deep":
                 write_deep_traces(
                     staging_dir / "diagnostics",
@@ -919,22 +1028,26 @@ class ServiceJobRunner:
             diagnostics.scheduler = compact_scheduler_summary(diagnostics.scheduler)
             if not branches.speaker_segments:
                 raise TranscriptionError("speaker diarization returned no segments")
-            with diagnostics.stage("alignment"):
-                attributed = attribute_by_segment(
-                    branches.asr_result.tokens,
-                    branches.speaker_segments,
+            if direct_attributed is None:
+                with diagnostics.stage("alignment"):
+                    attributed = attribute_by_segment(
+                        branches.asr_result.tokens,
+                        branches.speaker_segments,
+                    )
+                enhancement = (
+                    self._run_overlap_enhancement(
+                        normalized,
+                        attributed,
+                        branches.speaker_segments,
+                        job_dir,
+                        diagnostics,
+                    )
+                    if request.overlap_enabled
+                    else None
                 )
-            enhancement = (
-                self._run_overlap_enhancement(
-                    normalized,
-                    attributed,
-                    branches.speaker_segments,
-                    job_dir,
-                    diagnostics,
-                )
-                if request.overlap_enabled
-                else None
-            )
+            else:
+                attributed = direct_attributed
+                enhancement = None
             result = pipeline.finish(
                 branches.asr_result,
                 attributed,

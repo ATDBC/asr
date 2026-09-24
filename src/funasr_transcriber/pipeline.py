@@ -138,6 +138,9 @@ class TranscriptionPipeline:
                 merge_gap_ms=int(
                     round(self.config.turns.merge_gap_seconds * 1000)
                 ),
+                preserve_input_ties=(
+                    self.config.diarization.backend == "nemotron3"
+                ),
             )
         transcript = Transcript(
             language=self.config.general.language,

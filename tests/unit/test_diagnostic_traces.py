@@ -45,3 +45,35 @@ def test_write_deep_traces_writes_scheduler_and_batch_events(tmp_path: Path):
     assert {path.name for path in paths} == {"scheduler.json", "batch-events.jsonl"}
     assert '"planned_batches": 1' in (tmp_path / "scheduler.json").read_text()
     assert '"batch_index": 0' in (tmp_path / "batch-events.jsonl").read_text()
+
+def test_nemotron_crop_plan_is_deep_only_with_lane_events(tmp_path: Path):
+    import json
+
+    scheduler = {
+        "crop_plans": [
+            {
+                "crop_index": 0,
+                "speaker_id": 1,
+                "path": "/job/crop.wav",
+                "batches": [[{"index": 0}]],
+            }
+        ],
+        "worker_crop_indexes": [[0]],
+    }
+
+    assert "crop_plans" not in compact_scheduler_summary(scheduler)
+    write_deep_traces(tmp_path, scheduler)
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "batch-events.jsonl").read_text().splitlines()
+    ]
+    assert events == [
+        {
+            "type": "speaker_crop",
+            "crop_index": 0,
+            "speaker_id": 1,
+            "path": "/job/crop.wav",
+            "worker_index": 0,
+            "batches": [[{"index": 0}]],
+        }
+    ]

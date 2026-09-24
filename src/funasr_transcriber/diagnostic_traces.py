@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-_LARGE_KEYS = {"worker_plans", "records"}
+_LARGE_KEYS = {"worker_plans", "records", "crop_plans"}
 
 
 def compact_scheduler_summary(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -64,6 +64,25 @@ def write_deep_traces(
             raw_records = prediction.get("records")
             if isinstance(raw_records, list):
                 records = [item for item in raw_records if isinstance(item, Mapping)]
+    crop_plans = scheduler.get("crop_plans")
+    worker_crop_indexes = scheduler.get("worker_crop_indexes")
+    if isinstance(crop_plans, list) and isinstance(worker_crop_indexes, list):
+        by_index = {
+            item.get("crop_index"): item
+            for item in crop_plans
+            if isinstance(item, Mapping)
+        }
+        for worker_index, indexes in enumerate(worker_crop_indexes):
+            if not isinstance(indexes, list):
+                continue
+            for crop_index in indexes:
+                crop = by_index.get(crop_index)
+                if crop is not None:
+                    records.append({
+                        "type": "speaker_crop",
+                        "worker_index": worker_index,
+                        **crop,
+                    })
     events = "".join(
         json.dumps(dict(record), ensure_ascii=False, sort_keys=True) + "\n"
         for record in records

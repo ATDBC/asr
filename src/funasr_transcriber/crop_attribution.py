@@ -36,9 +36,16 @@ def attribute_crop_results(
         for segment in segments
     }
     ordered: list[
-        tuple[int, int, int, int, TimedToken, AttributedToken]
+        tuple[
+            int,
+            int,
+            int,
+            int,
+            TimedToken,
+            AttributedToken,
+            RecognizedSentence,
+        ]
     ] = []
-    sentences: list[RecognizedSentence] = []
     vad_segments: list[tuple[int, int]] = []
     seen_indexes: set[int] = set()
     for transcript in results:
@@ -78,8 +85,26 @@ def attribute_crop_results(
                 raise TranscriptionError(
                     "AED crop token is outside parent crop"
                 )
-            start = crop.start_ms + token.start_ms
-            end = crop.start_ms + token.end_ms
+        if result.text.strip() and not result.sentences:
+            raise TranscriptionError(
+                "Nemotron crop returned text without sentences"
+            )
+        if _plain(result.text) != _plain(
+            "".join(sentence.text for sentence in result.sentences)
+        ):
+            raise TranscriptionError(
+                "speaker crop text disagrees with sentences"
+            )
+        for sentence_index, sentence in enumerate(result.sentences):
+            if (
+                sentence.start_ms < 0
+                or sentence.end_ms > crop_duration
+            ):
+                raise TranscriptionError(
+                    "AED crop sentence is outside parent crop"
+                )
+            start = crop.start_ms + sentence.start_ms
+            end = crop.start_ms + sentence.end_ms
             overlap = any(
                 segment.speaker_id != crop.speaker_id
                 and segment.start_ms < end
@@ -87,38 +112,39 @@ def attribute_crop_results(
                 for segment in segments
             )
             global_token = TimedToken(
-                token.text, start, end, token.confidence
+                sentence.text,
+                start,
+                end,
+                sentence.asr_confidence,
             )
             attributed = AttributedToken(
-                text=token.text,
+                text=sentence.text,
                 start_ms=start,
                 end_ms=end,
                 speaker_id=crop.speaker_id,
-                confidence=AlignmentConfidence.HIGH,
+                confidence=(
+                    AlignmentConfidence.MEDIUM
+                    if overlap
+                    else AlignmentConfidence.HIGH
+                ),
                 source="nemotron_direct_crop",
                 overlap=overlap,
+            )
+            recognized = RecognizedSentence(
+                sentence.text,
+                start,
+                end,
+                sentence.asr_confidence,
             )
             ordered.append(
                 (
                     start,
-                    crop.speaker_id,
                     crop.index,
+                    sentence_index,
                     end,
                     global_token,
                     attributed,
-                )
-            )
-        for sentence in result.sentences:
-            if sentence.end_ms > crop_duration:
-                raise TranscriptionError(
-                    "AED crop sentence is outside parent crop"
-                )
-            sentences.append(
-                RecognizedSentence(
-                    sentence.text,
-                    crop.start_ms + sentence.start_ms,
-                    crop.start_ms + sentence.end_ms,
-                    sentence.asr_confidence,
+                    recognized,
                 )
             )
         for start, end in crop.pieces_ms:
@@ -132,15 +158,11 @@ def attribute_crop_results(
     ordered.sort(key=lambda item: item[:4])
     tokens = tuple(item[4] for item in ordered)
     attributed = tuple(item[5] for item in ordered)
+    sentences = tuple(item[6] for item in ordered)
     asr = AsrResult(
         text="".join(token.text for token in tokens),
         tokens=tokens,
-        sentences=tuple(
-            sorted(
-                sentences,
-                key=lambda item: (item.start_ms, item.end_ms, item.text),
-            )
-        ),
+        sentences=sentences,
         vad_segments_ms=tuple(sorted(vad_segments)),
         duration_ms=duration_ms,
     )

@@ -84,7 +84,12 @@ def test_selected_branch_transcribes_original_overlap_crops(tmp_path: Path):
     import numpy as np
     import soundfile as sf
     from funasr_transcriber.firered_parallel import CropTranscript
-    from funasr_transcriber.schemas import AsrResult, SpeakerSegment, TimedToken
+    from funasr_transcriber.schemas import (
+        AsrResult,
+        RecognizedSentence,
+        SpeakerSegment,
+        TimedToken,
+    )
     from funasr_transcriber.service import run_nemotron_branches
 
     normalized = tmp_path / "normalized.wav"
@@ -122,6 +127,14 @@ def test_selected_branch_transcribes_original_overlap_crops(tmp_path: Path):
                                 "甲" if crop.speaker_id == 1 else "乙",
                                 5500 if crop.speaker_id == 1 else 500,
                                 5800 if crop.speaker_id == 1 else 800,
+                            ),
+                        ),
+                        sentences=(
+                            RecognizedSentence(
+                                "甲" if crop.speaker_id == 1 else "乙",
+                                5500 if crop.speaker_id == 1 else 500,
+                                5800 if crop.speaker_id == 1 else 800,
+                                0.9,
                             ),
                         ),
                         duration_ms=crop.end_ms - crop.start_ms,
@@ -181,7 +194,12 @@ def test_selected_service_publishes_two_overlapping_turns(
 
     from funasr_transcriber.audio import AudioInfo
     from funasr_transcriber.firered_parallel import CropTranscript
-    from funasr_transcriber.schemas import AsrResult, SpeakerSegment, TimedToken
+    from funasr_transcriber.schemas import (
+        AsrResult,
+        RecognizedSentence,
+        SpeakerSegment,
+        TimedToken,
+    )
     from funasr_transcriber.service_protocol import ServiceRequest
 
     config = load_config(
@@ -233,6 +251,14 @@ def test_selected_service_publishes_two_overlapping_turns(
                                 "甲" if crop.speaker_id == 1 else "乙",
                                 5500 if crop.speaker_id == 1 else 500,
                                 5800 if crop.speaker_id == 1 else 800,
+                            ),
+                        ),
+                        sentences=(
+                            RecognizedSentence(
+                                "甲" if crop.speaker_id == 1 else "乙",
+                                5500 if crop.speaker_id == 1 else 500,
+                                5800 if crop.speaker_id == 1 else 800,
+                                0.9,
                             ),
                         ),
                         duration_ms=crop.end_ms - crop.start_ms,

@@ -109,6 +109,10 @@ def _require_clearvoice_checkpoint(
     model_name: str,
 ) -> Path:
     directory = Path(cache_dir) / "checkpoints" / model_name
+    if not directory.is_dir():
+        fallback = Path(cache_dir) / "huggingface" / "checkpoints" / model_name
+        if fallback.is_dir():
+            directory = fallback
     pointer = directory / "last_best_checkpoint"
     if not pointer.is_file():
         raise RuntimeError(f"ClearVoice checkpoint is missing: {pointer}")
@@ -202,6 +206,7 @@ def _rms(data) -> float:
 
 def _separate(request: dict[str, Any]) -> dict[str, Any]:
     cache_dir = _configure_cache(request)
+    import torch
     from clearvoice import ClearVoice
 
     audio_path = Path(request["audio_path"]).resolve()
@@ -210,31 +215,32 @@ def _separate(request: dict[str, Any]) -> dict[str, Any]:
     model = ClearVoice(task="speech_separation", model_names=[model_name])
     _require_clearvoice_checkpoint(cache_dir, model_name)
     response_windows = []
-    for window in request.get("windows", []):
-        window_id = str(window["id"])
-        start_ms = int(window["start_ms"])
-        end_ms = int(window["end_ms"])
-        mixture = _read_segment(audio_path, start_ms, end_ms)
-        mix_path = output_dir / f"{window_id}-mix.wav"
-        _write_wav(mix_path, mixture)
-        tracks = []
-        for index, source in enumerate(
-            _sources(model(str(mix_path), online_write=False)),
-            start=1,
-        ):
-            path = output_dir / f"{window_id}-s{index}.wav"
-            _write_wav(path, source)
-            tracks.append(
-                {
-                    "index": index,
-                    "path": str(path),
-                    "rms": _rms(source),
-                    "duration_ms": int(
-                        round(len(source) * 1000 / TARGET_SAMPLE_RATE)
-                    ),
-                }
-            )
-        response_windows.append({**window, "tracks": tracks})
+    with torch.no_grad():
+        for window in request.get("windows", []):
+            window_id = str(window["id"])
+            start_ms = int(window["start_ms"])
+            end_ms = int(window["end_ms"])
+            mixture = _read_segment(audio_path, start_ms, end_ms)
+            mix_path = output_dir / f"{window_id}-mix.wav"
+            _write_wav(mix_path, mixture)
+            tracks = []
+            for index, source in enumerate(
+                _sources(model(str(mix_path), online_write=False)),
+                start=1,
+            ):
+                path = output_dir / f"{window_id}-s{index}.wav"
+                _write_wav(path, source)
+                tracks.append(
+                    {
+                        "index": index,
+                        "path": str(path),
+                        "rms": _rms(source),
+                        "duration_ms": int(
+                            round(len(source) * 1000 / TARGET_SAMPLE_RATE)
+                        ),
+                    }
+                )
+            response_windows.append({**window, "tracks": tracks})
     return {"ok": True, "model": model_name, "windows": response_windows}
 
 

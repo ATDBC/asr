@@ -34,6 +34,59 @@ def _normalized_track_text(text: str) -> str:
     return "".join(str(text).split())
 
 
+def extract_overlap_windows_from_segments(
+    segments: tuple[SpeakerSegment, ...],
+    min_duration_ms: int = 200,
+    merge_gap_ms: int = 200,
+) -> tuple[dict[str, Any], ...]:
+    """Find continuous intervals where two or more speakers are active."""
+    events: dict[int, list[tuple[int, int]]] = {}
+    for segment in segments:
+        events.setdefault(segment.start_ms, []).append((segment.speaker_id, 1))
+        events.setdefault(segment.end_ms, []).append((segment.speaker_id, -1))
+
+    active: dict[int, int] = {}
+    raw_ranges: list[tuple[int, int]] = []
+    times = sorted(events)
+    cur_overlap_start: int | None = None
+
+    for index, time in enumerate(times):
+        for speaker, delta in events[time]:
+            count = active.get(speaker, 0) + delta
+            if count <= 0:
+                active.pop(speaker, None)
+            else:
+                active[speaker] = count
+        if len(active) >= 2:
+            if cur_overlap_start is None:
+                cur_overlap_start = time
+        else:
+            if cur_overlap_start is not None:
+                if time - cur_overlap_start >= min_duration_ms:
+                    raw_ranges.append((cur_overlap_start, time))
+                cur_overlap_start = None
+
+    if not raw_ranges:
+        return ()
+
+    merged: list[tuple[int, int]] = [raw_ranges[0]]
+    for start, end in raw_ranges[1:]:
+        last_start, last_end = merged[-1]
+        if start - last_end <= merge_gap_ms:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+
+    return tuple(
+        {
+            "id": f"overlap-{index:04d}",
+            "start_ms": start,
+            "end_ms": end,
+        }
+        for index, (start, end) in enumerate(merged, start=1)
+    )
+
+
 def accept_separated_window(
     tracks: list[dict[str, Any]],
     min_score: float,
@@ -286,30 +339,53 @@ class SubprocessOverlapPreparer:
         second_score = scores[1][1] if len(scores) > 1 else -1.0
         return best_speaker, best_score, best_score - second_score
 
-    def detect_and_separate(self, audio_path: Path) -> SeparatedOverlap:
-        """Run only pyannote/ClearVoice, with no 3D-Speaker reference."""
+    @staticmethod
+    def _match_pair_speakers(
+        embeddings: tuple[np.ndarray, np.ndarray],
+        centroids: dict[int, np.ndarray],
+    ) -> tuple[tuple[int, float, float], tuple[int, float, float]] | None:
+        if len(centroids) < 2:
+            return None
+        norm_embs = [
+            emb / (np.linalg.norm(emb) + 1e-8) for emb in embeddings
+        ]
+        norm_centroids = {
+            spk: c / (np.linalg.norm(c) + 1e-8) for spk, c in centroids.items()
+        }
+        candidates = list(norm_centroids.keys())
+        best_pair = None
+        best_sum = -float("inf")
+        second_sum = -float("inf")
+        for i in candidates:
+            for j in candidates:
+                if i == j:
+                    continue
+                score_sum = float(
+                    np.dot(norm_embs[0], norm_centroids[i])
+                    + np.dot(norm_embs[1], norm_centroids[j])
+                )
+                if score_sum > best_sum:
+                    second_sum = best_sum
+                    best_sum = score_sum
+                    best_pair = (i, j)
+                elif score_sum > second_sum:
+                    second_sum = score_sum
 
-        try:
-            detected = self._worker_call(
-                "detect",
-                {
-                    "audio_path": str(Path(audio_path).resolve()),
-                    "model_id": self.detector_model,
-                    "hf_token_env": self.hf_token_env,
-                    "device": self.device,
-                    "cache_dir": (
-                        str(self.cache_dir.resolve())
-                        if self.cache_dir is not None
-                        else None
-                    ),
-                },
-            )
-        except Exception as exc:
-            return SeparatedOverlap(
-                (),
-                (f"overlap detection unavailable: {exc}",),
-            )
-        windows = detected.get("windows") or []
+        if best_pair is None:
+            return None
+
+        i, j = best_pair
+        margin = max(0.0, best_sum - second_sum) if second_sum > -float("inf") else 0.5
+        score0 = float(np.dot(norm_embs[0], norm_centroids[i]))
+        score1 = float(np.dot(norm_embs[1], norm_centroids[j]))
+        return ((i, score0, margin), (j, score1, margin))
+
+    def separate_windows(
+        self,
+        audio_path: Path,
+        windows: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    ) -> SeparatedOverlap:
+        """Run ClearVoice separation on explicitly provided overlap windows."""
         if not windows:
             return SeparatedOverlap((), ())
         try:
@@ -318,7 +394,7 @@ class SubprocessOverlapPreparer:
                 {
                     "audio_path": str(Path(audio_path).resolve()),
                     "output_dir": str(self.output_dir.resolve()),
-                    "windows": windows,
+                    "windows": list(windows),
                     "model": "MossFormer2_SS_16K",
                     "cache_dir": (
                         str(self.cache_dir.resolve())
@@ -345,6 +421,33 @@ class SubprocessOverlapPreparer:
             warnings=(),
         )
 
+    def detect_and_separate(self, audio_path: Path) -> SeparatedOverlap:
+        """Run only pyannote/ClearVoice, with no 3D-Speaker reference."""
+        try:
+            detected = self._worker_call(
+                "detect",
+                {
+                    "audio_path": str(Path(audio_path).resolve()),
+                    "model_id": self.detector_model,
+                    "hf_token_env": self.hf_token_env,
+                    "device": self.device,
+                    "cache_dir": (
+                        str(self.cache_dir.resolve())
+                        if self.cache_dir is not None
+                        else None
+                    ),
+                },
+            )
+        except Exception as exc:
+            return SeparatedOverlap(
+                (),
+                (f"overlap detection unavailable: {exc}",),
+            )
+        windows = detected.get("windows") or []
+        if not windows:
+            return SeparatedOverlap((), ())
+        return self.separate_windows(audio_path, windows)
+
     def match_tracks(
         self,
         separated: SeparatedOverlap,
@@ -360,8 +463,10 @@ class SubprocessOverlapPreparer:
                 end_ms = int(window["end_ms"])
             except (KeyError, TypeError, ValueError):
                 continue
-            prepared_tracks: list[PreparedTrack] = []
-            for track in window.get("tracks") or []:
+
+            raw_tracks = window.get("tracks") or []
+            valid_tracks: list[dict[str, Any]] = []
+            for track in raw_tracks:
                 if not isinstance(track, dict):
                     continue
                 try:
@@ -371,25 +476,70 @@ class SubprocessOverlapPreparer:
                     continue
                 if rms < self.min_rms:
                     continue
+                valid_tracks.append({"path": track_path, "rms": rms})
+
+            prepared_tracks: list[PreparedTrack] = []
+            if len(valid_tracks) == 2 and len(centroids) >= 2:
                 try:
-                    embedding = track_diarizer.embedding_for_audio(track_path)
-                    speaker, score, margin = self._match_speaker(
-                        embedding,
-                        centroids,
+                    embs = (
+                        track_diarizer.embedding_for_audio(valid_tracks[0]["path"]),
+                        track_diarizer.embedding_for_audio(valid_tracks[1]["path"]),
                     )
+                    pair_matches = self._match_pair_speakers(embs, centroids)
                 except Exception:
-                    continue
-                if speaker is None:
-                    continue
-                prepared_tracks.append(
-                    PreparedTrack(
-                        path=track_path,
-                        speaker_id=speaker,
-                        score=score,
-                        margin=margin,
-                        rms=rms,
-                    )
-                )
+                    pair_matches = None
+
+                if pair_matches is not None:
+                    for vt, match in zip(valid_tracks, pair_matches):
+                        spk, score, margin = match
+                        prepared_tracks.append(
+                            PreparedTrack(
+                                path=vt["path"],
+                                speaker_id=spk,
+                                score=score,
+                                margin=margin,
+                                rms=vt["rms"],
+                            )
+                        )
+                else:
+                    for vt in valid_tracks:
+                        try:
+                            embedding = track_diarizer.embedding_for_audio(vt["path"])
+                            speaker, score, margin = self._match_speaker(
+                                embedding, centroids
+                            )
+                        except Exception:
+                            continue
+                        if speaker is not None:
+                            prepared_tracks.append(
+                                PreparedTrack(
+                                    path=vt["path"],
+                                    speaker_id=speaker,
+                                    score=score,
+                                    margin=margin,
+                                    rms=vt["rms"],
+                                )
+                            )
+            else:
+                for vt in valid_tracks:
+                    try:
+                        embedding = track_diarizer.embedding_for_audio(vt["path"])
+                        speaker, score, margin = self._match_speaker(
+                            embedding, centroids
+                        )
+                    except Exception:
+                        continue
+                    if speaker is not None:
+                        prepared_tracks.append(
+                            PreparedTrack(
+                                path=vt["path"],
+                                speaker_id=speaker,
+                                score=score,
+                                margin=margin,
+                                rms=vt["rms"],
+                            )
+                        )
+
             prepared_windows.append(
                 PreparedWindow(
                     id=str(window.get("id") or ""),
@@ -461,28 +611,52 @@ def apply_prepared_overlap(
                     ),
                 }
             )
-            for token in asr_result.tokens:
-                global_start = min(
-                    window.end_ms,
-                    window.start_ms + token.start_ms,
-                )
-                global_end = min(
-                    window.end_ms,
-                    window.start_ms + token.end_ms,
-                )
-                if global_end <= global_start:
-                    continue
-                candidate_tokens.append(
-                    AttributedToken(
-                        text=token.text,
-                        start_ms=global_start,
-                        end_ms=global_end,
-                        speaker_id=track.speaker_id,
-                        confidence=AlignmentConfidence.HIGH,
-                        source="separated",
-                        overlap=True,
+            if asr_result.sentences:
+                for sentence in asr_result.sentences:
+                    global_start = min(
+                        window.end_ms,
+                        window.start_ms + sentence.start_ms,
                     )
-                )
+                    global_end = min(
+                        window.end_ms,
+                        window.start_ms + sentence.end_ms,
+                    )
+                    if global_end <= global_start:
+                        continue
+                    candidate_tokens.append(
+                        AttributedToken(
+                            text=sentence.text,
+                            start_ms=global_start,
+                            end_ms=global_end,
+                            speaker_id=track.speaker_id,
+                            confidence=AlignmentConfidence.HIGH,
+                            source="separated",
+                            overlap=True,
+                        )
+                    )
+            else:
+                for token in asr_result.tokens:
+                    global_start = min(
+                        window.end_ms,
+                        window.start_ms + token.start_ms,
+                    )
+                    global_end = min(
+                        window.end_ms,
+                        window.start_ms + token.end_ms,
+                    )
+                    if global_end <= global_start:
+                        continue
+                    candidate_tokens.append(
+                        AttributedToken(
+                            text=token.text,
+                            start_ms=global_start,
+                            end_ms=global_end,
+                            speaker_id=track.speaker_id,
+                            confidence=AlignmentConfidence.HIGH,
+                            source="separated",
+                            overlap=True,
+                        )
+                    )
         decision = accept_separated_window(
             assessments,
             min_score,

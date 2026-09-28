@@ -416,3 +416,52 @@ def test_apply_degrades_only_failed_overlap_window(tmp_path: Path):
     assert result.tokens == base
     assert result.modified is False
     assert "track_count_not_two" in result.warnings[0]
+
+
+def test_extract_overlap_windows_from_segments():
+    from funasr_transcriber.overlap import extract_overlap_windows_from_segments
+
+    # Single speaker, no overlap
+    assert extract_overlap_windows_from_segments(
+        (SpeakerSegment(1, 0, 1000), SpeakerSegment(1, 1500, 2500))
+    ) == ()
+
+    # Two non-overlapping speakers
+    assert extract_overlap_windows_from_segments(
+        (SpeakerSegment(1, 0, 1000), SpeakerSegment(2, 1200, 2000))
+    ) == ()
+
+    # Two overlapping speakers
+    windows = extract_overlap_windows_from_segments(
+        (
+            SpeakerSegment(1, 0, 3000),
+            SpeakerSegment(2, 2000, 5000),
+        )
+    )
+    assert len(windows) == 1
+    assert windows[0]["start_ms"] == 2000
+    assert windows[0]["end_ms"] == 3000
+
+    # Short overlap under min_duration_ms ignored
+    windows_short = extract_overlap_windows_from_segments(
+        (
+            SpeakerSegment(1, 0, 2100),
+            SpeakerSegment(2, 2000, 5000),
+        ),
+        min_duration_ms=200,
+    )
+    assert windows_short == ()
+
+    # Merging close overlaps
+    windows_merged = extract_overlap_windows_from_segments(
+        (
+            SpeakerSegment(1, 0, 3000),
+            SpeakerSegment(2, 2000, 3000),
+            SpeakerSegment(1, 3100, 5000),
+            SpeakerSegment(2, 3100, 5000),
+        ),
+        merge_gap_ms=200,
+    )
+    assert len(windows_merged) == 1
+    assert windows_merged[0]["start_ms"] == 2000
+    assert windows_merged[0]["end_ms"] == 5000

@@ -340,7 +340,7 @@ def test_service_status_uses_local_client(monkeypatch, tmp_path: Path, capsys):
     assert cli.main(["service", "status"]) == 0
     assert '"status": "ready"' in capsys.readouterr().out
 
-def test_nemotron_cli_rejects_effective_overlap_request(tmp_path: Path):
+def test_nemotron_cli_supports_effective_overlap_request(tmp_path: Path):
     config = load_config(cli_overrides={"diarization.backend": "nemotron3"})
     args = SimpleNamespace(
         input_audio=tmp_path / "input.wav",
@@ -352,8 +352,8 @@ def test_nemotron_cli_rejects_effective_overlap_request(tmp_path: Path):
         profile_resources=False,
         diagnostics=None,
     )
-    with pytest.raises(ValueError, match="Nemotron.*overlap"):
-        cli._service_request(args, config)
+    request = cli._service_request(args, config)
+    assert request.overlap_enabled is True
 
 @pytest.mark.parametrize("backend", ["3d_speaker", "nemotron3"])
 def test_models_command_uses_only_selected_speaker_backend(

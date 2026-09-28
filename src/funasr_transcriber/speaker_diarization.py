@@ -456,8 +456,19 @@ class SpeakerDiarizer:
             ]
             if not chunks:
                 continue
+            solo_chunks = [
+                (c_start, c_end)
+                for c_start, c_end in chunks
+                if not any(
+                    other.speaker_id != speaker
+                    and (other.start_ms / 1000) < c_end
+                    and (other.end_ms / 1000) > c_start
+                    for other in segments
+                )
+            ]
+            target_chunks = solo_chunks if solo_chunks else chunks
             embeddings = _normalized_embeddings(
-                self._extract_embeddings(chunks, wav)
+                self._extract_embeddings(target_chunks, wav)
             )
             centroid = embeddings.mean(axis=0)
             output[speaker] = centroid / (np.linalg.norm(centroid) + 1e-8)

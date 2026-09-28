@@ -413,8 +413,7 @@ def validate(config: AppConfig) -> AppConfig:
     else:
         if diarization.speaker_count is not None and not 1 <= diarization.speaker_count <= 8:
             raise ValueError("Nemotron supports one to eight configured speakers")
-        if config.overlap.enabled:
-            raise ValueError("Nemotron and legacy overlap cannot run together")
+
         if config.asr.aed_scheduler == "memory_first":
             raise ValueError("Nemotron does not support memory_first")
     if not 0.0 < diarization.merge_cosine <= 1.0:

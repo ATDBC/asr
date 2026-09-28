@@ -41,6 +41,7 @@ from .overlap import (
     OverlapPreparation,
     SubprocessOverlapPreparer,
     apply_prepared_overlap,
+    extract_overlap_windows_from_segments,
 )
 from .pipeline import TranscriptionPipeline
 from .resource_profile import ResourceSampler
@@ -807,13 +808,26 @@ class ServiceJobRunner:
         job_dir: Path,
         diagnostics: Any,
     ) -> OverlapEnhancement:
+        is_nemotron = self.config.diarization.backend == "nemotron3"
+        nemotron_windows: tuple[dict[str, Any], ...] | None = None
+        if is_nemotron:
+            nemotron_windows = extract_overlap_windows_from_segments(
+                speaker_segments
+            )
+            if not nemotron_windows:
+                return OverlapEnhancement(attributed, (), False)
+
         speaker_owner = self.hot_host.speaker_owner
-        if speaker_owner is None:
-            raise TranscriptionError("resident speaker owner is unavailable")
-        centroid_provider = getattr(speaker_owner, "speaker_centroids", None)
-        if not callable(centroid_provider):
-            raise TranscriptionError("resident speaker owner cannot build centroids")
-        centroids = centroid_provider(normalized, speaker_segments)
+        centroid_provider = (
+            getattr(speaker_owner, "speaker_centroids", None)
+            if speaker_owner is not None
+            else None
+        )
+        centroids = (
+            centroid_provider(normalized, speaker_segments)
+            if callable(centroid_provider)
+            else None
+        )
         before_release = (
             self._gpu_sampler("cuda:0") if self._gpu_sampler is not None else None
         )
@@ -834,11 +848,20 @@ class ServiceJobRunner:
                         "resident models did not release GPU memory for overlap"
                     )
             preparer = self._overlap_factory(job_dir)
-            separated = preparer.detect_and_separate(normalized)
+            if nemotron_windows is not None:
+                separated = preparer.separate_windows(
+                    normalized, nemotron_windows
+                )
+            else:
+                separated = preparer.detect_and_separate(normalized)
             temporary_diarizer = _create_and_open(
                 self._temporary_diarizer_factory
             )
             try:
+                if centroids is None:
+                    centroids = temporary_diarizer.speaker_centroids(
+                        normalized, speaker_segments
+                    )
                 preparation: OverlapPreparation = preparer.match_tracks(
                     separated,
                     centroids,
@@ -875,13 +898,7 @@ class ServiceJobRunner:
             raise ValueError("service job runner requires a submit request")
         if request.input_audio is None or request.output_dir is None:
             raise ValueError("submit request is missing audio or output path")
-        if (
-            self.config.diarization.backend == "nemotron3"
-            and request.overlap_enabled
-        ):
-            raise TranscriptionError(
-                "Nemotron and legacy overlap cannot run together"
-            )
+
         input_audio = Path(request.input_audio).expanduser().resolve()
         output_dir = Path(request.output_dir).expanduser().resolve()
         if output_dir.exists() and not request.overwrite:
@@ -1034,20 +1051,20 @@ class ServiceJobRunner:
                         branches.asr_result.tokens,
                         branches.speaker_segments,
                     )
-                enhancement = (
-                    self._run_overlap_enhancement(
-                        normalized,
-                        attributed,
-                        branches.speaker_segments,
-                        job_dir,
-                        diagnostics,
-                    )
-                    if request.overlap_enabled
-                    else None
-                )
             else:
                 attributed = direct_attributed
-                enhancement = None
+
+            enhancement = (
+                self._run_overlap_enhancement(
+                    normalized,
+                    attributed,
+                    branches.speaker_segments,
+                    job_dir,
+                    diagnostics,
+                )
+                if request.overlap_enabled
+                else None
+            )
             result = pipeline.finish(
                 branches.asr_result,
                 attributed,

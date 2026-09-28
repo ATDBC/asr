@@ -257,12 +257,13 @@ def test_nemotron_auto_mode_keeps_3d_speaker_default_unchanged():
     assert selected.nemotron.activity_threshold == 0.5
 
 
-def test_nemotron_selection_rejects_legacy_overlap():
-    with pytest.raises(ValueError, match="Nemotron.*overlap"):
-        load_config(cli_overrides={
-            "diarization.backend": "nemotron3",
-            "overlap.enabled": True,
-        })
+def test_nemotron_selection_supports_overlap():
+    config = load_config(cli_overrides={
+        "diarization.backend": "nemotron3",
+        "overlap.enabled": True,
+    })
+    assert config.diarization.backend == "nemotron3"
+    assert config.overlap.enabled is True
 
 
 def test_nemotron_rejects_ninth_configured_speaker():

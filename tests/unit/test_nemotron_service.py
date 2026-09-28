@@ -151,38 +151,224 @@ def test_selected_branch_transcribes_original_overlap_crops(tmp_path: Path):
     assert all(token.overlap for token in attributed)
     assert crop_plan.overlap_duration_ms == 1000
 
-def test_selected_service_rejects_request_overlap_override_before_job(
+def test_selected_service_supports_nemotron_overlap(
     tmp_path: Path
 ):
-    from funasr_transcriber.errors import TranscriptionError
+    import json
+    import numpy as np
+    import soundfile as sf
+
+    from funasr_transcriber.audio import AudioInfo
+    from funasr_transcriber.firered_parallel import CropTranscript
+    from funasr_transcriber.overlap import (
+        OverlapPreparation,
+        PreparedTrack,
+        PreparedWindow,
+        SeparatedOverlap,
+    )
+    from funasr_transcriber.schemas import (
+        AsrResult,
+        RecognizedSentence,
+        SpeakerSegment,
+        TimedToken,
+    )
     from funasr_transcriber.service_protocol import ServiceRequest
 
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(
-        "\n".join(
-            (
-                "[paths]",
-                f'work_dir = "{tmp_path / "work"}"',
-                "[diarization]",
-                'backend = "nemotron3"',
-            )
-        ),
-        encoding="utf-8",
+    config = load_config(
+        cli_overrides={
+            "paths.work_dir": str(tmp_path / "work"),
+            "diarization.backend": "nemotron3",
+        }
     )
-    runner = ServiceJobRunner(load_config(config_file), hot_host=object())
-    output = tmp_path / "output"
-    request = ServiceRequest(
-        identifier="conflict",
-        action="submit",
-        input_audio=tmp_path / "input.wav",
-        output_dir=output,
-        overlap_enabled=True,
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"source")
+    track_one = tmp_path / "t1.wav"
+    track_two = tmp_path / "t2.wav"
+    track_one.write_bytes(b"t1")
+    track_two.write_bytes(b"t2")
+
+    events = []
+
+    class Speaker:
+        pid = 451
+
+        def diarize(self, path):
+            return (
+                SpeakerSegment(1, 0, 6000),
+                SpeakerSegment(2, 5000, 8000),
+            )
+
+    class AedWorker:
+        def refine_vad(self, path, ranges):
+            return ranges
+
+    class AsrOwner:
+        worker0 = AedWorker()
+        last_response = {}
+
+        def transcribe_crops(self, plan):
+            self.last_response = {
+                "metrics": {
+                    "scheduler": {
+                        "crop_plans": [],
+                        "worker_crop_indexes": [[0, 1]],
+                    },
+                    "parallel": {"no_speech_crop_count": 0},
+                }
+            }
+            return tuple(
+                CropTranscript(
+                    crop,
+                    AsrResult(
+                        "甲" if crop.speaker_id == 1 else "乙",
+                        (
+                            TimedToken(
+                                "甲" if crop.speaker_id == 1 else "乙",
+                                5500 if crop.speaker_id == 1 else 500,
+                                5800 if crop.speaker_id == 1 else 800,
+                            ),
+                        ),
+                        sentences=(
+                            RecognizedSentence(
+                                "甲" if crop.speaker_id == 1 else "乙",
+                                5500 if crop.speaker_id == 1 else 500,
+                                5800 if crop.speaker_id == 1 else 800,
+                                0.9,
+                            ),
+                        ),
+                        duration_ms=crop.end_ms - crop.start_ms,
+                    ),
+                )
+                for crop in plan.crops
+            )
+
+        def cleanup_cuda_cache(self):
+            return {"seconds": 0.0, "workers": []}
+
+    class Host:
+        started = True
+        asr_owner = AsrOwner()
+        speaker_owner = Speaker()
+        inventories = {"speaker": {}}
+
+        def warmup(self):
+            return {"performed": False}
+
+        def close(self):
+            events.append("hot:close")
+
+        def start(self):
+            events.append("hot:start")
+
+    class Preparer:
+        def separate_windows(self, audio_path, windows):
+            events.append("overlap:separate")
+            assert len(windows) == 1
+            assert windows[0]["start_ms"] == 5000
+            assert windows[0]["end_ms"] == 6000
+            return SeparatedOverlap(
+                (
+                    {
+                        "id": "overlap-0001",
+                        "start_ms": 5000,
+                        "end_ms": 6000,
+                        "tracks": [
+                            {"path": str(track_one), "rms": 0.1},
+                            {"path": str(track_two), "rms": 0.1},
+                        ],
+                    },
+                ),
+                (),
+            )
+
+        def match_tracks(self, separated, centroids, temporary_diarizer):
+            events.append("overlap:match")
+            assert 1 in centroids and 2 in centroids
+            return OverlapPreparation(
+                (
+                    PreparedWindow(
+                        "overlap-0001",
+                        5000,
+                        6000,
+                        (
+                            PreparedTrack(track_one, 1, 0.9, 0.2, 0.1),
+                            PreparedTrack(track_two, 2, 0.9, 0.2, 0.1),
+                        ),
+                    ),
+                ),
+                (),
+            )
+
+    class TemporarySpeaker:
+        def speaker_centroids(self, path, segments):
+            events.append("temporary:speaker:centroids")
+            return {1: np.ones(192), 2: np.ones(192)}
+
+        def embedding_for_audio(self, path):
+            return np.ones(192)
+
+        def close(self):
+            events.append("temporary:speaker:close")
+
+    class TemporaryAsr:
+        def transcribe(self, path, vad_segments_ms=None):
+            text = "甲分。" if Path(path) == track_one else "乙分。"
+            return AsrResult(
+                text,
+                (TimedToken(text, 0, 500, 0.9),),
+                sentences=(RecognizedSentence(text, 0, 500, 0.9),),
+                vad_segments_ms=((0, 500),),
+                duration_ms=600,
+            )
+
+        def close(self):
+            events.append("temporary:asr:close")
+
+    def normalize(source_path, destination, max_seconds):
+        sf.write(
+            destination,
+            np.zeros(8000 * 16, dtype="int16"),
+            16000,
+            subtype="PCM_16",
+        )
+
+    runner = ServiceJobRunner(
+        config,
+        hot_host=Host(),
+        probe=lambda path, max_seconds: AudioInfo(
+            Path(path), 8000, 16000, 1, "wav"
+        ),
+        normalize=normalize,
+        overlap_factory=lambda job_dir: Preparer(),
+        temporary_diarizer_factory=TemporarySpeaker,
+        temporary_asr_factory=lambda job_dir: TemporaryAsr(),
+        gpu_sampler=None,
+    )
+    output = tmp_path / "result"
+    runner.run(
+        ServiceRequest(
+            identifier="nemotron-overlap-job",
+            action="submit",
+            input_audio=source,
+            output_dir=output,
+            config_fingerprint="test",
+            overlap_enabled=True,
+        )
     )
 
-    with pytest.raises(TranscriptionError, match="Nemotron.*overlap"):
-        runner.run(request)
-    assert not output.exists()
-    assert not (runner.config.paths.work_dir / "job-conflict").exists()
+    assert "hot:close" in events
+    assert "overlap:separate" in events
+    assert "temporary:speaker:centroids" in events
+    assert "overlap:match" in events
+    assert "temporary:speaker:close" in events
+    assert "temporary:asr:close" in events
+    assert "hot:start" in events
+
+    transcript = json.loads(
+        (output / "transcript.json").read_text(encoding="utf-8")
+    )
+    assert transcript["schema_version"] == "1.0"
+    assert len(transcript["turns"]) == 2
 
 def test_selected_service_publishes_two_overlapping_turns(
     tmp_path: Path

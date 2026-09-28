@@ -32,7 +32,7 @@ def build_turns(
     for token in sorted(
         tokens,
         key=lambda item: (
-            (item.start_ms, item.speaker_id)
+            (item.start_ms,)
             if preserve_input_ties
             else (item.start_ms, item.speaker_id, item.end_ms)
         ),

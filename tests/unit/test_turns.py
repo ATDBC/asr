@@ -74,3 +74,17 @@ def test_simultaneous_turns_sort_by_speaker_id():
     )
 
     assert [turn.speaker_id for turn in turns] == [1, 2]
+
+
+def test_preserve_input_ties_keeps_different_speaker_crop_order():
+    turns = build_turns(
+        (
+            token("第二路。", 100, 900, speaker_id=2, overlap=True),
+            token("第一路。", 100, 1000, speaker_id=1, overlap=True),
+        ),
+        merge_gap_ms=1000,
+        preserve_input_ties=True,
+    )
+
+    assert [turn.speaker_id for turn in turns] == [2, 1]
+    assert [turn.text for turn in turns] == ["第二路。", "第一路。"]

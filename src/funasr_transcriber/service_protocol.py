@@ -278,13 +278,20 @@ class ServiceClient:
         self.paths = paths
         self.timeout_seconds = float(timeout_seconds)
 
-    def _exchange(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _exchange(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        wait_for_completion: bool = False,
+    ) -> dict[str, Any]:
         if self.timeout_seconds <= 0:
             raise ValueError("service timeout_seconds must be positive")
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(self.timeout_seconds)
         try:
             client.connect(self.paths.socket_address)
+            if wait_for_completion:
+                client.settimeout(None)
             stream = client.makefile("rwb")
             try:
                 stream.write(encode_message(payload))
@@ -351,7 +358,8 @@ class ServiceClient:
 
         response = self._terminal(
             self._exchange(
-                {"id": identifier, "action": "wait", "job_id": str(job_id)}
+                {"id": identifier, "action": "wait", "job_id": str(job_id)},
+                wait_for_completion=True,
             ),
             identifier,
         )

@@ -557,6 +557,43 @@ def test_socket_submit_acknowledges_before_blocking_job(tmp_path: Path):
         server.close()
 
 
+def test_socket_wait_is_not_limited_by_startup_timeout(tmp_path: Path):
+    started = threading.Event()
+    release = threading.Event()
+    timer = None
+
+    def run_job(request):
+        started.set()
+        assert release.wait(timeout=1)
+        return {"output_dir": request.identifier}
+
+    paths = ServicePaths.from_work_dir(tmp_path)
+    daemon = DaemonService(queue_limit=1, run_job=run_job)
+    server = ServiceSocketServer(
+        paths,
+        daemon,
+        config_fingerprint="test-fingerprint",
+    )
+    server.start()
+    client = ServiceClient(paths, timeout_seconds=0.05)
+    try:
+        accepted = client.submit(_socket_request(tmp_path, "long-job"))
+        assert accepted["job_id"] == "long-job"
+        assert started.wait(timeout=1)
+        timer = threading.Timer(0.15, release.set)
+        timer.start()
+
+        response = client.wait("long-job", "wait-long-job")
+
+        assert response["result"] == {"output_dir": "long-job"}
+    finally:
+        release.set()
+        if timer is not None:
+            timer.cancel()
+            timer.join(timeout=1)
+        server.close()
+
+
 def test_socket_accepts_full_fifo_batch_before_waiting(tmp_path: Path):
     started = threading.Event()
     release = threading.Event()

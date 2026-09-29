@@ -184,8 +184,8 @@ def test_selected_service_supports_nemotron_overlap(
     source.write_bytes(b"source")
     track_one = tmp_path / "t1.wav"
     track_two = tmp_path / "t2.wav"
-    track_one.write_bytes(b"t1")
-    track_two.write_bytes(b"t2")
+    sf.write(track_one, np.zeros(1000 * 16, dtype="int16"), 16000, subtype="PCM_16")
+    sf.write(track_two, np.zeros(1000 * 16, dtype="int16"), 16000, subtype="PCM_16")
 
     events = []
 
@@ -361,7 +361,7 @@ def test_selected_service_supports_nemotron_overlap(
     assert "temporary:speaker:centroids" in events
     assert "overlap:match" in events
     assert "temporary:speaker:close" in events
-    assert "temporary:asr:close" in events
+    assert "temporary:asr:close" not in events
     assert "hot:start" in events
 
     transcript = json.loads(

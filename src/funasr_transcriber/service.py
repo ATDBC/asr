@@ -265,6 +265,10 @@ def run_nemotron_branches(
     speaker_owner: Any,
     crop_dir: Path,
     profile_enabled: bool = False,
+    overlap_preparation: OverlapPreparation | None = None,
+    min_score: float = 0.5,
+    min_margin: float = 0.05,
+    min_rms: float = 0.005,
 ) -> tuple[NormalBranchResult, tuple[Any, ...], CropPlan]:
     """Keep Nemotron speaker intervals and AED crop paths independent."""
     branch_metrics: dict[str, dict[str, object]] = {}
@@ -289,6 +293,10 @@ def run_nemotron_branches(
         segments,
         crop_dir,
         refine_vad if callable(refine_vad) else None,
+        overlap_preparation=overlap_preparation,
+        min_score=min_score,
+        min_margin=min_margin,
+        min_rms=min_rms,
     )
     branch_metrics["crops"] = {
         "seconds": perf_counter() - crop_started,
@@ -800,6 +808,136 @@ class ServiceJobRunner:
                 getattr(self.hot_host, "inventories", {})
             )
 
+    def _run_nemotron_pipeline(
+        self,
+        normalized: Path,
+        job_dir: Path,
+        diagnostics: Any,
+        overlap_enabled: bool,
+        profile_enabled: bool,
+        aed_budget_fraction: float = 1.0,
+    ) -> tuple[NormalBranchResult, tuple[Any, ...], CropPlan]:
+        speaker_owner = self.hot_host.speaker_owner
+        asr_owner = self.hot_host.asr_owner
+        branch_metrics: dict[str, dict[str, object]] = {}
+
+        speaker_started = perf_counter()
+        segments, speaker_metrics = _run_speaker(
+            speaker_owner, Path(normalized), profile_enabled
+        )
+        branch_metrics["diarization"] = {
+            "seconds": perf_counter() - speaker_started,
+        }
+        if speaker_metrics:
+            branch_metrics["diarization"]["memory"] = speaker_metrics
+        if not segments:
+            raise TranscriptionError(
+                "Nemotron speaker diarization returned no segments"
+            )
+
+        overlap_preparation: OverlapPreparation | None = None
+        if overlap_enabled:
+            overlap_windows = extract_overlap_windows_from_segments(segments)
+            if overlap_windows:
+                overlap_started = perf_counter()
+                before_release = (
+                    self._gpu_sampler("cuda:0")
+                    if self._gpu_sampler is not None
+                    else None
+                )
+                self.hot_host.close()
+                try:
+                    if before_release is not None and self._gpu_sampler is not None:
+                        after_release = self._gpu_sampler("cuda:0")
+                        release_record = build_gpu_stage_record(
+                            before_release,
+                            after_release,
+                            peak_gpu_bytes=None,
+                            load_seconds=None,
+                            inference_seconds=None,
+                        )
+                        diagnostics.gpu_stages["hot_release_for_overlap"] = release_record
+                        if release_record["released"] is not True:
+                            raise TranscriberEnvironmentError(
+                                "resident models did not release GPU memory for overlap"
+                            )
+                    preparer = self._overlap_factory(job_dir)
+                    separated = preparer.separate_windows(
+                        normalized, overlap_windows
+                    )
+                    temporary_diarizer = _create_and_open(
+                        self._temporary_diarizer_factory
+                    )
+                    try:
+                        centroids = temporary_diarizer.speaker_centroids(
+                            normalized, segments
+                        )
+                        overlap_preparation = preparer.match_tracks(
+                            separated,
+                            centroids,
+                            temporary_diarizer,
+                        )
+                    finally:
+                        _close_owner(temporary_diarizer)
+                finally:
+                    self.hot_host.start()
+                    asr_owner = self.hot_host.asr_owner
+                    if hasattr(asr_owner, "aed_budget_fraction"):
+                        asr_owner.aed_budget_fraction = float(aed_budget_fraction)
+                branch_metrics["overlap"] = {
+                    "seconds": perf_counter() - overlap_started,
+                    "windows": len(overlap_windows),
+                }
+
+        crop_started = perf_counter()
+        worker0 = getattr(asr_owner, "worker0", None)
+        refine_vad = getattr(worker0, "refine_vad", None)
+        crop_plan = build_crop_plan(
+            Path(normalized),
+            segments,
+            job_dir / "speaker-crops",
+            refine_vad if callable(refine_vad) else None,
+            overlap_preparation=overlap_preparation,
+            min_score=self.config.overlap.speaker_match_min_score,
+            min_margin=self.config.overlap.speaker_match_min_margin,
+            min_rms=self.config.overlap.track_min_rms,
+        )
+        branch_metrics["crops"] = {
+            "seconds": perf_counter() - crop_started,
+            "count": len(crop_plan.crops),
+        }
+
+        transcribe_crops = getattr(asr_owner, "transcribe_crops", None)
+        if not callable(transcribe_crops):
+            raise TranscriptionError(
+                "resident FireRed owner does not support independent AED crops"
+            )
+        asr_started = perf_counter()
+        crop_results = transcribe_crops(crop_plan)
+        asr_result, attributed = attribute_crop_results(
+            tuple(crop_results), segments, crop_plan.duration_ms
+        )
+        branch_metrics["asr"] = {
+            "seconds": perf_counter() - asr_started,
+        }
+        response = getattr(asr_owner, "last_response", {})
+        if isinstance(response, dict):
+            metrics = response.get("metrics")
+            if isinstance(metrics, dict):
+                for key in ("scheduler", "parallel"):
+                    if isinstance(metrics.get(key), dict):
+                        branch_metrics["asr"][key] = metrics[key]
+        return (
+            NormalBranchResult(
+                asr_result,
+                segments,
+                speaker_metrics,
+                branch_metrics,
+            ),
+            attributed,
+            crop_plan,
+        )
+
     def _run_overlap_enhancement(
         self,
         normalized: Path,
@@ -975,13 +1113,13 @@ class ServiceJobRunner:
             with diagnostics.stage("normal_model_branches"):
                 if self.config.diarization.backend == "nemotron3":
                     branches, direct_attributed, crop_plan = (
-                        run_nemotron_branches(
+                        self._run_nemotron_pipeline(
                             normalized,
-                            asr_owner,
-                            speaker_owner,
-                            job_dir / "speaker-crops",
-                            profile_enabled=diagnostics_level
-                            in {"resources", "deep"},
+                            job_dir,
+                            diagnostics,
+                            request.overlap_enabled,
+                            diagnostics_level in {"resources", "deep"},
+                            aed_budget_fraction=float(request.aed_budget_fraction),
                         )
                     )
                 else:
@@ -1034,6 +1172,7 @@ class ServiceJobRunner:
                     "short_count": crop_plan.short_count,
                     "subpiece_count": crop_plan.subpiece_count,
                     "overlap_duration_ms": crop_plan.overlap_duration_ms,
+                    "spliced_overlap_count": crop_plan.spliced_overlap_count,
                 }
                 for warning in crop_plan.warnings:
                     diagnostics.warn(warning)
@@ -1063,6 +1202,7 @@ class ServiceJobRunner:
                     diagnostics,
                 )
                 if request.overlap_enabled
+                and self.config.diarization.backend != "nemotron3"
                 else None
             )
             result = pipeline.finish(

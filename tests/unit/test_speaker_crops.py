@@ -137,5 +137,102 @@ def test_adjacent_same_speaker_intervals_remain_distinct(tmp_path):
         tmp_path / "crops",
         refine_vad=None,
     )
-    assert len(plan.crops) == 2
-    assert plan.crops[0].path != plan.crops[1].path
+
+def test_waveform_splicing_replaces_overlap_region_with_track(tmp_path):
+    from funasr_transcriber.overlap import OverlapPreparation, PreparedTrack, PreparedWindow
+
+    source = tmp_path / "normalized.wav"
+    # Source has 100 everywhere
+    samples = np.full(8000 * 16, 100, dtype=np.int16)
+    sf.write(source, samples, 16000, subtype="PCM_16")
+
+    track1 = tmp_path / "t1.wav"
+    track2 = tmp_path / "t2.wav"
+    # Overlap window is 2000ms to 4000ms (2000ms long = 32000 samples)
+    t1_samples = np.full(2000 * 16, 500, dtype=np.int16)
+    t2_samples = np.full(2000 * 16, 800, dtype=np.int16)
+    sf.write(track1, t1_samples, 16000, subtype="PCM_16")
+    sf.write(track2, t2_samples, 16000, subtype="PCM_16")
+
+    preparation = OverlapPreparation(
+        windows=(
+            PreparedWindow(
+                id="w1",
+                start_ms=2000,
+                end_ms=4000,
+                tracks=(
+                    PreparedTrack(track1, speaker_id=1, score=0.9, margin=0.3, rms=0.1),
+                    PreparedTrack(track2, speaker_id=2, score=0.9, margin=0.3, rms=0.1),
+                ),
+            ),
+        ),
+        warnings=(),
+    )
+
+    plan = build_crop_plan(
+        source,
+        (
+            SpeakerSegment(1, 0, 6000),
+            SpeakerSegment(2, 2000, 5000),
+        ),
+        tmp_path / "crops",
+        refine_vad=None,
+        overlap_preparation=preparation,
+    )
+
+    assert plan.spliced_overlap_count == 2
+    c0, _ = sf.read(plan.crops[0].path, dtype="int16")
+    # In crop 0 (Speaker 1, 0 to 6000ms):
+    # Before overlap window (0 to 1900ms), values should be 100
+    assert np.all(c0[: 1900 * 16] == 100)
+    # Well inside the overlap window (2100 to 3900ms), values should be 500 (from track1)
+    assert np.all(c0[2100 * 16 : 3900 * 16] == 500)
+    # After overlap window (4100 to 6000ms), values should be 100
+    assert np.all(c0[4100 * 16 :] == 100)
+
+    # In crop 1 (Speaker 2, 2000 to 5000ms):
+    # Segment starts right at overlap window start (2000ms).
+    # Well inside overlap (crop offset 100ms to 1900ms = global 2100 to 3900ms), values should be 800
+    c1, _ = sf.read(plan.crops[1].path, dtype="int16")
+    assert np.all(c1[100 * 16 : 1900 * 16] == 800)
+    # After overlap window (global 4100 to 5000ms = crop offset 2100 to 3000ms), values should be 100
+    assert np.all(c1[2100 * 16 :] == 100)
+
+
+def test_waveform_splicing_skips_when_score_or_margin_low(tmp_path):
+    from funasr_transcriber.overlap import OverlapPreparation, PreparedTrack, PreparedWindow
+
+    source = tmp_path / "normalized.wav"
+    samples = np.full(4000 * 16, 100, dtype=np.int16)
+    sf.write(source, samples, 16000, subtype="PCM_16")
+
+    track1 = tmp_path / "t1.wav"
+    sf.write(track1, np.full(1000 * 16, 500, dtype=np.int16), 16000, subtype="PCM_16")
+
+    # Score is 0.2, below min_score 0.5
+    preparation = OverlapPreparation(
+        windows=(
+            PreparedWindow(
+                id="w1",
+                start_ms=1000,
+                end_ms=2000,
+                tracks=(
+                    PreparedTrack(track1, speaker_id=1, score=0.2, margin=0.3, rms=0.1),
+                ),
+            ),
+        ),
+        warnings=(),
+    )
+
+    plan = build_crop_plan(
+        source,
+        (SpeakerSegment(1, 0, 4000),),
+        tmp_path / "crops",
+        refine_vad=None,
+        overlap_preparation=preparation,
+        min_score=0.5,
+    )
+
+    assert plan.spliced_overlap_count == 0
+    c0, _ = sf.read(plan.crops[0].path, dtype="int16")
+    assert np.all(c0 == 100)

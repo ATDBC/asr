@@ -6,12 +6,16 @@ from dataclasses import dataclass
 import hashlib
 import math
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
+import numpy as np
 import soundfile as sf
 
 from .errors import TranscriptionError
 from .schemas import SpeakerSegment
+
+if TYPE_CHECKING:
+    from .overlap import OverlapPreparation
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,7 @@ class CropPlan:
     subpiece_count: int
     overlap_duration_ms: int
     warnings: tuple[str, ...]
+    spliced_overlap_count: int = 0
 
 
 def fixed_pieces(duration_ms: int) -> tuple[tuple[int, int], ...]:
@@ -116,6 +121,124 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _splice_overlap_into_crop(
+    crop_samples: np.ndarray,
+    segment: SpeakerSegment,
+    overlap_preparation: OverlapPreparation,
+    track_cache: dict[Path, np.ndarray],
+    min_score: float,
+    min_margin: float,
+    min_rms: float,
+    warnings: list[str],
+) -> int:
+    """Splice clean separated tracks into crop_samples for this speaker segment.
+
+    Applies a 5ms (80 sample) linear crossfade at boundary transitions to prevent
+    acoustic discontinuities/pops.
+
+    Returns the number of overlap regions successfully spliced into this crop.
+    """
+    spliced_count = 0
+    seg_start = segment.start_ms
+    seg_end = segment.end_ms
+
+    for window in overlap_preparation.windows:
+        win_start = window.start_ms
+        win_end = window.end_ms
+        intersect_start = max(seg_start, win_start)
+        intersect_end = min(seg_end, win_end)
+        if intersect_start >= intersect_end:
+            continue
+
+        matched_track = None
+        for track in window.tracks:
+            if track.speaker_id == segment.speaker_id:
+                if (
+                    track.score >= min_score
+                    and track.margin >= min_margin
+                    and track.rms >= min_rms
+                ):
+                    matched_track = track
+                    break
+
+        if matched_track is None:
+            continue
+
+        track_path = Path(matched_track.path).resolve()
+        if track_path not in track_cache:
+            try:
+                data, sr = sf.read(str(track_path), dtype="int16", always_2d=False)
+                if sr != 16000:
+                    warnings.append(
+                        f"overlap track {track_path.name} samplerate {sr} != 16000; skipped"
+                    )
+                    continue
+                if data.ndim > 1:
+                    data = data.mean(axis=1).astype(np.int16)
+                track_cache[track_path] = data
+            except Exception as exc:
+                warnings.append(
+                    f"overlap track {track_path.name} read failed: {exc}; kept original"
+                )
+                continue
+
+        track_audio = track_cache[track_path]
+
+        crop_start_sample = (intersect_start - seg_start) * 16
+        crop_end_sample = (intersect_end - seg_start) * 16
+        track_start_sample = (intersect_start - win_start) * 16
+        track_end_sample = (intersect_end - win_start) * 16
+
+        splice_samples = crop_end_sample - crop_start_sample
+        if splice_samples <= 0:
+            continue
+
+        if track_start_sample >= len(track_audio):
+            continue
+        track_slice = track_audio[track_start_sample:track_end_sample]
+        if len(track_slice) < splice_samples:
+            track_slice = np.pad(
+                track_slice, (0, splice_samples - len(track_slice))
+            )
+        elif len(track_slice) > splice_samples:
+            track_slice = track_slice[:splice_samples]
+
+        fade_len = min(80, splice_samples // 2)
+        if fade_len > 0:
+            spliced_part = track_slice.astype(np.float32)
+            orig_part = crop_samples[
+                crop_start_sample:crop_end_sample
+            ].astype(np.float32)
+
+            if intersect_start > seg_start:
+                fade_in = np.linspace(
+                    0.0, 1.0, fade_len, endpoint=False, dtype=np.float32
+                )
+                spliced_part[:fade_len] = (
+                    orig_part[:fade_len] * (1.0 - fade_in)
+                    + spliced_part[:fade_len] * fade_in
+                )
+
+            if intersect_end < seg_end:
+                fade_out = np.linspace(
+                    1.0, 0.0, fade_len, endpoint=False, dtype=np.float32
+                )
+                spliced_part[-fade_len:] = (
+                    orig_part[-fade_len:] * (1.0 - fade_out)
+                    + spliced_part[-fade_len:] * fade_out
+                )
+
+            crop_samples[crop_start_sample:crop_end_sample] = np.clip(
+                np.round(spliced_part), -32768, 32767
+            ).astype(np.int16)
+        else:
+            crop_samples[crop_start_sample:crop_end_sample] = track_slice
+
+        spliced_count += 1
+
+    return spliced_count
+
+
 def build_crop_plan(
     normalized: Path,
     segments: tuple[SpeakerSegment, ...],
@@ -123,6 +246,10 @@ def build_crop_plan(
     refine_vad: Callable[
         [Path, list[list[int]]], list[list[int]]
     ] | None,
+    overlap_preparation: OverlapPreparation | None = None,
+    min_score: float = 0.5,
+    min_margin: float = 0.05,
+    min_rms: float = 0.005,
 ) -> CropPlan:
     source = Path(normalized)
     info = sf.info(str(source))
@@ -169,6 +296,9 @@ def build_crop_plan(
     crops: list[SpeakerCrop] = []
     warnings: list[str] = []
     short_count = 0
+    track_cache: dict[Path, np.ndarray] = {}
+    total_spliced_count = 0
+
     for index, segment in enumerate(ordered):
         crop_duration_ms = segment.end_ms - segment.start_ms
         if crop_duration_ms < 100:
@@ -182,8 +312,22 @@ def build_crop_plan(
             / f"crop-{index:04d}-speaker-{segment.speaker_id}.wav"
         )
         crop_samples = samples[
-            segment.start_ms * 16:segment.end_ms * 16
-        ]
+            segment.start_ms * 16 : segment.end_ms * 16
+        ].copy()
+
+        if overlap_preparation is not None:
+            spliced_in_crop = _splice_overlap_into_crop(
+                crop_samples,
+                segment,
+                overlap_preparation,
+                track_cache,
+                min_score,
+                min_margin,
+                min_rms,
+                warnings,
+            )
+            total_spliced_count += spliced_in_crop
+
         with sf.SoundFile(
             str(path),
             mode="x",
@@ -232,4 +376,5 @@ def build_crop_plan(
         subpiece_count=sum(len(crop.pieces_ms) for crop in crops),
         overlap_duration_ms=_overlap_duration_ms(ordered),
         warnings=tuple(warnings),
+        spliced_overlap_count=total_spliced_count,
     )

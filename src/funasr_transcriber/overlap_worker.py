@@ -206,41 +206,70 @@ def _rms(data) -> float:
 
 def _separate(request: dict[str, Any]) -> dict[str, Any]:
     cache_dir = _configure_cache(request)
+    import numpy as np
+    import soundfile as sf
     import torch
     from clearvoice import ClearVoice
 
     audio_path = Path(request["audio_path"]).resolve()
     output_dir = Path(request["output_dir"]).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     model_name = str(request.get("model") or "MossFormer2_SS_16K")
     model = ClearVoice(task="speech_separation", model_names=[model_name])
     _require_clearvoice_checkpoint(cache_dir, model_name)
+    windows = request.get("windows", [])
+    if not windows:
+        return {"ok": True, "model": model_name, "windows": []}
+
+    with sf.SoundFile(str(audio_path)) as audio:
+        data = audio.read(dtype="float32", always_2d=True)
+        sr = audio.samplerate
+    mono = np.asarray(data.mean(axis=1), dtype="float32")
+
+    batch_size = int(request.get("batch_size") or 8)
     response_windows = []
     with torch.no_grad():
-        for window in request.get("windows", []):
-            window_id = str(window["id"])
-            start_ms = int(window["start_ms"])
-            end_ms = int(window["end_ms"])
-            mixture = _read_segment(audio_path, start_ms, end_ms)
-            mix_path = output_dir / f"{window_id}-mix.wav"
-            _write_wav(mix_path, mixture)
-            tracks = []
-            for index, source in enumerate(
-                _sources(model(str(mix_path), online_write=False)),
-                start=1,
-            ):
-                path = output_dir / f"{window_id}-s{index}.wav"
-                _write_wav(path, source)
-                tracks.append(
-                    {
-                        "index": index,
-                        "path": str(path),
-                        "rms": _rms(source),
-                        "duration_ms": int(
-                            round(len(source) * 1000 / TARGET_SAMPLE_RATE)
-                        ),
-                    }
-                )
-            response_windows.append({**window, "tracks": tracks})
+        for batch_start in range(0, len(windows), batch_size):
+            chunk = windows[batch_start : batch_start + batch_size]
+            mixtures = []
+            lengths = []
+            for window in chunk:
+                start_ms = int(window["start_ms"])
+                end_ms = int(window["end_ms"])
+                start_sample = max(0, int(round(start_ms * sr / 1000)))
+                end_sample = min(len(mono), int(round(end_ms * sr / 1000)))
+                segment = mono[start_sample:end_sample]
+                if len(segment) == 0:
+                    segment = np.zeros(1, dtype="float32")
+                mixtures.append(segment)
+                lengths.append(len(segment))
+
+            max_len = max(lengths)
+            batch_tensor = np.zeros((len(chunk), max_len), dtype="float32")
+            for i, seg in enumerate(mixtures):
+                batch_tensor[i, : len(seg)] = seg
+
+            out = model.call_t2t_mode(batch_tensor)
+
+            for i, window in enumerate(chunk):
+                window_id = str(window["id"])
+                orig_len = lengths[i]
+                tracks = []
+                for spk_idx in range(out.shape[0]):
+                    source = out[spk_idx, i, :orig_len]
+                    path = output_dir / f"{window_id}-s{spk_idx + 1}.wav"
+                    _write_wav(path, source)
+                    tracks.append(
+                        {
+                            "index": spk_idx + 1,
+                            "path": str(path),
+                            "rms": _rms(source),
+                            "duration_ms": int(
+                                round(len(source) * 1000 / TARGET_SAMPLE_RATE)
+                            ),
+                        }
+                    )
+                response_windows.append({**window, "tracks": tracks})
     return {"ok": True, "model": model_name, "windows": response_windows}
 
 

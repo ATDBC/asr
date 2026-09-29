@@ -465,3 +465,56 @@ def test_extract_overlap_windows_from_segments():
     assert len(windows_merged) == 1
     assert windows_merged[0]["start_ms"] == 2000
     assert windows_merged[0]["end_ms"] == 5000
+
+
+def test_match_tracks_uses_batched_embeddings_for_audios(tmp_path: Path):
+    track1 = tmp_path / "w1-s1.wav"
+    track2 = tmp_path / "w1-s2.wav"
+    track1.write_bytes(b"dummy1")
+    track2.write_bytes(b"dummy2")
+
+    batched_calls = []
+
+    class BatchedDiarizer:
+        def speaker_centroids(self, path, segments):
+            return {
+                1: np.array([1.0, 0.0], dtype="float32"),
+                2: np.array([0.0, 1.0], dtype="float32"),
+            }
+
+        def embeddings_for_audios(self, paths):
+            batched_calls.append(list(paths))
+            return [
+                np.array([1.0, 0.0], dtype="float32"),
+                np.array([0.0, 1.0], dtype="float32"),
+            ]
+
+        def embedding_for_audio(self, path):
+            raise AssertionError("Should have used embeddings_for_audios")
+
+    preparer = SubprocessOverlapPreparer(
+        worker=None,
+        diarizer=BatchedDiarizer(),
+        min_score=0.60,
+        min_margin=0.08,
+        min_rms=0.001,
+    )
+    separated = SeparatedOverlap(
+        windows=(
+            {
+                "id": "w1",
+                "start_ms": 1000,
+                "end_ms": 2000,
+                "tracks": [
+                    {"index": 1, "path": str(track1), "rms": 0.05, "duration_ms": 1000},
+                    {"index": 2, "path": str(track2), "rms": 0.05, "duration_ms": 1000},
+                ],
+            },
+        ),
+        warnings=(),
+    )
+    prep = preparer.match_tracks(separated, {1: np.array([1.0, 0.0]), 2: np.array([0.0, 1.0])}, BatchedDiarizer())
+    assert len(batched_calls) == 1
+    assert batched_calls[0] == [track1, track2]
+    assert len(prep.windows) == 1
+    assert [t.speaker_id for t in prep.windows[0].tracks] == [1, 2]

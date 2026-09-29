@@ -27,25 +27,28 @@ def _plan(tmp_path: Path) -> CropPlan:
 class Aed:
     def __init__(self, *, empty=False):
         self.paths = []
+        self.batch_plans = []
         self.empty = empty
 
     def run_aed_plan(self, path, batch_plan, vad):
         self.paths.append(Path(path))
+        self.batch_plans.append(batch_plan)
+        results = []
+        if not self.empty:
+            for batch in batch_plan:
+                for item in batch:
+                    results.append({
+                        "index": item["index"],
+                        "result": {
+                            "uttid": f"job_s{item['start_ms']}_e{item['end_ms']}",
+                            "text": "甲",
+                            "confidence": 0.9,
+                            "timestamp": [("甲", 0.0, 0.5)],
+                        },
+                    })
         return {
-            "aed_results": []
-            if self.empty
-            else [
-                {
-                    "index": 0,
-                    "result": {
-                        "uttid": "job_s0_e1000",
-                        "text": "甲",
-                        "confidence": 0.9,
-                        "timestamp": [("甲", 0.0, 0.5)],
-                    },
-                }
-            ],
-            "duration_ms": max(end for _, end in vad),
+            "aed_results": results,
+            "duration_ms": max((end for _, end in vad), default=1000),
             "batch_metrics": [],
         }
 
@@ -64,7 +67,7 @@ class Punc:
         )
 
 
-def test_multicrop_uses_one_audio_path_per_aed_and_punc_request(tmp_path):
+def test_multicrop_uses_global_batched_aed_and_punc_request(tmp_path):
     aed = Aed()
     punc = Punc()
     owner = WeightedAedPuncWorkerClient(aed, punc)
@@ -72,23 +75,20 @@ def test_multicrop_uses_one_audio_path_per_aed_and_punc_request(tmp_path):
 
     results = owner.transcribe_crops(plan)
 
-    assert aed.paths == [crop.path for crop in plan.crops]
+    assert len(aed.paths) == 1
     assert punc.paths == [crop.path for crop in plan.crops]
     assert [item.crop.speaker_id for item in results] == [1, 2]
     parallel = owner.last_response["metrics"]["parallel"]
     assert parallel["aed_ended_at_monotonic"] >= parallel["aed_started_at_monotonic"]
 
 
-def test_two_lanes_keep_each_crop_on_one_path(tmp_path):
+def test_two_lanes_partition_global_batches(tmp_path):
     first, second = Aed(), Aed()
     owner = WeightedAedPuncWorkerClient(first, Punc(), worker1=second)
 
     results = owner.transcribe_crops(_plan(tmp_path))
 
     assert len(results) == 2
-    assert sorted(first.paths + second.paths) == sorted(
-        crop.path for crop in _plan(tmp_path).crops
-    )
     assert len(first.paths) == len(second.paths) == 1
 
 
@@ -113,7 +113,7 @@ def test_all_crop_plans_are_frozen_before_first_aed_request(
 
     class GuardedAed(Aed):
         def run_aed_plan(self, path, batch_plan, vad):
-            assert len(planned) == 2
+            assert len(planned) == 1
             return super().run_aed_plan(path, batch_plan, vad)
 
     monkeypatch.setattr(parallel, "plan_aed_batches", spy)
@@ -125,8 +125,11 @@ def test_one_no_speech_crop_does_not_discard_other_crop(tmp_path):
     class OneEmpty(Aed):
         def run_aed_plan(self, path, batch_plan, vad):
             response = super().run_aed_plan(path, batch_plan, vad)
-            if Path(path).name == "s2.wav":
-                response["aed_results"] = []
+            # Drop results for crop index 1 (piece index 1)
+            response["aed_results"] = [
+                rec for rec in response["aed_results"]
+                if rec["index"] != 1
+            ]
             return response
 
     owner = WeightedAedPuncWorkerClient(OneEmpty(), Punc())

@@ -107,28 +107,35 @@ def plan_aed_batches(
             batches.append([item])
 
     # ponytail: O(n^3) best-single-move search; replace only if planning is visible.
-    while True:
+    max_passes = 20
+    passes = 0
+    while passes < max_passes:
         best_delta = 0.0
         best_move = None
+        batch_costs = [_batch_cost(b, weights) for b in batches]
+        batch_durations = [_batch_duration_ms(b) for b in batches]
         for source_index, source in enumerate(batches):
             if len(source) <= 1:
                 continue
+            c_source = batch_costs[source_index]
             for item_index, item in enumerate(source):
+                d_item = _item_duration_ms(item)
+                new_source = source[:item_index] + source[item_index + 1 :]
+                c_new_source = _batch_cost(new_source, weights)
+                delta_source = c_new_source - c_source
                 for target_index, target in enumerate(batches):
                     if source_index == target_index or len(target) >= AED_BATCH_SIZE:
                         continue
                     if (
-                        _batch_duration_ms(target) + _item_duration_ms(item)
+                        batch_durations[target_index] + d_item
                         > AED_BATCH_DURATION_LIMIT_MS
                     ):
                         continue
-                    new_source = source[:item_index] + source[item_index + 1 :]
                     new_target = [*target, item]
                     delta = (
-                        _batch_cost(new_source, weights)
+                        delta_source
                         + _batch_cost(new_target, weights)
-                        - _batch_cost(source, weights)
-                        - _batch_cost(target, weights)
+                        - batch_costs[target_index]
                     )
                     if delta < best_delta - 1e-9:
                         best_delta = delta
@@ -140,6 +147,7 @@ def plan_aed_batches(
                         )
         if best_move is None:
             break
+        passes += 1
         source_index, target_index, new_source, new_target = best_move
         batches[source_index] = new_source
         batches[target_index] = new_target
@@ -458,8 +466,23 @@ def _explicit_aed_process(
 
     import soundfile as sf
 
-    wav_np, sample_rate = sf.read(wav_path, dtype="int16")
-    duration_s = wav_np.shape[0] / sample_rate
+    audio_cache: dict[str, tuple[Any, int]] = {}
+
+    def get_audio(path: str) -> tuple[Any, int]:
+        if path not in audio_cache:
+            audio_cache[path] = sf.read(path, dtype="int16")
+        return audio_cache[path]
+
+    default_wav_np, default_sample_rate = (
+        get_audio(wav_path)
+        if wav_path and Path(wav_path).is_file()
+        else (None, 16000)
+    )
+    duration_s = (
+        default_wav_np.shape[0] / default_sample_rate
+        if default_wav_np is not None
+        else 0.0
+    )
     records: list[dict[str, object]] = []
     batch_metrics: list[dict[str, object]] = []
     resident_allocated_mib = _cuda_memory_allocated_mib()
@@ -476,11 +499,13 @@ def _explicit_aed_process(
             end_ms = int(raw_item["end_ms"])
             if start_ms < 0 or end_ms <= start_ms:
                 raise ValueError("batch_plan item bounds are invalid")
-            start = int(start_ms * sample_rate / 1000)
-            end = int(end_ms * sample_rate / 1000)
-            item_uttid = f"{uttid}_s{start_ms}_e{end_ms}"
+            item_path = str(raw_item.get("path") or wav_path)
+            item_wav_np, item_sample_rate = get_audio(item_path)
+            start = int(start_ms * item_sample_rate / 1000)
+            end = int(end_ms * item_sample_rate / 1000)
+            item_uttid = f"{uttid}_{index}_s{start_ms}_e{end_ms}"
             batch_uttid.append(item_uttid)
-            batch_wav.append((sample_rate, wav_np[start:end]))
+            batch_wav.append((item_sample_rate, item_wav_np[start:end]))
             batch_items.append({"index": index, "uttid": item_uttid})
         if not batch_uttid:
             continue

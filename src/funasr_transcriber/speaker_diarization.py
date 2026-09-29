@@ -6,7 +6,7 @@ from dataclasses import asdict
 import gc
 from pathlib import Path
 import sys
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -481,6 +481,35 @@ class SpeakerDiarizer:
             raise TranscriptionError(f"empty separated track: {wav_path}")
         embedding = self._extract_embeddings([(0.0, duration)], wav)[0]
         return embedding / (np.linalg.norm(embedding) + 1e-8)
+
+    def embeddings_for_audios(
+        self, wav_paths: Sequence[Path]
+    ) -> list[np.ndarray]:
+        if not wav_paths:
+            return []
+        waveforms = []
+        for path in wav_paths:
+            wav = self._load_audio(path)
+            duration = wav.shape[-1] / self.sample_rate
+            if duration <= 0:
+                raise TranscriptionError(f"empty separated track: {path}")
+            waveforms.append(wav[0])
+        max_length = max(item.shape[0] for item in waveforms)
+        batches = [self.circle_pad(item, max_length) for item in waveforms]
+        stacked = self.torch.stack(batches).unsqueeze(1)
+        embeddings = []
+        with self.torch.no_grad():
+            for start in range(0, len(wav_paths), self.batch_size):
+                waveform_batch = stacked[start : start + self.batch_size].to(
+                    self.device
+                )
+                features = self.torch.vmap(self.feature_extractor)(waveform_batch)
+                embeddings.append(self.embedding_model(features).cpu())
+        all_embs = self.torch.cat(embeddings, dim=0).numpy()
+        return [
+            emb / (np.linalg.norm(emb) + 1e-8)
+            for emb in all_embs
+        ]
 
     def resource_inventory(self) -> dict[str, object]:
         """Describe inspectable 3D-Speaker modules without running inference."""

@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Sequence
 import uuid
 
 import numpy as np
@@ -236,6 +236,9 @@ class TrackDiarizer(Protocol):
     def embedding_for_audio(self, path: Path) -> np.ndarray:
         """Return one normalized embedding for a separated track."""
 
+    def embeddings_for_audios(self, paths: Sequence[Path]) -> list[np.ndarray]:
+        """Return normalized embeddings for multiple separated tracks."""
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedTrack:
@@ -456,6 +459,32 @@ class SubprocessOverlapPreparer:
     ) -> OverlapPreparation:
         """Match already-separated tracks using a temporary 3D-Speaker."""
 
+        track_embeddings: dict[Path, np.ndarray] = {}
+        if hasattr(track_diarizer, "embeddings_for_audios"):
+            all_paths: list[Path] = []
+            for window in separated.windows:
+                for track in window.get("tracks") or []:
+                    if isinstance(track, dict):
+                        try:
+                            t_path = Path(track["path"])
+                            t_rms = float(track.get("rms", 0.0))
+                            if t_rms >= self.min_rms:
+                                all_paths.append(t_path)
+                        except (KeyError, TypeError, ValueError):
+                            pass
+            unique_paths = list(dict.fromkeys(all_paths))
+            if unique_paths:
+                try:
+                    embs = track_diarizer.embeddings_for_audios(unique_paths)
+                    track_embeddings = dict(zip(unique_paths, embs))
+                except Exception:
+                    track_embeddings = {}
+
+        def get_track_embedding(p: Path) -> np.ndarray:
+            if p in track_embeddings:
+                return track_embeddings[p]
+            return track_diarizer.embedding_for_audio(p)
+
         prepared_windows: list[PreparedWindow] = []
         for window in separated.windows:
             try:
@@ -482,8 +511,8 @@ class SubprocessOverlapPreparer:
             if len(valid_tracks) == 2 and len(centroids) >= 2:
                 try:
                     embs = (
-                        track_diarizer.embedding_for_audio(valid_tracks[0]["path"]),
-                        track_diarizer.embedding_for_audio(valid_tracks[1]["path"]),
+                        get_track_embedding(valid_tracks[0]["path"]),
+                        get_track_embedding(valid_tracks[1]["path"]),
                     )
                     pair_matches = self._match_pair_speakers(embs, centroids)
                 except Exception:
@@ -504,7 +533,7 @@ class SubprocessOverlapPreparer:
                 else:
                     for vt in valid_tracks:
                         try:
-                            embedding = track_diarizer.embedding_for_audio(vt["path"])
+                            embedding = get_track_embedding(vt["path"])
                             speaker, score, margin = self._match_speaker(
                                 embedding, centroids
                             )
@@ -523,7 +552,7 @@ class SubprocessOverlapPreparer:
             else:
                 for vt in valid_tracks:
                     try:
-                        embedding = track_diarizer.embedding_for_audio(vt["path"])
+                        embedding = get_track_embedding(vt["path"])
                         speaker, score, margin = self._match_speaker(
                             embedding, centroids
                         )

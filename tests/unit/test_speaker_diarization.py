@@ -3,6 +3,7 @@ import torch
 
 from funasr_transcriber.speaker_diarization import (
     SpeakerDiarizer,
+    compute_adaptive_eigengaps,
     merge_oversegmented_clusters,
     relabel_by_first_appearance,
     seeded_cluster,
@@ -202,3 +203,25 @@ def test_merge_absorbs_minor_oversegmented_cluster():
         min_major_items=16,
     )
     assert len(set(merged)) == 1
+
+
+
+def test_adaptive_eigengaps_selects_expected_speaker_counts():
+    # Multi-speaker cases with scale drift
+    lambdas_2spk = np.array([0.0, 0.451, 1.155, 1.669, 2.420, 2.709, 2.762])
+    gaps_2spk = compute_adaptive_eigengaps(lambdas_2spk, min_num_spks=1)
+    assert int(np.argmax(gaps_2spk)) + 1 == 2
+
+    lambdas_3spk = np.array([0.0, 0.858, 1.122, 1.910, 3.242, 4.033, 4.286])
+    gaps_3spk = compute_adaptive_eigengaps(lambdas_3spk, min_num_spks=1)
+    assert int(np.argmax(gaps_3spk)) + 1 == 3
+
+    # Single-speaker case
+    lambdas_1spk = np.array([0.0, 1.445, 1.609, 1.863, 2.050, 2.100])
+    gaps_1spk = compute_adaptive_eigengaps(lambdas_1spk, min_num_spks=1)
+    assert int(np.argmax(gaps_1spk)) + 1 == 1
+
+
+def test_adaptive_eigengaps_handles_short_arrays():
+    assert compute_adaptive_eigengaps([]) == [0.0]
+    assert compute_adaptive_eigengaps([0.0]) == [0.0]

@@ -28,6 +28,55 @@ def seeded_cluster(
     )
 
 
+def compute_adaptive_eigengaps(
+    eig_vals: Sequence[float] | np.ndarray,
+    min_num_spks: int = 1,
+    floor: float = 0.25,
+) -> list[float]:
+    """Compute relative-scaled eigengaps for scale-invariant speaker count estimation.
+
+    Raw eigenvalue differences grow with spectral scale, biasing naive argmax
+    towards higher cluster counts in long recordings. Dividing candidate gaps by
+    the preceding eigenvalue scale eliminates this upward drift while preserving
+    clear single-speaker detection.
+    """
+    lambdas = np.asarray(eig_vals, dtype="float64")
+    num_candidates = len(lambdas) - 1
+    if num_candidates <= 0:
+        return [0.0]
+
+    if min_num_spks <= 1:
+        raw_k1 = float(lambdas[1] - lambdas[0]) if len(lambdas) > 1 else 0.0
+        raw_multi = [
+            float(lambdas[idx + 1] - lambdas[idx])
+            for idx in range(1, num_candidates)
+        ]
+        max_raw_multi = max(raw_multi) if raw_multi else 0.0
+        is_single_speaker = raw_k1 > max_raw_multi
+    else:
+        is_single_speaker = False
+
+    scores: list[float] = []
+    for i in range(num_candidates):
+        k = i + min_num_spks
+        if k == 1:
+            scores.append(0.0)
+        else:
+            raw = float(lambdas[i + 1] - lambdas[i])
+            denom = max(float(lambdas[i]), floor)
+            scores.append(raw / denom)
+
+    if min_num_spks <= 1:
+        multi_scores = scores[1:]
+        max_multi = max(multi_scores) if multi_scores else 0.0
+        if is_single_speaker:
+            scores[0] = max_multi + 1.0
+        else:
+            scores[0] = -1.0
+
+    return scores
+
+
 def relabel_by_first_appearance(labels: list[int] | np.ndarray) -> list[int]:
     mapping: dict[int, int] = {}
     output: list[int] = []
@@ -336,7 +385,13 @@ class SpeakerDiarizer:
                 },
             }
         }
-        return self.build("cluster", self.Config(specification))
+        cluster = self.build("cluster", self.Config(specification))
+        inner = getattr(cluster, "cluster", None)
+        if inner is not None and hasattr(inner, "getEigenGaps"):
+            inner.getEigenGaps = lambda eig_vals: compute_adaptive_eigengaps(
+                eig_vals, min_num_spks=diarization.min_speakers
+            )
+        return cluster
 
     def _load_audio(self, wav_path: Path):
         data, sample_rate = self.sf.read(

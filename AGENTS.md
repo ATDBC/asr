@@ -12,7 +12,8 @@
 - AED worker-0 同时承载 FireRedVAD helper；worker-1 只加载 AED；Punc owner 只加载 Punc。
 - FireRedVAD 在功能上属于说话人分离阶段。它因为官方依赖和生命周期隔离而暂时托管在
   `.venv-asr` 子进程中，不能把它描述成 AED/Punc 的功能阶段。
-- 普通流程先运行 3D-Speaker 说话人分离。超过 10 秒的 speaker 区间使用全局 FireRedVAD 细分，
+- 普通流程先运行 3D-Speaker 说话人分离。实际业务场景一律使用 auto 模式（`speaker_count = "auto"`），
+  线上无法预知说话人数量，严禁假设固定人数。超过 10 秒的 speaker 区间使用全局 FireRedVAD 细分，
   再与 speaker 区间求交，最后进入 AED/Punc。
 - AED 使用 memory-first 调度：预热后的 GPU 空闲显存减去安全余量，决定每个 batch 的具体片段；
   生产 batch 数量不是固定配置。完整计划必须在第一个 AED 请求前确定。

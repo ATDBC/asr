@@ -86,7 +86,7 @@ def refine_segments_with_nemotron(
 
     If 3D-Speaker missed a turn transition (e.g. attributed全程 to Speaker 1, but
     Nemotron reveals Speaker 2 spoke with substantial non-overlapping speech),
-    split the segment into 4-cut acoustic intervals. If Nemotron also shows heavy
+    split the segment into acoustic intervals. If Nemotron also shows heavy
     overlap (> max_overlap_ratio), keep it unbroken to preserve primary sentence context.
     """
     if not base_segments or not nemotron_segments:
@@ -150,28 +150,42 @@ def refine_segments_with_nemotron(
         splits += 1
         total_inserted += len(inserted)
         current_start = s.start_ms
-        for ins_spk, ins_start, ins_end in inserted:
+        for i, (ins_spk, ins_start, ins_end) in enumerate(inserted):
             s_nem_before = [
                 n for n in aligned_nemotron
                 if n.speaker_id == s.speaker_id
                 and n.start_ms < ins_start and n.end_ms > current_start
             ]
-            part1_end = max([n.end_ms for n in s_nem_before], default=ins_start)
-            part1_end = min(part1_end, ins_start)
-            if part1_end > current_start + 100:
-                refined.append(SpeakerSegment(s.speaker_id, current_start, part1_end))
-
-            refined.append(SpeakerSegment(ins_spk, ins_start, ins_end))
+            if s_nem_before:
+                part1_end = max(n.end_ms for n in s_nem_before)
+                part1_end = min(part1_end, ins_start)
+                if part1_end > current_start + 100:
+                    refined.append(SpeakerSegment(s.speaker_id, current_start, part1_end))
+                    current_start = part1_end
+            else:
+                ins_start = current_start
 
             s_nem_after = [
                 n for n in aligned_nemotron
                 if n.speaker_id == s.speaker_id
                 and n.end_ms > ins_end and n.start_ms < s.end_ms
             ]
-            next_start = min([n.start_ms for n in s_nem_after], default=ins_end)
+            next_start = min([n.start_ms for n in s_nem_after], default=s.end_ms)
+            if i + 1 < len(inserted):
+                next_start = min(next_start, inserted[i+1][1])
+
+            if next_start > ins_end and next_start - ins_end < 300:
+                ins_end = next_start
+
+            refined.append(SpeakerSegment(ins_spk, ins_start, ins_end))
             current_start = max(next_start, ins_end)
 
-        if s.end_ms > current_start + 100:
+        s_nem_tail = [
+            n for n in aligned_nemotron
+            if n.speaker_id == s.speaker_id
+            and n.end_ms > current_start and n.start_ms < s.end_ms
+        ]
+        if s_nem_tail and s.end_ms > current_start + 100:
             refined.append(SpeakerSegment(s.speaker_id, current_start, s.end_ms))
 
     refined.sort(key=lambda seg: (seg.start_ms, seg.end_ms))

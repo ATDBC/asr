@@ -45,7 +45,7 @@ def test_refine_segments_splits_when_other_speaker_has_independent_speech():
     assert refined[0].end_ms == 4000
     assert refined[1].speaker_id == 2
     assert refined[1].start_ms == 4000
-    assert refined[1].end_ms == 6000
+    assert refined[1].end_ms == 6200
     assert refined[2].speaker_id == 1
     assert refined[2].start_ms == 6200
     assert refined[2].end_ms == 10000
@@ -63,8 +63,6 @@ def test_refine_segments_does_not_split_when_mostly_overlapping():
         SpeakerSegment(1, 0, 10000),
         SpeakerSegment(2, 10000, 15000),
     )
-    # Nemotron shows Spk 2 active [4000, 4500], but Spk 1 is also active [0, 10000]全程
-    # Overlap ratio is 100% -> should not split!
     nem = (
         SpeakerSegment(1, 0, 10000),
         SpeakerSegment(2, 4000, 4500),
@@ -81,7 +79,6 @@ def test_refine_segments_does_not_split_brief_noise():
         SpeakerSegment(1, 0, 10000),
         SpeakerSegment(2, 10000, 15000),
     )
-    # 150ms speech from Spk 2 -> shorter than 250ms threshold
     nem = (
         SpeakerSegment(1, 0, 10000),
         SpeakerSegment(2, 4000, 4150),

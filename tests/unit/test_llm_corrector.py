@@ -251,3 +251,142 @@ def test_corrector_api_network_error_fallback():
         assert result.transcript.turns[0].text == transcript.turns[0].text
         assert len(result.patches_applied) == 0
         assert any("Connection refused" in w for w in result.warnings)
+
+
+def test_corrector_mimo_config_and_mock_api_call():
+    config = LLMConfig(
+        enabled=True,
+        provider="mimo",
+        api_key="mimo-test-key-999",
+        api_key_env="MIMO_API_KEY",
+        base_url="https://token-plan-cn.xiaomimimo.com/v1",
+        model="mimo-v2.6-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    corrector = DeepSeekCorrector(config)
+    transcript = create_sample_transcript()
+
+    mock_llm_payload = {
+        "entities": ["丹丹主任"],
+        "patches": [
+            {
+                "turn_index": 1,
+                "original": "丹丹酒",
+                "corrected": "丹丹主任",
+                "reason": "同音词纠错",
+            }
+        ],
+    }
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(mock_llm_payload),
+                }
+            }
+        ]
+    }
+
+    with patch("httpx.Client.post", return_value=mock_response) as mock_post:
+        result = corrector.correct(transcript)
+
+        assert mock_post.called
+        call_kwargs = mock_post.call_args.kwargs
+        url = mock_post.call_args.args[0]
+        assert url == "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
+        sent_json = call_kwargs["json"]
+        assert sent_json["model"] == "mimo-v2.6-flash"
+        assert "thinking" not in sent_json
+        assert "Authorization" in call_kwargs["headers"]
+        assert call_kwargs["headers"]["Authorization"] == "Bearer mimo-test-key-999"
+
+        assert result.provider == "mimo"
+        assert result.model == "mimo-v2.6-flash"
+        assert len(result.patches_applied) == 1
+        assert result.patches_applied[0].corrected == "丹丹主任"
+
+
+def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
+    monkeypatch.setenv("MIMO_API_KEY", "env-mimo-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "env-deepseek-key")
+
+    cfg_mimo = LLMConfig(
+        enabled=True,
+        provider="mimo",
+        api_key="",
+        api_key_env="MIMO_API_KEY",
+        base_url="https://token-plan-cn.xiaomimimo.com/v1",
+        model="mimo-v2.6-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    assert cfg_mimo.resolve_api_key() == "env-mimo-key"
+
+    cfg_mimo_fallback_empty = LLMConfig(
+        enabled=True,
+        provider="mimo",
+        api_key="",
+        api_key_env="",
+        base_url="https://token-plan-cn.xiaomimimo.com/v1",
+        model="mimo-v2.6-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    assert cfg_mimo_fallback_empty.resolve_api_key() == "env-mimo-key"
+
+    cfg_mimo_fallback_default = LLMConfig(
+        enabled=True,
+        provider="mimo",
+        api_key="",
+        api_key_env="DEEPSEEK_API_KEY",
+        base_url="https://token-plan-cn.xiaomimimo.com/v1",
+        model="mimo-v2.6-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    assert cfg_mimo_fallback_default.resolve_api_key() == "env-mimo-key"
+
+    cfg_custom_missing = LLMConfig(
+        enabled=True,
+        provider="mimo",
+        api_key="",
+        api_key_env="NON_EXISTENT_CUSTOM_KEY",
+        base_url="https://token-plan-cn.xiaomimimo.com/v1",
+        model="mimo-v2.6-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    assert cfg_custom_missing.resolve_api_key() == ""
+
+    cfg_deepseek = LLMConfig(
+        enabled=True,
+        provider="deepseek",
+        api_key="",
+        api_key_env="DEEPSEEK_API_KEY",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4.1-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    assert cfg_deepseek.resolve_api_key() == "env-deepseek-key"

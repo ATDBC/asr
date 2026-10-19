@@ -127,9 +127,19 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
             if getattr(args, "profile_resources", False)
             else config.diagnostics.level
         )
+    llm_model = getattr(args, "llm_model", None)
+    llm_provider = getattr(args, "llm_provider", None)
+    llm_base_url = getattr(args, "llm_base_url", None)
+    llm_api_key = getattr(args, "llm_api_key", None)
+    if llm_model and "mimo" in str(llm_model).lower() and not llm_provider:
+        llm_provider = "mimo"
+    if llm_provider == "mimo" and not llm_base_url:
+        llm_base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+
     llm_enabled = (
         True
         if getattr(args, "enable_llm", False)
+        or bool(llm_model or llm_provider)
         else False
         if getattr(args, "disable_llm", False)
         else config.llm.enabled
@@ -154,6 +164,10 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
         diagnostics_level=diagnostics_level,
         llm_enabled=llm_enabled,
         nemotron_reassembly=nemotron_reassembly,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
     )
 
 
@@ -216,6 +230,23 @@ def _parser() -> argparse.ArgumentParser:
         "--disable-llm",
         action="store_true",
         help="disable LLM post-correction",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=("deepseek", "mimo", "openai_compatible"),
+        help="LLM provider (default: deepseek or mimo depending on model)",
+    )
+    parser.add_argument(
+        "--llm-model",
+        help="LLM model name (e.g. mimo-v2.6-flash, deepseek-v4.1-flash)",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        help="LLM base API URL (e.g. https://token-plan-cn.xiaomimimo.com/v1)",
+    )
+    parser.add_argument(
+        "--llm-api-key",
+        help="LLM API key (overrides environment variable)",
     )
     nemotron_group = parser.add_mutually_exclusive_group()
     nemotron_group.add_argument(

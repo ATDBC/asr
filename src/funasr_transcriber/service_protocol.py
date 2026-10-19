@@ -90,9 +90,13 @@ class ServiceRequest:
     overlap_enabled: bool = False
     profile_resources: bool = False
     diagnostics_level: str = "basic"
-    aed_budget_fraction: float = 0.9
+    aed_budget_fraction: float = 1.0
     llm_enabled: bool = False
     nemotron_reassembly: bool = False
+    llm_model: str | None = None
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
 
 
 def config_fingerprint(config: AppConfig) -> str:
@@ -183,6 +187,10 @@ def parse_request(payload: Mapping[str, Any]) -> ServiceRequest:
         aed_budget_fraction=_budget_fraction(payload),
         llm_enabled=_optional_bool(payload, "llm_enabled"),
         nemotron_reassembly=_optional_bool(payload, "nemotron_reassembly"),
+        llm_model=str(payload.get("llm_model") or "").strip() or None,
+        llm_provider=str(payload.get("llm_provider") or "").strip() or None,
+        llm_base_url=str(payload.get("llm_base_url") or "").strip() or None,
+        llm_api_key=str(payload.get("llm_api_key") or "").strip() or None,
     )
 
 
@@ -325,7 +333,7 @@ class ServiceClient:
 
     @staticmethod
     def _submit_payload(request: ServiceRequest) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "id": request.identifier,
             "action": request.action,
             "input_audio": str(request.input_audio),
@@ -340,6 +348,15 @@ class ServiceClient:
             "llm_enabled": request.llm_enabled,
             "nemotron_reassembly": request.nemotron_reassembly,
         }
+        if request.llm_model:
+            payload["llm_model"] = request.llm_model
+        if request.llm_provider:
+            payload["llm_provider"] = request.llm_provider
+        if request.llm_base_url:
+            payload["llm_base_url"] = request.llm_base_url
+        if request.llm_api_key:
+            payload["llm_api_key"] = request.llm_api_key
+        return payload
 
     def submit(self, request: ServiceRequest) -> dict[str, Any]:
         """Submit a job and return its immediate acceptance acknowledgement."""

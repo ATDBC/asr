@@ -704,6 +704,35 @@ class ServiceJobRunner:
 
         return DeepSeekCorrector(self.config.llm)
 
+    def _create_llm_corrector(self, request: ServiceRequest) -> Any:
+        overrides: dict[str, Any] = {}
+        if request.llm_model:
+            overrides["model"] = request.llm_model
+        if request.llm_provider:
+            overrides["provider"] = request.llm_provider
+        elif request.llm_model and "mimo" in str(request.llm_model).lower():
+            overrides["provider"] = "mimo"
+
+        provider = overrides.get("provider", self.config.llm.provider)
+        if request.llm_base_url:
+            overrides["base_url"] = request.llm_base_url
+        elif provider == "mimo" and "mimo" not in self.config.llm.base_url:
+            overrides["base_url"] = "https://token-plan-cn.xiaomimimo.com/v1"
+
+        if request.llm_api_key:
+            overrides["api_key"] = request.llm_api_key
+        elif provider == "mimo":
+            overrides["api_key_env"] = "MIMO_API_KEY"
+
+        if overrides:
+            from dataclasses import replace
+            from .llm_corrector import DeepSeekCorrector
+
+            custom_llm_config = replace(self.config.llm, **overrides)
+            return DeepSeekCorrector(custom_llm_config)
+
+        return self._llm_corrector_factory()
+
     def _default_temporary_asr(self, job_dir: Path) -> Any:
         from .firered_client import FireRedWorkerClient
 
@@ -1343,7 +1372,7 @@ class ServiceJobRunner:
 
             if request.llm_enabled:
                 with diagnostics.stage("llm_correction"):
-                    corrector = self._llm_corrector_factory()
+                    corrector = self._create_llm_corrector(request)
                     llm_result = corrector.correct(
                         final_transcript,
                         diagnostics=diagnostics,

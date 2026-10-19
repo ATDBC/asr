@@ -226,8 +226,30 @@ class LLMConfig:
         if self.api_key.strip():
             return self.api_key.strip()
         env_name = self.api_key_env.strip()
-        if env_name and env_name in os.environ:
+        is_mimo = self.provider == "mimo" or "mimo" in self.model.lower()
+        is_deepseek = self.provider == "deepseek" or "deepseek" in self.model.lower()
+
+        # If user explicitly configured an env_name that is not a standard default,
+        # strictly respect that custom env var without falling back.
+        if env_name and env_name not in {"DEEPSEEK_API_KEY", "MIMO_API_KEY", "LLM_API_KEY"}:
+            return os.environ.get(env_name, "").strip()
+
+        # If standard env var is configured and present in environment:
+        if env_name and env_name in os.environ and os.environ[env_name].strip():
+            # If provider is mimo but env_name was left as default DEEPSEEK_API_KEY, prefer MIMO_API_KEY if available
+            if is_mimo and env_name == "DEEPSEEK_API_KEY" and "MIMO_API_KEY" in os.environ and os.environ["MIMO_API_KEY"].strip():
+                return os.environ["MIMO_API_KEY"].strip()
             return os.environ[env_name].strip()
+
+        # Fallback to provider-specific default env vars
+        if is_mimo:
+            if "MIMO_API_KEY" in os.environ and os.environ["MIMO_API_KEY"].strip():
+                return os.environ["MIMO_API_KEY"].strip()
+        if is_deepseek:
+            if "DEEPSEEK_API_KEY" in os.environ and os.environ["DEEPSEEK_API_KEY"].strip():
+                return os.environ["DEEPSEEK_API_KEY"].strip()
+        if "LLM_API_KEY" in os.environ and os.environ["LLM_API_KEY"].strip():
+            return os.environ["LLM_API_KEY"].strip()
         return ""
 
 
@@ -522,8 +544,8 @@ def validate(config: AppConfig) -> AppConfig:
     ):
         raise ValueError("alignment coverage ratios are invalid")
     llm = config.llm
-    if llm.provider not in {"deepseek", "openai_compatible"}:
-        raise ValueError("llm provider must be deepseek or openai_compatible")
+    if llm.provider not in {"deepseek", "mimo", "openai_compatible"}:
+        raise ValueError("llm provider must be deepseek, mimo, or openai_compatible")
     if not (0.0 <= llm.temperature <= 2.0):
         raise ValueError("llm temperature must stay within 0..2")
     if llm.timeout_seconds <= 0:

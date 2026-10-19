@@ -405,3 +405,18 @@ def test_cli_flags_llm_and_nemotron_interruption(tmp_path: Path):
     req_disabled = cli._service_request(args_disabled, config)
     assert req_disabled.llm_enabled is False
     assert req_disabled.nemotron_reassembly is False
+
+    # Test mimo options
+    args_mimo = cli._parser().parse_args([
+        str(tmp_path / "input.wav"),
+        "--llm-model",
+        "mimo-v2.6-flash",
+        "--llm-api-key",
+        "test-mimo-key-xyz",
+    ])
+    req_mimo = cli._service_request(args_mimo, config)
+    assert req_mimo.llm_enabled is True
+    assert req_mimo.llm_model == "mimo-v2.6-flash"
+    assert req_mimo.llm_provider == "mimo"
+    assert req_mimo.llm_base_url == "https://token-plan-cn.xiaomimimo.com/v1"
+    assert req_mimo.llm_api_key == "test-mimo-key-xyz"

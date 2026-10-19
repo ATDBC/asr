@@ -75,9 +75,11 @@ class LLMCorrectionResult:
     model: str
     duration_seconds: float
     warnings: tuple[str, ...]
+    provider: str = "deepseek"
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "provider": self.provider,
             "model": self.model,
             "duration_seconds": round(self.duration_seconds, 3),
             "entities_discovered": list(self.entities_discovered),
@@ -104,17 +106,22 @@ def normalize_deepseek_model(model: str) -> str:
     return name
 
 
+def normalize_model_name(provider: str, model: str) -> str:
+    name = model.strip()
+    if provider == "deepseek" or "deepseek" in name.lower():
+        return normalize_deepseek_model(name)
+    return name
+
+
 class DeepSeekCorrector:
-    """Orchestrates DeepSeek LLM dialogue inspection and phonetic-gated correction."""
+    """Orchestrates LLM (DeepSeek / MiMo / OpenAI-compatible) dialogue inspection and phonetic-gated correction."""
 
     def __init__(self, config: LLMConfig):
         self.config = config
 
     def _resolve_endpoint(self) -> str:
         base = self.config.base_url.rstrip("/")
-        if base.endswith("/v1") or base.endswith("/chat/completions"):
-            if not base.endswith("/chat/completions"):
-                return f"{base}/chat/completions"
+        if base.endswith("/chat/completions"):
             return base
         return f"{base}/chat/completions"
 
@@ -124,7 +131,7 @@ class DeepSeekCorrector:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        target_model = normalize_deepseek_model(self.config.model)
+        target_model = normalize_model_name(self.config.provider, self.config.model)
         payload: dict[str, Any] = {
             "model": target_model,
             "messages": [
@@ -134,7 +141,10 @@ class DeepSeekCorrector:
             "temperature": self.config.temperature,
             "response_format": {"type": "json_object"},
         }
-        if not self.config.enable_thinking:
+        if (
+            not self.config.enable_thinking
+            and (self.config.provider == "deepseek" or "deepseek" in target_model.lower())
+        ):
             payload["thinking"] = {"type": "disabled"}
 
         with httpx.Client(timeout=float(self.config.timeout_seconds)) as client:
@@ -172,6 +182,7 @@ class DeepSeekCorrector:
                 model=self.config.model,
                 duration_seconds=perf_counter() - start_time,
                 warnings=tuple(warnings),
+                provider=self.config.provider,
             )
 
         if not transcript.turns:
@@ -183,6 +194,7 @@ class DeepSeekCorrector:
                 model=self.config.model,
                 duration_seconds=perf_counter() - start_time,
                 warnings=(),
+                provider=self.config.provider,
             )
 
         # Call API or use provided dry run patches
@@ -217,6 +229,7 @@ class DeepSeekCorrector:
                     model=self.config.model,
                     duration_seconds=perf_counter() - start_time,
                     warnings=tuple(warnings),
+                    provider=self.config.provider,
                 )
 
         # Apply patches with phonetic gate
@@ -342,6 +355,7 @@ class DeepSeekCorrector:
             model=self.config.model,
             duration_seconds=total_duration,
             warnings=tuple(warnings),
+            provider=self.config.provider,
         )
 
         if diagnostics is not None:
@@ -349,3 +363,6 @@ class DeepSeekCorrector:
             diagnostics.runtime["llm_correction"] = res.to_dict()
 
         return res
+
+
+LLMCorrector = DeepSeekCorrector

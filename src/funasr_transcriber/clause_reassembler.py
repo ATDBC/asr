@@ -70,15 +70,47 @@ def compute_bipartite_speaker_mapping(
     transcript_speakers: Sequence[int],
     nemotron_speakers: Sequence[int],
     overlap_matrix: np.ndarray,
+    min_overlap_ms: int = 1000,
+    min_purity: float = 0.50,
 ) -> dict[int, int]:
-    """Compute optimal 1-to-1 mapping from Nemotron-3 speaker IDs to Transcript speaker IDs."""
+    """Compute optimal mapping from Nemotron-3 speaker channels to authoritative Transcript speakers.
+
+    Transcript speakers are the authoritative speaker space (determined by 3D-Speaker).
+    Nemotron-3 channels are projected onto this authoritative space.
+    If Nemotron channels outnumber transcript speakers (k <= m), the top-k channels
+    are matched via Hungarian assignment, and remaining unassigned channels are
+    projected to their dominant transcript speaker if their overlap >= min_overlap_ms
+    and purity >= min_purity (otherwise discarded as noise/chaff).
+    No new speakers are ever introduced.
+    """
     if len(transcript_speakers) == 0 or len(nemotron_speakers) == 0:
         return {}
 
-    row_ind, col_ind = linear_sum_assignment(-overlap_matrix)
+    k = len(transcript_speakers)
+    m = len(nemotron_speakers)
     mapping: dict[int, int] = {}
-    for r, c in zip(row_ind, col_ind):
-        mapping[nemotron_speakers[c]] = transcript_speakers[r]
+    assigned_cols: set[int] = set()
+
+    if k <= m:
+        row_ind, col_ind = linear_sum_assignment(-overlap_matrix)
+        for r, c in zip(row_ind, col_ind):
+            mapping[nemotron_speakers[c]] = transcript_speakers[r]
+            assigned_cols.add(c)
+
+        for c in range(m):
+            if c not in assigned_cols:
+                col_ov = overlap_matrix[:, c]
+                tot = float(np.sum(col_ov))
+                if tot >= min_overlap_ms:
+                    best_r = int(np.argmax(col_ov))
+                    purity = float(col_ov[best_r]) / tot if tot > 0 else 0.0
+                    if purity >= min_purity:
+                        mapping[nemotron_speakers[c]] = transcript_speakers[best_r]
+    else:
+        row_ind, col_ind = linear_sum_assignment(-overlap_matrix)
+        for r, c in zip(row_ind, col_ind):
+            mapping[nemotron_speakers[c]] = transcript_speakers[r]
+
     return mapping
 
 
@@ -86,6 +118,8 @@ def align_nemotron_speakers(
     turns: Sequence[Turn],
     nemotron_segments: Sequence[SpeakerSegment],
     expected_speaker_count: int = 1,
+    min_overlap_ms: int = 1000,
+    min_purity: float = 0.50,
 ) -> tuple[dict[int, int], list[SpeakerSegment]]:
     """Align Nemotron-3 speaker channels to Transcript speaker IDs via maximum overlap."""
     spk_ids = {t.speaker_id for t in turns}
@@ -95,40 +129,38 @@ def align_nemotron_speakers(
     n_spk_set = sorted(list({s.speaker_id for s in nemotron_segments}))
 
     if not t_spk_set or not n_spk_set:
-        return {}, list(nemotron_segments)
+        return {}, []
 
-    max_dim = max(len(t_spk_set), len(n_spk_set))
-    all_t = list(t_spk_set)
-    while len(all_t) < max_dim:
-        all_t.append(max(all_t, default=0) + 1)
-
-    all_n = list(n_spk_set)
-    while len(all_n) < max_dim:
-        all_n.append(max(all_n, default=0) + 1)
-
-    cost_matrix = np.zeros((max_dim, max_dim), dtype=float)
+    cost_matrix = np.zeros((len(t_spk_set), len(n_spk_set)), dtype=float)
 
     for turn in turns:
-        if turn.speaker_id in all_t:
-            i = all_t.index(turn.speaker_id)
+        if turn.speaker_id in t_spk_set:
+            i = t_spk_set.index(turn.speaker_id)
             for seg in nemotron_segments:
-                if seg.speaker_id in all_n:
-                    j = all_n.index(seg.speaker_id)
+                if seg.speaker_id in n_spk_set:
+                    j = n_spk_set.index(seg.speaker_id)
                     overlap = max(
                         0,
                         min(turn.end_ms, seg.end_ms) - max(turn.start_ms, seg.start_ms),
                     )
                     cost_matrix[i, j] += overlap
 
-    mapping = compute_bipartite_speaker_mapping(all_t, all_n, cost_matrix)
+    mapping = compute_bipartite_speaker_mapping(
+        t_spk_set,
+        n_spk_set,
+        cost_matrix,
+        min_overlap_ms=min_overlap_ms,
+        min_purity=min_purity,
+    )
 
     mapped_segments = [
         SpeakerSegment(
-            speaker_id=mapping.get(seg.speaker_id, seg.speaker_id),
+            speaker_id=mapping[seg.speaker_id],
             start_ms=seg.start_ms,
             end_ms=seg.end_ms,
         )
         for seg in nemotron_segments
+        if seg.speaker_id in mapping
     ]
     return mapping, mapped_segments
 
@@ -151,6 +183,8 @@ def reassemble_transcript_with_nemotron(
     nemotron_segments: Sequence[SpeakerSegment],
     min_interruption_ratio: float = 0.50,
     min_clause_ms: int = 400,
+    min_overlap_ms: int = 1000,
+    min_purity: float = 0.50,
 ) -> ClauseReassemblyResult:
     """Reattribute interrupting clauses using Nemotron-3 multi-label acoustic activity."""
     from time import perf_counter
@@ -169,7 +203,13 @@ def reassemble_transcript_with_nemotron(
         transcript.turns,
         nemotron_segments,
         expected_speaker_count=transcript.speaker_count,
+        min_overlap_ms=min_overlap_ms,
+        min_purity=min_purity,
     )
+
+    valid_speakers = {t.speaker_id for t in transcript.turns}
+    for i in range(1, transcript.speaker_count + 1):
+        valid_speakers.add(i)
 
     events: list[InterruptionEvent] = []
     new_turns_data: list[dict[str, Any]] = []
@@ -216,7 +256,7 @@ def reassemble_transcript_with_nemotron(
                 clause_dur = max(1, c_end - c_start)
 
                 for spk, ov_dur in overlaps.items():
-                    if spk != t_spk:
+                    if spk != t_spk and spk in valid_speakers:
                         ratio = ov_dur / clause_dur
                         if ratio >= min_interruption_ratio and ov_dur > curr_spk_ov:
                             assigned_spk = spk
@@ -290,7 +330,7 @@ def reassemble_transcript_with_nemotron(
 
     new_transcript = Transcript(
         language=transcript.language,
-        speaker_count=len({t.speaker_id for t in final_turns}),
+        speaker_count=transcript.speaker_count,
         turns=final_turns,
         warnings=transcript.warnings,
     )

@@ -148,3 +148,63 @@ def test_clause_reassembler_handles_inverted_speaker_labels():
     assert len(result.transcript.turns) == 3
     assert result.transcript.turns[1].speaker_id == 2
     assert result.transcript.turns[1].source == "nemotron_interruption"
+
+
+def test_clause_reassembler_projects_excess_nemotron_channels_without_inflating_speakers():
+    """Verify Method A: excess channels are projected onto 3D-Speaker authority space without introducing new speakers."""
+    # Transcript has strictly 2 speakers: Spk 1 (Turn 1) and Spk 2 (Turn 2)
+    turn1 = Turn(
+        index=1,
+        speaker_id=1,
+        start_ms=0,
+        end_ms=10000,
+        text="我是主讲人，这里有一段说明，请问你有什么看法？",
+        source="primary_asr",
+        confidence=AlignmentConfidence.HIGH,
+        overlap=False,
+    )
+    turn2 = Turn(
+        index=2,
+        speaker_id=2,
+        start_ms=10000,
+        end_ms=20000,
+        text="我是第二位说话人，我完全同意你的看法，没有任何异议。",
+        source="primary_asr",
+        confidence=AlignmentConfidence.HIGH,
+        overlap=False,
+    )
+    transcript = Transcript(
+        language="zh",
+        speaker_count=2,
+        turns=(turn1, turn2),
+        warnings=(),
+    )
+
+    # Nemotron activates 4 channels:
+    # Channel 1: 0-5000ms (overlaps Spk 1)
+    # Channel 2: 10000-15000ms (overlaps Spk 2)
+    # Channel 3: 5000-10000ms (overlaps Spk 1 -> fragmented consultant channel!)
+    # Channel 4: 15000-15300ms (overlaps Spk 2 for 300ms -> low-overlap noise < 1000ms)
+    nemotron_segs = (
+        SpeakerSegment(speaker_id=1, start_ms=0, end_ms=5000),
+        SpeakerSegment(speaker_id=2, start_ms=10000, end_ms=15000),
+        SpeakerSegment(speaker_id=3, start_ms=5000, end_ms=10000),
+        SpeakerSegment(speaker_id=4, start_ms=15000, end_ms=15300),
+    )
+
+    result = reassemble_transcript_with_nemotron(
+        transcript,
+        nemotron_segs,
+        min_overlap_ms=1000,
+        min_purity=0.50,
+    )
+
+    # Channel 1 -> 1, Channel 2 -> 2, Channel 3 -> 1 (projected!), Channel 4 -> pruned
+    assert result.speaker_mapping == {1: 1, 2: 2, 3: 1}
+
+    # Authoritative speaker count must remain strictly 2 (no dummy Spk 3 or 4!)
+    assert result.transcript.speaker_count == 2
+    turn_speakers = {t.speaker_id for t in result.transcript.turns}
+    assert turn_speakers.issubset({1, 2})
+    assert 3 not in turn_speakers
+    assert 4 not in turn_speakers

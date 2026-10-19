@@ -39,16 +39,23 @@ def test_refine_segments_splits_when_other_speaker_has_independent_speech():
     refined, stats = refine_segments_with_nemotron(base, nem)
     assert stats["splits"] == 1
     assert stats["inserted_count"] == 1
-    # Check 4 cuts
+    # Check strictly monotonic non-overlapping cuts
     assert [s.speaker_id for s in refined] == [1, 2, 1, 2]
     assert refined[0].start_ms == 0
-    assert refined[0].end_ms == 4500
+    assert refined[0].end_ms == 4000
     assert refined[1].speaker_id == 2
     assert refined[1].start_ms == 4000
     assert refined[1].end_ms == 6000
     assert refined[2].speaker_id == 1
     assert refined[2].start_ms == 6200
     assert refined[2].end_ms == 10000
+    assert refined[3].speaker_id == 2
+    assert refined[3].start_ms == 10000
+    assert refined[3].end_ms == 15000
+
+    # Ensure zero overlaps
+    for i in range(len(refined) - 1):
+        assert refined[i+1].start_ms >= refined[i].end_ms
 
 
 def test_refine_segments_does_not_split_when_mostly_overlapping():

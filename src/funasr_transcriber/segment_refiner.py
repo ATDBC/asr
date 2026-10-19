@@ -112,7 +112,7 @@ def refine_segments_with_nemotron(
             refined.append(s)
             continue
 
-        inserted = []
+        raw_inserted = []
         for o in others:
             o_start = max(s.start_ms, o.start_ms)
             o_end = min(s.end_ms, o.end_ms)
@@ -131,7 +131,17 @@ def refine_segments_with_nemotron(
             )
             ratio = overlap_ms / o_dur if o_dur > 0 else 0.0
             if ratio <= max_overlap_ratio and (o_dur - overlap_ms) >= min_independent_ms:
-                inserted.append((o.speaker_id, o_start, o_end))
+                raw_inserted.append((o.speaker_id, o_start, o_end))
+
+        raw_inserted.sort(key=lambda x: (x[1], x[2]))
+        inserted: list[tuple[int, int, int]] = []
+        last_ins_end = -1
+        for ins_spk, ins_start, ins_end in raw_inserted:
+            if ins_start < last_ins_end:
+                ins_start = last_ins_end
+            if ins_end >= ins_start + min_independent_ms:
+                inserted.append((ins_spk, ins_start, ins_end))
+                last_ins_end = ins_end
 
         if not inserted:
             refined.append(s)
@@ -147,7 +157,7 @@ def refine_segments_with_nemotron(
                 and n.start_ms < ins_start and n.end_ms > current_start
             ]
             part1_end = max([n.end_ms for n in s_nem_before], default=ins_start)
-            part1_end = min(max(part1_end, current_start + 100), ins_end)
+            part1_end = min(part1_end, ins_start)
             if part1_end > current_start + 100:
                 refined.append(SpeakerSegment(s.speaker_id, current_start, part1_end))
 
@@ -156,10 +166,10 @@ def refine_segments_with_nemotron(
             s_nem_after = [
                 n for n in aligned_nemotron
                 if n.speaker_id == s.speaker_id
-                and n.start_ms >= ins_start and n.start_ms < s.end_ms
+                and n.end_ms > ins_end and n.start_ms < s.end_ms
             ]
-            current_start = min([n.start_ms for n in s_nem_after], default=ins_end)
-            current_start = max(current_start, ins_start)
+            next_start = min([n.start_ms for n in s_nem_after], default=ins_end)
+            current_start = max(next_start, ins_end)
 
         if s.end_ms > current_start + 100:
             refined.append(SpeakerSegment(s.speaker_id, current_start, s.end_ms))
@@ -167,11 +177,13 @@ def refine_segments_with_nemotron(
     refined.sort(key=lambda seg: (seg.start_ms, seg.end_ms))
 
     cleaned: list[SpeakerSegment] = []
-    prev_s, prev_e = -1, -1
+    prev_e = -1
     for seg in refined:
-        cur_s = max(seg.start_ms, prev_s)
-        cur_e = max(seg.end_ms, prev_e, cur_s + 50)
+        if seg.end_ms <= prev_e + 100:
+            continue
+        cur_s = max(seg.start_ms, prev_e)
+        cur_e = max(seg.end_ms, cur_s + 100)
         cleaned.append(SpeakerSegment(seg.speaker_id, cur_s, cur_e))
-        prev_s, prev_e = cur_s, cur_e
+        prev_e = cur_e
 
     return tuple(cleaned), {"splits": splits, "inserted_count": total_inserted}

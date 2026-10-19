@@ -88,3 +88,19 @@ def test_preserve_input_ties_keeps_different_speaker_crop_order():
 
     assert [turn.speaker_id for turn in turns] == [2, 1]
     assert [turn.text for turn in turns] == ["第二路。", "第一路。"]
+
+
+def test_same_speaker_merges_when_one_or_both_tokens_have_overlap():
+    turns = build_turns(
+        (
+            token("第一句。", 0, 1000, speaker_id=1, overlap=False),
+            token("第二句。", 1000, 2000, speaker_id=1, overlap=True),
+        ),
+        merge_gap_ms=1000,
+    )
+
+    assert len(turns) == 1
+    assert turns[0].text == "第一句。第二句。"
+    assert turns[0].start_ms == 0
+    assert turns[0].end_ms == 2000
+    assert turns[0].overlap is True

@@ -44,8 +44,6 @@ def build_turns(
             and previous["speaker_id"] == token.speaker_id
             and gap_ms is not None
             and 0 <= gap_ms <= merge_gap_ms
-            and not previous["overlap"]
-            and not token.overlap
         )
         if can_merge:
             previous["end_ms"] = max(previous["end_ms"], token.end_ms)
@@ -54,6 +52,7 @@ def build_turns(
                 previous["confidence"],
                 token.confidence,
             )
+            previous["overlap"] = previous["overlap"] or token.overlap
             if previous["source"] != token.source:
                 previous["source"] = "mixed"
             continue

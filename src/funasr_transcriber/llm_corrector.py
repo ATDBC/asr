@@ -97,6 +97,13 @@ def format_turns_prompt(turns: tuple[Turn, ...]) -> str:
     return "\n".join(lines)
 
 
+def normalize_deepseek_model(model: str) -> str:
+    name = model.strip()
+    if name in {"deepseek-v4.1-flash", "deepseek-v4-flash"}:
+        return "deepseek-flash"
+    return name
+
+
 class DeepSeekCorrector:
     """Orchestrates DeepSeek LLM dialogue inspection and phonetic-gated correction."""
 
@@ -117,8 +124,9 @@ class DeepSeekCorrector:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+        target_model = normalize_deepseek_model(self.config.model)
         payload: dict[str, Any] = {
-            "model": self.config.model,
+            "model": target_model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},

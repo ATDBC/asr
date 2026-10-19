@@ -140,6 +140,7 @@ class DeepSeekCorrector:
             ],
             "temperature": self.config.temperature,
             "response_format": {"type": "json_object"},
+            "max_tokens": 8192,
         }
         if not self.config.enable_thinking:
             is_mimo = self.config.provider == "mimo" or "mimo" in target_model.lower()

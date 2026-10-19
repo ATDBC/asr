@@ -501,8 +501,12 @@ def _explicit_aed_process(
                 raise ValueError("batch_plan item bounds are invalid")
             item_path = str(raw_item.get("path") or wav_path)
             item_wav_np, item_sample_rate = get_audio(item_path)
-            start = int(start_ms * item_sample_rate / 1000)
-            end = int(end_ms * item_sample_rate / 1000)
+            audio_start_ms = int(raw_item.get("audio_start_ms", start_ms))
+            audio_end_ms = int(raw_item.get("audio_end_ms", end_ms))
+            if audio_start_ms < 0 or audio_end_ms <= audio_start_ms:
+                raise ValueError("batch_plan item bounds are invalid")
+            start = int(audio_start_ms * item_sample_rate / 1000)
+            end = int(audio_end_ms * item_sample_rate / 1000)
             item_uttid = f"{uttid}_{index}_s{start_ms}_e{end_ms}"
             batch_uttid.append(item_uttid)
             batch_wav.append((item_sample_rate, item_wav_np[start:end]))
@@ -661,12 +665,21 @@ class GuardedVad:
 
     def __init__(self, vad: object):
         self._vad = vad
+        self._cache: dict[str, tuple[dict[str, object], object]] = {}
 
     def detect(self, path: str):
-        result, probabilities = self._vad.detect(path)
-        for start_s, end_s in result.get("timestamps", []):
-            _check_segment_bounds(float(start_s), float(end_s))
-        return result, probabilities
+        resolved = str(Path(path).resolve())
+        if resolved not in self._cache:
+            result, probabilities = self._vad.detect(path)
+            for start_s, end_s in result.get("timestamps", []):
+                _check_segment_bounds(float(start_s), float(end_s))
+            if len(self._cache) >= 8:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[resolved] = (result, probabilities)
+        return self._cache[resolved]
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._vad, name)
@@ -931,6 +944,9 @@ def serve(
             if action == "cleanup_cuda_cache":
                 cleanup_started = clock()
                 cleanup = _cleanup_cuda_cache()
+                vad = getattr(system, "vad", None)
+                if hasattr(vad, "clear_cache"):
+                    vad.clear_cache()
                 cleanup["seconds"] = clock() - cleanup_started
                 _write_response(
                     protocol_output,

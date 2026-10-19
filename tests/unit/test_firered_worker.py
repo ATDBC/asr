@@ -955,3 +955,68 @@ def test_worker_rejects_non_monotonic_scripted_segments(tmp_path: Path):
     assert response["ok"] is False
     assert "monotonic" in response["error"]["message"]
     assert system.seen_timestamps is None
+
+def test_explicit_aed_process_respects_audio_offsets(tmp_path, monkeypatch):
+    wav = tmp_path / "normalized.wav"
+    samples = np.arange(16_000, dtype=np.int32).astype(np.int16)
+    sf.write(wav, samples, 16_000, subtype="PCM_16")
+
+    transcribed_wavs = []
+
+    class Asr:
+        def transcribe(self, uttids, wavs):
+            transcribed_wavs.extend(wavs)
+            return [
+                {
+                    "uttid": uttids[0],
+                    "text": "测试",
+                    "confidence": 0.9,
+                    "timestamp": [("测试", 0.0, 0.5)],
+                }
+            ]
+
+    monkeypatch.setattr(worker_module, "_reset_cuda_peak_memory", lambda: None)
+    monkeypatch.setattr(worker_module, "_synchronize_cuda", lambda: None)
+    monkeypatch.setattr(worker_module, "_cuda_peak_memory_mib", lambda: 0)
+    monkeypatch.setattr(worker_module, "_cuda_peak_reserved_mib", lambda: 0)
+    monkeypatch.setattr(worker_module, "_cuda_memory_allocated_mib", lambda: 0)
+
+    response = _explicit_aed_process(
+        SimpleNamespace(asr=Asr()),
+        str(wav),
+        "job",
+        [[{
+            "index": 0,
+            "start_ms": 0,
+            "end_ms": 500,
+            "audio_start_ms": 200,
+            "audio_end_ms": 700,
+        }]],
+        [(0.0, 0.5)],
+    )
+
+    assert len(transcribed_wavs) == 1
+    sr, sliced_np = transcribed_wavs[0]
+    assert np.array_equal(sliced_np, samples[200 * 16 : 700 * 16])
+    assert response["aed_results"][0]["result"]["uttid"] == "job_0_s0_e500"
+
+
+def test_guarded_vad_caches_detection_per_path():
+    call_count = 0
+
+    class MockVad:
+        def detect(self, path):
+            nonlocal call_count
+            call_count += 1
+            return {"timestamps": [[0.0, 1.0]]}, None
+
+    guarded = worker_module.GuardedVad(MockVad())
+    res1, _ = guarded.detect("/tmp/audio.wav")
+    assert call_count == 1
+    res2, _ = guarded.detect("/tmp/audio.wav")
+    assert call_count == 1
+    assert res1 == res2
+
+    guarded.clear_cache()
+    guarded.detect("/tmp/audio.wav")
+    assert call_count == 2

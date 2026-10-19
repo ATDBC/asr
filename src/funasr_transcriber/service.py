@@ -263,7 +263,7 @@ def run_nemotron_branches(
     normalized: Path,
     asr_owner: Any,
     speaker_owner: Any,
-    crop_dir: Path,
+    crop_dir: Path | None = None,
     profile_enabled: bool = False,
     overlap_preparation: OverlapPreparation | None = None,
     min_score: float = 0.5,
@@ -959,7 +959,7 @@ class ServiceJobRunner:
         crop_plan = build_crop_plan(
             Path(normalized),
             segments,
-            job_dir / "speaker-crops",
+            None,
             refine_vad if callable(refine_vad) else None,
             overlap_preparation=overlap_preparation,
             min_score=self.config.overlap.speaker_match_min_score,

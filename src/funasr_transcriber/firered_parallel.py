@@ -1031,6 +1031,7 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
                 raise TranscriptionError(
                     f"speaker crop {crop.index} has no AED pieces"
                 )
+            audio_offset_ms = getattr(crop, "audio_offset_ms", 0)
             for piece_idx, (start_ms, end_ms) in enumerate(crop.pieces_ms):
                 flat_pieces.append({
                     "global_index": global_idx,
@@ -1039,6 +1040,8 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
                     "path": str(crop.path),
                     "start_ms": int(start_ms),
                     "end_ms": int(end_ms),
+                    "audio_start_ms": int(audio_offset_ms + start_ms),
+                    "audio_end_ms": int(audio_offset_ms + end_ms),
                     "duration_s": (end_ms - start_ms) / 1000.0,
                 })
                 global_idx += 1
@@ -1070,6 +1073,8 @@ class WeightedAedPuncWorkerClient(ParallelFireRedWorkerClient):
                     "index": int(item.index),
                     "start_ms": flat_pieces[item.index]["start_ms"],
                     "end_ms": flat_pieces[item.index]["end_ms"],
+                    "audio_start_ms": flat_pieces[item.index]["audio_start_ms"],
+                    "audio_end_ms": flat_pieces[item.index]["audio_end_ms"],
                     "path": flat_pieces[item.index]["path"],
                 }
                 for item in batch_items

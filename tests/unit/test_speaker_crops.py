@@ -236,3 +236,47 @@ def test_waveform_splicing_skips_when_score_or_margin_low(tmp_path):
     assert plan.spliced_overlap_count == 0
     c0, _ = sf.read(plan.crops[0].path, dtype="int16")
     assert np.all(c0 == 100)
+
+def test_in_memory_crop_plan_avoids_disk_files(tmp_path):
+    source = tmp_path / "normalized.wav"
+    _source(source, 8000)
+    plan = build_crop_plan(
+        source,
+        (
+            SpeakerSegment(1, 0, 4000),
+            SpeakerSegment(2, 3000, 7000),
+        ),
+        output_dir=None,
+        refine_vad=None,
+    )
+    assert len(plan.crops) == 2
+    assert plan.crops[0].path == source
+    assert plan.crops[0].audio_offset_ms == 0
+    assert plan.crops[0].sha256 == ""
+    assert plan.crops[1].path == source
+    assert plan.crops[1].audio_offset_ms == 3000
+    assert plan.crops[1].sha256 == ""
+    # Verify no crop files written
+    files = list(tmp_path.iterdir())
+    assert files == [source]
+
+
+def test_in_memory_vad_pieces_refinement(tmp_path):
+    source = tmp_path / "normalized.wav"
+    _source(source, 25_000)
+
+    def mock_refine_vad(path, ranges):
+        assert path == source
+        start_ms, end_ms = ranges[0]
+        return [[start_ms + 500, start_ms + 4000], [start_ms + 4500, end_ms - 500]]
+
+    plan = build_crop_plan(
+        source,
+        (SpeakerSegment(1, 2000, 16_000),),
+        output_dir=None,
+        refine_vad=mock_refine_vad,
+    )
+
+    crop = plan.crops[0]
+    assert crop.audio_offset_ms == 2000
+    assert crop.pieces_ms == ((500, 4000), (4500, 13_500))

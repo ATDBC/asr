@@ -27,6 +27,7 @@ class SpeakerCrop:
     path: Path
     sha256: str
     pieces_ms: tuple[tuple[int, int], ...]
+    audio_offset_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,10 +243,10 @@ def _splice_overlap_into_crop(
 def build_crop_plan(
     normalized: Path,
     segments: tuple[SpeakerSegment, ...],
-    output_dir: Path,
+    output_dir: Path | None = None,
     refine_vad: Callable[
         [Path, list[list[int]]], list[list[int]]
-    ] | None,
+    ] | None = None,
     overlap_preparation: OverlapPreparation | None = None,
     min_score: float = 0.5,
     min_margin: float = 0.05,
@@ -276,22 +277,23 @@ def build_crop_plan(
                 "speaker segment exceeds normalized WAV"
             )
 
-    target_root = Path(output_dir)
-    target_root.mkdir(parents=True, exist_ok=True)
+    target_root = Path(output_dir) if output_dir is not None else None
     ordered = tuple(
         sorted(
             segments,
             key=lambda s: (s.start_ms, s.speaker_id, s.end_ms),
         )
     )
-    targets = tuple(
-        target_root / f"crop-{index:04d}-speaker-{segment.speaker_id}.wav"
-        for index, segment in enumerate(ordered)
-        if segment.end_ms - segment.start_ms >= 100
-    )
-    for target in targets:
-        if target.exists() or target.is_symlink():
-            raise FileExistsError(f"speaker crop already exists: {target}")
+    if target_root is not None:
+        target_root.mkdir(parents=True, exist_ok=True)
+        targets = tuple(
+            target_root / f"crop-{index:04d}-speaker-{segment.speaker_id}.wav"
+            for index, segment in enumerate(ordered)
+            if segment.end_ms - segment.start_ms >= 100
+        )
+        for target in targets:
+            if target.exists() or target.is_symlink():
+                raise FileExistsError(f"speaker crop already exists: {target}")
 
     crops: list[SpeakerCrop] = []
     warnings: list[str] = []
@@ -307,15 +309,13 @@ def build_crop_plan(
                 f"speaker segment {index} shorter than 100 ms; skipped"
             )
             continue
-        path = (
-            target_root
-            / f"crop-{index:04d}-speaker-{segment.speaker_id}.wav"
-        )
-        crop_samples = samples[
-            segment.start_ms * 16 : segment.end_ms * 16
-        ].copy()
 
+        crop_samples = None
+        spliced_in_crop = 0
         if overlap_preparation is not None:
+            crop_samples = samples[
+                segment.start_ms * 16 : segment.end_ms * 16
+            ].copy()
             spliced_in_crop = _splice_overlap_into_crop(
                 crop_samples,
                 segment,
@@ -328,25 +328,80 @@ def build_crop_plan(
             )
             total_spliced_count += spliced_in_crop
 
-        with sf.SoundFile(
-            str(path),
-            mode="x",
-            samplerate=16000,
-            channels=1,
-            format="WAV",
-            subtype="PCM_16",
-        ) as output:
-            output.write(crop_samples)
+        if target_root is not None:
+            path = (
+                target_root
+                / f"crop-{index:04d}-speaker-{segment.speaker_id}.wav"
+            )
+            if crop_samples is None:
+                crop_samples = samples[
+                    segment.start_ms * 16 : segment.end_ms * 16
+                ]
+            with sf.SoundFile(
+                str(path),
+                mode="x",
+                samplerate=16000,
+                channels=1,
+                format="WAV",
+                subtype="PCM_16",
+            ) as output:
+                output.write(crop_samples)
+            sha256 = _sha256(path)
+            vad_target_path = path
+            vad_target_range = [[0, crop_duration_ms]]
+            audio_offset_ms = 0
+        else:
+            if spliced_in_crop > 0:
+                spliced_dir = source.parent / "spliced-crops"
+                spliced_dir.mkdir(parents=True, exist_ok=True)
+                path = (
+                    spliced_dir
+                    / f"spliced-crop-{index:04d}-speaker-{segment.speaker_id}.wav"
+                )
+                with sf.SoundFile(
+                    str(path),
+                    mode="w",
+                    samplerate=16000,
+                    channels=1,
+                    format="WAV",
+                    subtype="PCM_16",
+                ) as output:
+                    output.write(crop_samples)
+                sha256 = ""
+                vad_target_path = path
+                vad_target_range = [[0, crop_duration_ms]]
+                audio_offset_ms = 0
+            else:
+                path = source
+                sha256 = ""
+                vad_target_path = source
+                vad_target_range = [[segment.start_ms, segment.end_ms]]
+                audio_offset_ms = segment.start_ms
+
         if crop_duration_ms > 10_000:
             pieces = None
             if refine_vad is not None:
                 try:
                     raw_pieces = refine_vad(
-                        path, [[0, crop_duration_ms]]
+                        vad_target_path, vad_target_range
                     )
-                    pieces = _validated_vad_pieces(
-                        raw_pieces, crop_duration_ms
-                    )
+                    if target_root is None and vad_target_path == source:
+                        rel_pieces = [
+                            [
+                                max(0, p[0] - segment.start_ms),
+                                min(crop_duration_ms, p[1] - segment.start_ms),
+                            ]
+                            for p in raw_pieces
+                            if min(crop_duration_ms, p[1] - segment.start_ms)
+                            > max(0, p[0] - segment.start_ms)
+                        ]
+                        pieces = _validated_vad_pieces(
+                            rel_pieces, crop_duration_ms
+                        )
+                    else:
+                        pieces = _validated_vad_pieces(
+                            raw_pieces, crop_duration_ms
+                        )
                 except Exception as exc:
                     warnings.append(
                         f"speaker segment {index} VAD failed: {exc}"
@@ -365,8 +420,9 @@ def build_crop_plan(
                 start_ms=segment.start_ms,
                 end_ms=segment.end_ms,
                 path=path,
-                sha256=_sha256(path),
+                sha256=sha256,
                 pieces_ms=pieces,
+                audio_offset_ms=audio_offset_ms,
             )
         )
     return CropPlan(

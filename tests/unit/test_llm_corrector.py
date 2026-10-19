@@ -50,7 +50,7 @@ def test_corrector_noop_when_key_missing_and_disabled():
         enabled=False,
         provider="deepseek",
         api_key="",
-        api_key_env="DEEPSEEK_API_KEY",
+        api_key_env="NON_EXISTENT_KEY_FOR_TEST_XYZ",
         base_url="https://api.deepseek.com",
         model="deepseek-v4.1-flash",
         enable_thinking=False,
@@ -211,7 +211,7 @@ def test_corrector_mock_api_call():
         assert mock_post.called
         call_kwargs = mock_post.call_args.kwargs
         sent_json = call_kwargs["json"]
-        assert sent_json["model"] == "deepseek-v4.1-flash"
+        assert sent_json["model"] == "deepseek-flash"
         assert sent_json["thinking"] == {"type": "disabled"}
         assert sent_json["temperature"] == 0.1
         assert "Authorization" in call_kwargs["headers"]

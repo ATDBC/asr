@@ -615,6 +615,8 @@ class ServiceJobRunner:
         temporary_asr_factory: Callable[[Path], Any] | None = None,
         gpu_sampler: Callable[[str], Any] | None = query_gpu,
         sampler_factory: Callable[..., Any] = ResourceSampler,
+        nemotron_factory: Callable[[], Any] | None = None,
+        llm_corrector_factory: Callable[[], Any] | None = None,
     ):
         self.config = config
         self.hot_host = hot_host
@@ -629,6 +631,12 @@ class ServiceJobRunner:
         )
         self._gpu_sampler = gpu_sampler
         self._sampler_factory = sampler_factory
+        self._nemotron_factory = (
+            nemotron_factory or self._default_nemotron_factory
+        )
+        self._llm_corrector_factory = (
+            llm_corrector_factory or self._default_llm_corrector_factory
+        )
         self._active_overlap_pid: int | None = None
         self._capture_overlap_pid = False
 
@@ -677,6 +685,23 @@ class ServiceJobRunner:
         from .speaker_diarization import SpeakerDiarizer
 
         return SpeakerDiarizer.from_config(self.config)
+
+    def _default_nemotron_factory(self) -> Any:
+        from .nemotron_client import NemotronWorkerClient
+
+        return NemotronWorkerClient(
+            worker_python=self.config.nemotron.worker_python,
+            model_dir=self.config.paths.model_dir,
+            timeout_seconds=self.config.nemotron.timeout_seconds,
+            stderr_log_path=(
+                self.config.paths.work_dir / "service" / "nemotron-worker.log"
+            ),
+        )
+
+    def _default_llm_corrector_factory(self) -> Any:
+        from .llm_corrector import DeepSeekCorrector
+
+        return DeepSeekCorrector(self.config.llm)
 
     def _default_temporary_asr(self, job_dir: Path) -> Any:
         from .firered_client import FireRedWorkerClient
@@ -1212,6 +1237,39 @@ class ServiceJobRunner:
                 diagnostics,
                 overlap_enhancement=enhancement,
             )
+            final_transcript = result.transcript
+
+            if request.nemotron_reassembly:
+                with diagnostics.stage("nemotron_reassembly"):
+                    if self.config.diarization.backend == "nemotron3":
+                        nemotron_segments = branches.speaker_segments
+                    else:
+                        with self._nemotron_factory() as client:
+                            nemotron_segments = client.diarize(normalized)
+                    from .clause_reassembler import reassemble_transcript_with_nemotron
+
+                    reassembly_result = reassemble_transcript_with_nemotron(
+                        final_transcript,
+                        nemotron_segments,
+                        min_interruption_ratio=self.config.nemotron.min_interruption_ratio,
+                        min_clause_ms=self.config.nemotron.min_clause_ms,
+                    )
+                    final_transcript = reassembly_result.transcript
+                    diagnostics.runtime["nemotron_reassembly"] = {
+                        "enabled": True,
+                        "interruption_events_count": len(
+                            reassembly_result.interruption_events
+                        ),
+                        "speaker_mapping": reassembly_result.speaker_mapping,
+                        "duration_seconds": round(
+                            reassembly_result.duration_seconds, 3
+                        ),
+                        "events": [
+                            e.to_dict()
+                            for e in reassembly_result.interruption_events
+                        ],
+                    }
+
             cleanup_owner = self.hot_host.asr_owner
             cleanup = getattr(cleanup_owner, "cleanup_cuda_cache", None)
             if not callable(cleanup):
@@ -1240,6 +1298,16 @@ class ServiceJobRunner:
                     include_memory_trace=diagnostics_level == "deep",
                 )
                 profile_finished = True
+
+            if request.llm_enabled:
+                with diagnostics.stage("llm_correction"):
+                    corrector = self._llm_corrector_factory()
+                    llm_result = corrector.correct(
+                        final_transcript,
+                        diagnostics=diagnostics,
+                    )
+                    final_transcript = llm_result.transcript
+
             if diagnostics_level == "off":
                 diagnostics.stage_seconds.clear()
                 diagnostics.scheduler.clear()
@@ -1247,7 +1315,7 @@ class ServiceJobRunner:
                 diagnostics.gpu_stages.clear()
             output_started = perf_counter()
             export_transcript(
-                result.transcript,
+                final_transcript,
                 staging_dir,
                 overwrite=False,
                 input_info=input_info,

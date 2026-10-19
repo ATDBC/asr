@@ -37,6 +37,9 @@ major_cluster_merge_threshold = 0.88
 worker_python = "/opt/funasr-transcriber/.venv-nemotron/bin/python"
 timeout_seconds = 1800
 activity_threshold = 0.5
+clause_reassembly = false
+min_interruption_ratio = 0.50
+min_clause_ms = 400
 
 [vad]
 speech_noise_thres = 0.45

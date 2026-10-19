@@ -376,3 +376,32 @@ def test_models_command_uses_only_selected_speaker_backend(
 
     assert cli._run_models("download", Namespace(config=None)) == 0
     assert selected == [backend]
+
+def test_cli_flags_llm_and_nemotron_interruption(tmp_path: Path):
+    config = load_config()
+
+    # Test defaults
+    args_default = cli._parser().parse_args([str(tmp_path / "input.wav")])
+    req_default = cli._service_request(args_default, config)
+    assert req_default.llm_enabled is False
+    assert req_default.nemotron_reassembly is False
+
+    # Test enable flags
+    args_enabled = cli._parser().parse_args([
+        str(tmp_path / "input.wav"),
+        "--enable-llm",
+        "--enable-nemotron-interruption",
+    ])
+    req_enabled = cli._service_request(args_enabled, config)
+    assert req_enabled.llm_enabled is True
+    assert req_enabled.nemotron_reassembly is True
+
+    # Test disable flags
+    args_disabled = cli._parser().parse_args([
+        str(tmp_path / "input.wav"),
+        "--disable-llm",
+        "--disable-nemotron-interruption",
+    ])
+    req_disabled = cli._service_request(args_disabled, config)
+    assert req_disabled.llm_enabled is False
+    assert req_disabled.nemotron_reassembly is False

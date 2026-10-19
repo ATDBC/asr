@@ -51,6 +51,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "worker_python": "/opt/funasr-transcriber/.venv-nemotron/bin/python",
         "timeout_seconds": 1800,
         "activity_threshold": 0.5,
+        "clause_reassembly": False,
+        "min_interruption_ratio": 0.50,
+        "min_clause_ms": 400,
     },
     "vad": {
         "speech_noise_thres": 0.45,
@@ -150,6 +153,9 @@ class NemotronConfig:
     worker_python: Path
     timeout_seconds: int
     activity_threshold: float
+    clause_reassembly: bool = False
+    min_interruption_ratio: float = 0.50
+    min_clause_ms: int = 400
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +359,11 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             worker_python=Path(values["nemotron"]["worker_python"]).expanduser(),
             timeout_seconds=int(values["nemotron"]["timeout_seconds"]),
             activity_threshold=float(values["nemotron"]["activity_threshold"]),
+            clause_reassembly=bool(values["nemotron"].get("clause_reassembly", False)),
+            min_interruption_ratio=float(
+                values["nemotron"].get("min_interruption_ratio", 0.50)
+            ),
+            min_clause_ms=int(values["nemotron"].get("min_clause_ms", 400)),
         ),
         vad=VadConfig(
             speech_noise_thres=float(values["vad"]["speech_noise_thres"]),
@@ -452,6 +463,10 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("Nemotron timeout_seconds must be positive")
     if config.nemotron.activity_threshold != 0.5:
         raise ValueError("Nemotron activity_threshold must be 0.5")
+    if not (0.0 < config.nemotron.min_interruption_ratio <= 1.0):
+        raise ValueError("Nemotron min_interruption_ratio must stay within 0..1")
+    if config.nemotron.min_clause_ms <= 0:
+        raise ValueError("Nemotron min_clause_ms must be positive")
     if diarization.backend == "3d_speaker":
         if not 1 <= diarization.min_speakers <= diarization.max_speakers <= 10:
             raise ValueError("min_speakers/max_speakers must stay within 1..10")

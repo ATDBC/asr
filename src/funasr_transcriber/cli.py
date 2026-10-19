@@ -127,6 +127,20 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
             if getattr(args, "profile_resources", False)
             else config.diagnostics.level
         )
+    llm_enabled = (
+        True
+        if getattr(args, "enable_llm", False)
+        else False
+        if getattr(args, "disable_llm", False)
+        else config.llm.enabled
+    )
+    nemotron_reassembly = (
+        True
+        if getattr(args, "enable_nemotron_interruption", False)
+        else False
+        if getattr(args, "disable_nemotron_interruption", False)
+        else config.nemotron.clause_reassembly
+    )
     return ServiceRequest(
         identifier=uuid.uuid4().hex,
         action="submit",
@@ -138,6 +152,8 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
         overlap_enabled=overlap_enabled,
         profile_resources=diagnostics_level in {"resources", "deep"},
         diagnostics_level=diagnostics_level,
+        llm_enabled=llm_enabled,
+        nemotron_reassembly=nemotron_reassembly,
     )
 
 
@@ -190,6 +206,28 @@ def _parser() -> argparse.ArgumentParser:
     overlap_group = parser.add_mutually_exclusive_group()
     overlap_group.add_argument("--enable-overlap", action="store_true")
     overlap_group.add_argument("--disable-overlap", action="store_true")
+    llm_group = parser.add_mutually_exclusive_group()
+    llm_group.add_argument(
+        "--enable-llm",
+        action="store_true",
+        help="enable LLM post-correction for domain terminology and homophones",
+    )
+    llm_group.add_argument(
+        "--disable-llm",
+        action="store_true",
+        help="disable LLM post-correction",
+    )
+    nemotron_group = parser.add_mutually_exclusive_group()
+    nemotron_group.add_argument(
+        "--enable-nemotron-interruption",
+        action="store_true",
+        help="enable Nemotron-3 clause interruption reassembly",
+    )
+    nemotron_group.add_argument(
+        "--disable-nemotron-interruption",
+        action="store_true",
+        help="disable Nemotron-3 clause interruption reassembly",
+    )
     parser.add_argument("--profile-resources", action="store_true")
     parser.add_argument(
         "--diagnostics",

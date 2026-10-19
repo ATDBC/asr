@@ -1195,3 +1195,129 @@ def test_deep_profile_includes_aed_memory_trace(tmp_path: Path):
     )
     assert created["trace_enabled"] is True
     assert payload["resource_profile"]["aed_memory_trace"]["sample_count"] == 1
+
+
+def test_service_job_with_nemotron_reassembly_and_llm(tmp_path: Path):
+    from funasr_transcriber.schemas import SpeakerSegment, AlignmentConfidence, Turn, Transcript
+    from funasr_transcriber.llm_corrector import LLMCorrectionResult, CorrectionAudit
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")},
+    )
+
+    class HotHost:
+        started = True
+        asr_owner = FakeAsr([])
+        speaker_owner = FakeDiarizer([])
+
+    class FakeNemotronClient:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+        def diarize(self, normalized_path):
+            return (
+                SpeakerSegment(speaker_id=1, start_ms=0, end_ms=300),
+                SpeakerSegment(speaker_id=2, start_ms=300, end_ms=600),
+            )
+
+    class FakeCorrector:
+        def correct(self, transcript, diagnostics=None):
+            # simulate correcting turn text
+            new_turns = []
+            for t in transcript.turns:
+                new_turns.append(
+                    Turn(
+                        index=t.index,
+                        speaker_id=t.speaker_id,
+                        start_ms=t.start_ms,
+                        end_ms=t.end_ms,
+                        text=t.text.replace("你好", "您好"),
+                        source="llm_corrected",
+                        confidence=t.confidence,
+                        overlap=t.overlap,
+                    )
+                )
+            new_transcript = Transcript(
+                language=transcript.language,
+                speaker_count=transcript.speaker_count,
+                turns=tuple(new_turns),
+                warnings=transcript.warnings,
+            )
+            audit = CorrectionAudit(
+                turn_index=1,
+                original="你好",
+                corrected="您好",
+                reason="polite form",
+                similarity=0.8,
+                passed=True,
+                original_pinyin="ni hao",
+                candidate_pinyin="nin hao",
+                rejection_reason=None,
+            )
+            res = LLMCorrectionResult(
+                transcript=new_transcript,
+                patches_applied=(audit,),
+                patches_rejected=(),
+                entities_discovered=("您好",),
+                model="fake-deepseek",
+                duration_seconds=0.05,
+                warnings=(),
+            )
+            if diagnostics is not None:
+                diagnostics.runtime["llm_correction"] = res.to_dict()
+            return res
+
+    def normalize(source_path, destination, max_seconds):
+        destination.write_bytes(b"normalized")
+        return AudioInfo(
+            path=Path(destination),
+            duration_ms=600,
+            sample_rate=16000,
+            channels=1,
+            codec="pcm_s16le",
+        )
+
+    runner = ServiceJobRunner(
+        config,
+        hot_host=HotHost(),
+        probe=lambda path, max_seconds: AudioInfo(
+            path=Path(path),
+            duration_ms=600,
+            sample_rate=16000,
+            channels=1,
+            codec="wav",
+        ),
+        normalize=normalize,
+        nemotron_factory=lambda: FakeNemotronClient(),
+        llm_corrector_factory=lambda: FakeCorrector(),
+    )
+
+    request = ServiceRequest(
+        identifier="post-proc-job",
+        action="submit",
+        input_audio=source,
+        output_dir=tmp_path / "output",
+        config_fingerprint="test-fingerprint",
+        nemotron_reassembly=True,
+        llm_enabled=True,
+    )
+
+    result = runner.run(request)
+    output_dir = Path(result["output_dir"])
+    assert output_dir == tmp_path / "output"
+
+    diag_path = output_dir / "diagnostics.json"
+    assert diag_path.is_file()
+    payload = __import__("json").loads(diag_path.read_text(encoding="utf-8"))
+
+    # Verify nemotron reassembly diagnostics
+    assert "nemotron_reassembly" in payload["stage_seconds"]
+    assert payload["runtime"]["nemotron_reassembly"]["enabled"] is True
+
+    # Verify llm correction diagnostics
+    assert "llm_correction" in payload["stage_seconds"]
+    assert payload["runtime"]["llm_correction"]["model"] == "fake-deepseek"
+    assert payload["runtime"]["llm_correction"]["patches_applied_count"] == 1

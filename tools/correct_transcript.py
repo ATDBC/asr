@@ -86,6 +86,17 @@ def main() -> int:
         help="Phonetic gate threshold (default: 0.5)",
     )
     parser.add_argument(
+        "--nemotron-segments",
+        type=Path,
+        default=None,
+        help="Path to nemotron_segments.json for clause interruption reassembly",
+    )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Skip LLM post-correction (only run Nemotron interruption reassembly if provided)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Perform dry run without calling remote API",
@@ -107,7 +118,7 @@ def main() -> int:
     threshold = args.threshold if args.threshold is not None else llm_cfg.pinyin_gate_threshold
 
     effective_config = LLMConfig(
-        enabled=True,
+        enabled=not args.no_llm,
         provider="deepseek",
         api_key=api_key,
         api_key_env=llm_cfg.api_key_env,
@@ -120,45 +131,86 @@ def main() -> int:
         max_context_turns=llm_cfg.max_context_turns,
     )
 
-    if not api_key and not args.dry_run:
-        print(
-            "Error: DEEPSEEK_API_KEY is not set.\n"
-            "Please provide it via --api-key, environment variable, or in .env file:\n"
-            "  DEEPSEEK_API_KEY=sk-...\n",
-            file=sys.stderr,
-        )
-        return 2
-
     print(f"Loading transcript from: {input_path}")
-    orig_transcript = load_transcript_from_json(input_path)
-    print(f"Loaded {len(orig_transcript.turns)} turns, {orig_transcript.speaker_count} speakers.")
+    current_transcript = load_transcript_from_json(input_path)
+    print(f"Loaded {len(current_transcript.turns)} turns, {current_transcript.speaker_count} speakers.")
 
-    corrector = DeepSeekCorrector(effective_config)
+    reassembly_result = None
+    if args.nemotron_segments is not None:
+        from funasr_transcriber.clause_reassembler import reassemble_transcript_with_nemotron
+        from funasr_transcriber.schemas import SpeakerSegment
 
-    print(f"Calling DeepSeek corrector (model: {model}, non-thinking mode, gate threshold: {threshold})...")
-    correction_result = corrector.correct(orig_transcript)
-
-    print(f"\nCompleted in {correction_result.duration_seconds:.2f}s.")
-    print(f"Entities discovered: {list(correction_result.entities_discovered)}")
-    print(f"Patches applied: {len(correction_result.patches_applied)}")
-    print(f"Patches rejected: {len(correction_result.patches_rejected)}")
-
-    if correction_result.patches_applied:
-        print("\n--- Applied Patches ---")
-        for p in correction_result.patches_applied:
-            print(
-                f"  Turn {p.turn_index}: '{p.original}' -> '{p.corrected}' "
-                f"(sim: {p.similarity:.3f}, pinyin: '{p.original_pinyin}' -> '{p.candidate_pinyin}')\n"
-                f"    Reason: {p.reason}"
+        nemo_path = args.nemotron_segments.resolve()
+        if not nemo_path.is_file():
+            print(f"Error: nemotron segments file '{nemo_path}' not found.", file=sys.stderr)
+            return 1
+        with nemo_path.open("r", encoding="utf-8") as f:
+            raw_segs = json.load(f)
+        nemo_segments = tuple(
+            SpeakerSegment(
+                speaker_id=int(s["speaker_id"]),
+                start_ms=int(s["start_ms"]),
+                end_ms=int(s["end_ms"]),
             )
+            for s in raw_segs
+        )
+        print(f"Loaded {len(nemo_segments)} Nemotron-3 segments from {nemo_path}")
+        print("Running Nemotron-3 clause interruption reassembly...")
+        reassembly_result = reassemble_transcript_with_nemotron(
+            current_transcript,
+            nemo_segments,
+        )
+        current_transcript = reassembly_result.transcript
+        print(f"Interruption reassembly complete in {reassembly_result.duration_seconds:.2f}s.")
+        print(f"Detected and reattributed {len(reassembly_result.interruption_events)} interruptions.")
+        if reassembly_result.interruption_events:
+            print("\n--- Nemotron-3 Interruption Events ---")
+            for e in reassembly_result.interruption_events[:15]:
+                print(
+                    f"  Turn {e.turn_index} [{e.start_ms/1000:.2f}s - {e.end_ms/1000:.2f}s]: "
+                    f"'{e.clause_text}' Spk {e.original_speaker} -> Spk {e.assigned_speaker} "
+                    f"(overlap ratio: {e.interruption_ratio:.2f})"
+                )
+            if len(reassembly_result.interruption_events) > 15:
+                print(f"  ... and {len(reassembly_result.interruption_events) - 15} more.")
 
-    if correction_result.patches_rejected:
-        print("\n--- Rejected Patches (Phonetic Gate) ---")
-        for p in correction_result.patches_rejected:
+    correction_result = None
+    if not args.no_llm:
+        if not api_key and not args.dry_run:
             print(
-                f"  Turn {p.turn_index}: '{p.original}' -> '{p.corrected}' "
-                f"(sim: {p.similarity:.3f}, reason: {p.rejection_reason})"
+                "Error: DEEPSEEK_API_KEY is not set.\n"
+                "Please provide it via --api-key, environment variable, or in .env file:\n"
+                "  DEEPSEEK_API_KEY=sk-...\n",
+                file=sys.stderr,
             )
+            return 2
+
+        corrector = DeepSeekCorrector(effective_config)
+        print(f"\nCalling DeepSeek corrector (model: {model}, non-thinking mode, gate threshold: {threshold})...")
+        correction_result = corrector.correct(current_transcript)
+        current_transcript = correction_result.transcript
+
+        print(f"\nCompleted in {correction_result.duration_seconds:.2f}s.")
+        print(f"Entities discovered: {list(correction_result.entities_discovered)}")
+        print(f"Patches applied: {len(correction_result.patches_applied)}")
+        print(f"Patches rejected: {len(correction_result.patches_rejected)}")
+
+        if correction_result.patches_applied:
+            print("\n--- Applied Patches ---")
+            for p in correction_result.patches_applied:
+                print(
+                    f"  Turn {p.turn_index}: '{p.original}' -> '{p.corrected}' "
+                    f"(sim: {p.similarity:.3f}, pinyin: '{p.original_pinyin}' -> '{p.candidate_pinyin}')\n"
+                    f"    Reason: {p.reason}"
+                )
+
+        if correction_result.patches_rejected:
+            print("\n--- Rejected Patches (Phonetic Gate) ---")
+            for p in correction_result.patches_rejected:
+                print(
+                    f"  Turn {p.turn_index}: '{p.original}' -> '{p.corrected}' "
+                    f"(sim: {p.similarity:.3f}, reason: {p.rejection_reason})"
+                )
 
     if args.output is not None:
         out_dir = args.output.resolve()
@@ -168,11 +220,21 @@ def main() -> int:
         out_dir = input_path.parent / "corrected"
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    export_transcript(correction_result.transcript, out_dir, overwrite=True)
+    export_transcript(current_transcript, out_dir, overwrite=True)
+
+    audit_payload: dict[str, Any] = {}
+    if reassembly_result is not None:
+        audit_payload["nemotron_reassembly"] = reassembly_result.to_dict()
+    if correction_result is not None:
+        audit_payload["llm_correction"] = correction_result.to_dict()
 
     audit_path = out_dir / "correction_audit.json"
     with audit_path.open("w", encoding="utf-8") as f:
-        json.dump(correction_result.to_dict(), f, ensure_ascii=False, indent=2)
+        json.dump(audit_payload, f, ensure_ascii=False, indent=2)
+
+    print(f"\nFinal transcript exported to: {out_dir}")
+    print(f"Audit log saved to: {audit_path}")
+    return 0
 
     print(f"\nCorrected transcript exported to: {out_dir}")
     print(f"Audit log saved to: {audit_path}")

@@ -91,6 +91,8 @@ class ServiceRequest:
     profile_resources: bool = False
     diagnostics_level: str = "basic"
     aed_budget_fraction: float = 0.9
+    llm_enabled: bool = False
+    nemotron_reassembly: bool = False
 
 
 def config_fingerprint(config: AppConfig) -> str:
@@ -179,6 +181,8 @@ def parse_request(payload: Mapping[str, Any]) -> ServiceRequest:
         profile_resources=_optional_bool(payload, "profile_resources"),
         diagnostics_level=_diagnostics_level(payload),
         aed_budget_fraction=_budget_fraction(payload),
+        llm_enabled=_optional_bool(payload, "llm_enabled"),
+        nemotron_reassembly=_optional_bool(payload, "nemotron_reassembly"),
     )
 
 
@@ -333,6 +337,8 @@ class ServiceClient:
             "profile_resources": request.profile_resources,
             "diagnostics_level": request.diagnostics_level,
             "aed_budget_fraction": request.aed_budget_fraction,
+            "llm_enabled": request.llm_enabled,
+            "nemotron_reassembly": request.nemotron_reassembly,
         }
 
     def submit(self, request: ServiceRequest) -> dict[str, Any]:

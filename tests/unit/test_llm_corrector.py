@@ -312,9 +312,70 @@ def test_corrector_mimo_config_and_mock_api_call():
         assert result.patches_applied[0].corrected == "丹丹主任"
 
 
+def test_corrector_dashscope_config_and_mock_api_call():
+    config = LLMConfig(
+        enabled=True,
+        provider="dashscope",
+        api_key="dashscope-test-key-777",
+        api_key_env="DASHSCOPE_API_KEY",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen3.7-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    corrector = DeepSeekCorrector(config)
+    transcript = create_sample_transcript()
+
+    mock_llm_payload = {
+        "entities": ["丹丹主任"],
+        "patches": [
+            {
+                "turn_index": 1,
+                "original": "丹丹酒",
+                "corrected": "丹丹主任",
+                "reason": "上下文修正",
+            }
+        ],
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(mock_llm_payload, ensure_ascii=False)
+                }
+            }
+        ]
+    }
+    mock_resp.raise_for_status.return_value = None
+
+    with patch("httpx.Client.post", return_value=mock_resp) as mock_post:
+        result = corrector.correct(transcript)
+
+        assert mock_post.called
+        call_kwargs = mock_post.call_args.kwargs
+        url = mock_post.call_args.args[0]
+        assert url == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        sent_json = call_kwargs["json"]
+        assert sent_json["model"] == "qwen3.7-flash"
+        assert "thinking" not in sent_json
+        assert "Authorization" in call_kwargs["headers"]
+        assert call_kwargs["headers"]["Authorization"] == "Bearer dashscope-test-key-777"
+
+        assert result.provider == "dashscope"
+        assert result.model == "qwen3.7-flash"
+        assert len(result.patches_applied) == 1
+        assert result.patches_applied[0].corrected == "丹丹主任"
+
 def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
     monkeypatch.setenv("MIMO_API_KEY", "env-mimo-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "env-deepseek-key")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "env-dashscope-key")
+    monkeypatch.setenv("QWEN_API_KEY", "env-qwen-key")
 
     cfg_mimo = LLMConfig(
         enabled=True,
@@ -390,3 +451,33 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         max_context_turns=100,
     )
     assert cfg_deepseek.resolve_api_key() == "env-deepseek-key"
+
+    cfg_dashscope = LLMConfig(
+        enabled=True,
+        provider="dashscope",
+        api_key="",
+        api_key_env="DASHSCOPE_API_KEY",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen3.7-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    assert cfg_dashscope.resolve_api_key() == "env-dashscope-key"
+
+    cfg_qwen_fallback_default = LLMConfig(
+        enabled=True,
+        provider="qwen",
+        api_key="",
+        api_key_env="DEEPSEEK_API_KEY",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen3.7-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+        max_context_turns=100,
+    )
+    assert cfg_qwen_fallback_default.resolve_api_key() == "env-dashscope-key"

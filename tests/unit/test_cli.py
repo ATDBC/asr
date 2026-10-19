@@ -420,3 +420,18 @@ def test_cli_flags_llm_and_nemotron_interruption(tmp_path: Path):
     assert req_mimo.llm_provider == "mimo"
     assert req_mimo.llm_base_url == "https://token-plan-cn.xiaomimimo.com/v1"
     assert req_mimo.llm_api_key == "test-mimo-key-xyz"
+
+    # Test qwen/dashscope options
+    args_qwen = cli._parser().parse_args([
+        str(tmp_path / "input.wav"),
+        "--llm-model",
+        "qwen3.7-flash",
+        "--llm-api-key",
+        "test-dashscope-key-abc",
+    ])
+    req_qwen = cli._service_request(args_qwen, config)
+    assert req_qwen.llm_enabled is True
+    assert req_qwen.llm_model == "qwen3.7-flash"
+    assert req_qwen.llm_provider == "dashscope"
+    assert req_qwen.llm_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert req_qwen.llm_api_key == "test-dashscope-key-abc"

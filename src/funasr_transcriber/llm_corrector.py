@@ -114,7 +114,7 @@ def normalize_model_name(provider: str, model: str) -> str:
 
 
 class DeepSeekCorrector:
-    """Orchestrates LLM (DeepSeek / MiMo / OpenAI-compatible) dialogue inspection and phonetic-gated correction."""
+    """Orchestrates LLM (DeepSeek / MiMo / DashScope Qwen / OpenAI-compatible) dialogue inspection and phonetic-gated correction."""
 
     def __init__(self, config: LLMConfig):
         self.config = config
@@ -216,7 +216,7 @@ class DeepSeekCorrector:
                 entities_discovered = parsed.get("entities", [])
                 raw_patches = parsed.get("patches", [])
             except Exception as exc:
-                err_msg = f"DeepSeek API call failed: {exc}"
+                err_msg = f"{self.config.provider} API call failed: {exc}"
                 logger.warning(err_msg)
                 warnings.append(err_msg)
                 if diagnostics is not None:

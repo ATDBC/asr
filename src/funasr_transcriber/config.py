@@ -227,24 +227,41 @@ class LLMConfig:
             return self.api_key.strip()
         env_name = self.api_key_env.strip()
         is_mimo = self.provider == "mimo" or "mimo" in self.model.lower()
+        is_dashscope = self.provider in {"dashscope", "qwen"} or "qwen" in self.model.lower()
         is_deepseek = self.provider == "deepseek" or "deepseek" in self.model.lower()
+
+        standard_env_vars = {
+            "DEEPSEEK_API_KEY",
+            "MIMO_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "QWEN_API_KEY",
+            "LLM_API_KEY",
+        }
 
         # If user explicitly configured an env_name that is not a standard default,
         # strictly respect that custom env var without falling back.
-        if env_name and env_name not in {"DEEPSEEK_API_KEY", "MIMO_API_KEY", "LLM_API_KEY"}:
+        if env_name and env_name not in standard_env_vars:
             return os.environ.get(env_name, "").strip()
 
         # If standard env var is configured and present in environment:
         if env_name and env_name in os.environ and os.environ[env_name].strip():
-            # If provider is mimo but env_name was left as default DEEPSEEK_API_KEY, prefer MIMO_API_KEY if available
-            if is_mimo and env_name == "DEEPSEEK_API_KEY" and "MIMO_API_KEY" in os.environ and os.environ["MIMO_API_KEY"].strip():
+            # If provider does not match the default env var name, prefer the matching provider key if available
+            if is_mimo and env_name != "MIMO_API_KEY" and "MIMO_API_KEY" in os.environ and os.environ["MIMO_API_KEY"].strip():
                 return os.environ["MIMO_API_KEY"].strip()
+            if is_dashscope and env_name not in {"DASHSCOPE_API_KEY", "QWEN_API_KEY"}:
+                for k in ("DASHSCOPE_API_KEY", "QWEN_API_KEY"):
+                    if k in os.environ and os.environ[k].strip():
+                        return os.environ[k].strip()
             return os.environ[env_name].strip()
 
         # Fallback to provider-specific default env vars
         if is_mimo:
             if "MIMO_API_KEY" in os.environ and os.environ["MIMO_API_KEY"].strip():
                 return os.environ["MIMO_API_KEY"].strip()
+        if is_dashscope:
+            for k in ("DASHSCOPE_API_KEY", "QWEN_API_KEY"):
+                if k in os.environ and os.environ[k].strip():
+                    return os.environ[k].strip()
         if is_deepseek:
             if "DEEPSEEK_API_KEY" in os.environ and os.environ["DEEPSEEK_API_KEY"].strip():
                 return os.environ["DEEPSEEK_API_KEY"].strip()
@@ -544,8 +561,8 @@ def validate(config: AppConfig) -> AppConfig:
     ):
         raise ValueError("alignment coverage ratios are invalid")
     llm = config.llm
-    if llm.provider not in {"deepseek", "mimo", "openai_compatible"}:
-        raise ValueError("llm provider must be deepseek, mimo, or openai_compatible")
+    if llm.provider not in {"deepseek", "mimo", "dashscope", "qwen", "openai_compatible"}:
+        raise ValueError("llm provider must be deepseek, mimo, dashscope, qwen, or openai_compatible")
     if not (0.0 <= llm.temperature <= 2.0):
         raise ValueError("llm temperature must stay within 0..2")
     if llm.timeout_seconds <= 0:

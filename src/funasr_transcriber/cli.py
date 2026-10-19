@@ -131,10 +131,17 @@ def _service_request(args: argparse.Namespace, config) -> ServiceRequest:
     llm_provider = getattr(args, "llm_provider", None)
     llm_base_url = getattr(args, "llm_base_url", None)
     llm_api_key = getattr(args, "llm_api_key", None)
-    if llm_model and "mimo" in str(llm_model).lower() and not llm_provider:
-        llm_provider = "mimo"
+    if llm_model and not llm_provider:
+        m_lower = str(llm_model).lower()
+        if "mimo" in m_lower:
+            llm_provider = "mimo"
+        elif "qwen" in m_lower or "dashscope" in m_lower:
+            llm_provider = "dashscope"
+
     if llm_provider == "mimo" and not llm_base_url:
         llm_base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+    elif llm_provider in {"dashscope", "qwen"} and not llm_base_url:
+        llm_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     llm_enabled = (
         True
@@ -233,8 +240,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-provider",
-        choices=("deepseek", "mimo", "openai_compatible"),
-        help="LLM provider (default: deepseek or mimo depending on model)",
+        choices=("deepseek", "mimo", "dashscope", "qwen", "openai_compatible"),
+        help="LLM provider (default: deepseek, mimo, or dashscope depending on model)",
     )
     parser.add_argument(
         "--llm-model",

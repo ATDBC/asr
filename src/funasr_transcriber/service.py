@@ -710,19 +710,27 @@ class ServiceJobRunner:
             overrides["model"] = request.llm_model
         if request.llm_provider:
             overrides["provider"] = request.llm_provider
-        elif request.llm_model and "mimo" in str(request.llm_model).lower():
-            overrides["provider"] = "mimo"
+        elif request.llm_model:
+            m_lower = str(request.llm_model).lower()
+            if "mimo" in m_lower:
+                overrides["provider"] = "mimo"
+            elif "qwen" in m_lower or "dashscope" in m_lower:
+                overrides["provider"] = "dashscope"
 
         provider = overrides.get("provider", self.config.llm.provider)
         if request.llm_base_url:
             overrides["base_url"] = request.llm_base_url
         elif provider == "mimo" and "mimo" not in self.config.llm.base_url:
             overrides["base_url"] = "https://token-plan-cn.xiaomimimo.com/v1"
+        elif provider in {"dashscope", "qwen"} and "dashscope" not in self.config.llm.base_url:
+            overrides["base_url"] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
         if request.llm_api_key:
             overrides["api_key"] = request.llm_api_key
         elif provider == "mimo":
             overrides["api_key_env"] = "MIMO_API_KEY"
+        elif provider in {"dashscope", "qwen"}:
+            overrides["api_key_env"] = "DASHSCOPE_API_KEY"
 
         if overrides:
             from dataclasses import replace

@@ -87,6 +87,19 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "speaker_match_min_margin": 0.03,
         "track_min_rms": 0.0005,
     },
+    "llm": {
+        "enabled": False,
+        "provider": "deepseek",
+        "api_key": "",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4.1-flash",
+        "enable_thinking": False,
+        "temperature": 0.1,
+        "timeout_seconds": 60,
+        "pinyin_gate_threshold": 0.5,
+        "max_context_turns": 100,
+    },
 }
 
 
@@ -189,6 +202,30 @@ class OverlapConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMConfig:
+    enabled: bool
+    provider: str
+    api_key: str
+    api_key_env: str
+    base_url: str
+    model: str
+    enable_thinking: bool
+    temperature: float
+    timeout_seconds: int
+    pinyin_gate_threshold: float
+    max_context_turns: int
+
+    def resolve_api_key(self) -> str:
+        """Resolve API key from direct config or environment variable."""
+        if self.api_key.strip():
+            return self.api_key.strip()
+        env_name = self.api_key_env.strip()
+        if env_name and env_name in os.environ:
+            return os.environ[env_name].strip()
+        return ""
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     general: GeneralConfig
     paths: PathConfig
@@ -201,6 +238,7 @@ class AppConfig:
     service: ServiceConfig
     diagnostics: DiagnosticsConfig
     overlap: OverlapConfig
+    llm: LLMConfig
 
 
 def _merge_known(target: dict[str, dict[str, Any]], incoming: Mapping[str, Any]) -> None:
@@ -365,6 +403,19 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             ),
             track_min_rms=float(values["overlap"]["track_min_rms"]),
         ),
+        llm=LLMConfig(
+            enabled=bool(values["llm"]["enabled"]),
+            provider=str(values["llm"]["provider"]).strip().lower(),
+            api_key=str(values["llm"]["api_key"]).strip(),
+            api_key_env=str(values["llm"]["api_key_env"]).strip(),
+            base_url=str(values["llm"]["base_url"]).strip(),
+            model=str(values["llm"]["model"]).strip(),
+            enable_thinking=bool(values["llm"]["enable_thinking"]),
+            temperature=float(values["llm"]["temperature"]),
+            timeout_seconds=int(values["llm"]["timeout_seconds"]),
+            pinyin_gate_threshold=float(values["llm"]["pinyin_gate_threshold"]),
+            max_context_turns=int(values["llm"]["max_context_turns"]),
+        ),
     )
     return validate(config)
 
@@ -455,13 +506,56 @@ def validate(config: AppConfig) -> AppConfig:
         <= 1.0
     ):
         raise ValueError("alignment coverage ratios are invalid")
+    llm = config.llm
+    if llm.provider not in {"deepseek", "openai_compatible"}:
+        raise ValueError("llm provider must be deepseek or openai_compatible")
+    if not (0.0 <= llm.temperature <= 2.0):
+        raise ValueError("llm temperature must stay within 0..2")
+    if llm.timeout_seconds <= 0:
+        raise ValueError("llm timeout_seconds must be positive")
+    if not (0.0 <= llm.pinyin_gate_threshold <= 1.0):
+        raise ValueError("llm pinyin_gate_threshold must stay within 0..1")
+    if llm.max_context_turns <= 0:
+        raise ValueError("llm max_context_turns must be positive")
     return config
+
+
+def _load_dotenv(start_path: Path | None = None) -> None:
+    search_dirs: list[Path] = []
+    if start_path is not None:
+        target = Path(start_path).resolve()
+        search_dirs.append(target if target.is_dir() else target.parent)
+    search_dirs.append(Path.cwd().resolve())
+    search_dirs.append(Path(__file__).resolve().parent.parent.parent)
+
+    seen: set[Path] = set()
+    for directory in search_dirs:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        env_file = directory / ".env"
+        if env_file.is_file():
+            try:
+                with env_file.open("r", encoding="utf-8") as stream:
+                    for line in stream:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip().strip("'\"")
+                        if key and key not in os.environ:
+                            os.environ[key] = val
+                break
+            except Exception:
+                pass
 
 
 def load_config(
     path: Path | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
 ) -> AppConfig:
+    _load_dotenv(path)
     values = deepcopy(DEFAULTS)
     if path is not None:
         with Path(path).open("rb") as stream:

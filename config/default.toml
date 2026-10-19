@@ -74,3 +74,16 @@ timeout_seconds = 1200
 speaker_match_min_score = 0.05
 speaker_match_min_margin = 0.03
 track_min_rms = 0.0005
+
+[llm]
+enabled = false
+provider = "deepseek"
+api_key = ""
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4.1-flash"
+enable_thinking = false
+temperature = 0.1
+timeout_seconds = 60
+pinyin_gate_threshold = 0.5
+max_context_turns = 100

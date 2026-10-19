@@ -22,3 +22,8 @@ artifacts/
 checkpoints/
 
 checkpoints/
+
+# Secrets & Environment
+.env
+.env.*
+!.env.example

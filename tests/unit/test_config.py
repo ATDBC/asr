@@ -303,3 +303,69 @@ def test_nemotron_timeout_must_be_positive():
             "diarization.backend": "nemotron3",
             "nemotron.timeout_seconds": 0,
         })
+
+
+def test_default_llm_configuration():
+    config = load_config()
+
+    assert config.llm.enabled is False
+    assert config.llm.provider == "deepseek"
+    assert config.llm.model == "deepseek-v4.1-flash"
+    assert config.llm.enable_thinking is False
+    assert config.llm.temperature == 0.1
+    assert config.llm.timeout_seconds == 60
+    assert config.llm.pinyin_gate_threshold == 0.5
+    assert config.llm.max_context_turns == 100
+
+
+def test_llm_configuration_can_be_customized(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[llm]\n"
+        "enabled = true\n"
+        'model = "deepseek-v4.1-flash"\n'
+        "enable_thinking = false\n"
+        "temperature = 0.2\n"
+        "pinyin_gate_threshold = 0.6\n",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    assert config.llm.enabled is True
+    assert config.llm.model == "deepseek-v4.1-flash"
+    assert config.llm.enable_thinking is False
+    assert config.llm.temperature == 0.2
+    assert config.llm.pinyin_gate_threshold == 0.6
+
+
+@pytest.mark.parametrize(
+    ("setting", "match"),
+    (
+        ('provider = "unknown"', "llm provider"),
+        ("temperature = -0.1", "llm temperature"),
+        ("temperature = 2.5", "llm temperature"),
+        ("timeout_seconds = 0", "llm timeout_seconds"),
+        ("pinyin_gate_threshold = -0.1", "llm pinyin_gate_threshold"),
+        ("pinyin_gate_threshold = 1.5", "llm pinyin_gate_threshold"),
+        ("max_context_turns = 0", "llm max_context_turns"),
+    ),
+)
+def test_llm_configuration_rejects_invalid_values(
+    tmp_path: Path,
+    setting: str,
+    match: str,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(f"[llm]\n{setting}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        load_config(path)
+
+
+def test_load_dotenv_reads_env_file(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=test_env_key_abc\n", encoding="utf-8")
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("", encoding="utf-8")
+
+    config = load_config(path=config_file)
+    assert config.llm.resolve_api_key() == "test_env_key_abc"

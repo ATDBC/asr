@@ -638,6 +638,7 @@ class ServiceJobRunner:
             llm_corrector_factory or self._default_llm_corrector_factory
         )
         self._active_overlap_pid: int | None = None
+        self._active_nemotron_pid: int | None = None
         self._capture_overlap_pid = False
 
     @staticmethod
@@ -755,6 +756,7 @@ class ServiceJobRunner:
             "aed_worker_1": lambda: aed_pid(1),
             "punc_worker": punc_pid,
             "overlap_worker": lambda: self._active_overlap_pid,
+            "nemotron_worker": lambda: self._active_nemotron_pid,
         }
 
     @staticmethod
@@ -1245,7 +1247,11 @@ class ServiceJobRunner:
                         nemotron_segments = branches.speaker_segments
                     else:
                         with self._nemotron_factory() as client:
-                            nemotron_segments = client.diarize(normalized)
+                            self._active_nemotron_pid = getattr(client, "pid", None)
+                            try:
+                                nemotron_segments = client.diarize(normalized)
+                            finally:
+                                self._active_nemotron_pid = None
                     from .clause_reassembler import reassemble_transcript_with_nemotron
 
                     reassembly_result = reassemble_transcript_with_nemotron(
@@ -1373,6 +1379,7 @@ class ServiceJobRunner:
             if sampler is not None and not profile_finished:
                 sampler.stop()
             self._active_overlap_pid = None
+            self._active_nemotron_pid = None
             self._capture_overlap_pid = False
             shutil.rmtree(staging_dir, ignore_errors=True)
             if not request.keep_intermediate:

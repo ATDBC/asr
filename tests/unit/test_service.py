@@ -81,6 +81,7 @@ def test_owned_pid_getters_name_all_resident_owners():
         "aed_worker_1",
         "punc_worker",
         "overlap_worker",
+        "nemotron_worker",
     }
     assert getters["aed_worker_0"]() == 101
     assert getters["aed_worker_1"]() == 102
@@ -1213,6 +1214,7 @@ def test_service_job_with_nemotron_reassembly_and_llm(tmp_path: Path):
         speaker_owner = FakeDiarizer([])
 
     class FakeNemotronClient:
+        pid = 205
         def __enter__(self):
             return self
         def __exit__(self, exc_type, exc_val, exc_tb):

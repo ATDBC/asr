@@ -1137,6 +1137,27 @@ class ServiceJobRunner:
                 )
             direct_attributed = None
             crop_plan = None
+            nemotron_future = None
+            nemotron_executor = None
+            if (
+                request.nemotron_reassembly
+                and self.config.diarization.backend != "nemotron3"
+            ):
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _run_async_nemotron() -> tuple[tuple[SpeakerSegment, ...], float]:
+                    w_start = perf_counter()
+                    with self._nemotron_factory() as client:
+                        self._active_nemotron_pid = getattr(client, "pid", None)
+                        try:
+                            segs = client.diarize(normalized)
+                            return segs, perf_counter() - w_start
+                        finally:
+                            self._active_nemotron_pid = None
+
+                nemotron_executor = ThreadPoolExecutor(max_workers=1)
+                nemotron_future = nemotron_executor.submit(_run_async_nemotron)
+
             with diagnostics.stage("normal_model_branches"):
                 if self.config.diarization.backend == "nemotron3":
                     branches, direct_attributed, crop_plan = (
@@ -1243,15 +1264,27 @@ class ServiceJobRunner:
 
             if request.nemotron_reassembly:
                 with diagnostics.stage("nemotron_reassembly"):
+                    nemotron_worker_seconds = 0.0
                     if self.config.diarization.backend == "nemotron3":
                         nemotron_segments = branches.speaker_segments
                     else:
-                        with self._nemotron_factory() as client:
-                            self._active_nemotron_pid = getattr(client, "pid", None)
-                            try:
-                                nemotron_segments = client.diarize(normalized)
-                            finally:
-                                self._active_nemotron_pid = None
+                        if nemotron_future is not None:
+                            nemotron_segments, nemotron_worker_seconds = (
+                                nemotron_future.result()
+                            )
+                        else:
+                            w_start = perf_counter()
+                            with self._nemotron_factory() as client:
+                                self._active_nemotron_pid = getattr(
+                                    client, "pid", None
+                                )
+                                try:
+                                    nemotron_segments = client.diarize(normalized)
+                                    nemotron_worker_seconds = (
+                                        perf_counter() - w_start
+                                    )
+                                finally:
+                                    self._active_nemotron_pid = None
                     from .clause_reassembler import reassemble_transcript_with_nemotron
 
                     reassembly_result = reassemble_transcript_with_nemotron(
@@ -1263,13 +1296,16 @@ class ServiceJobRunner:
                     final_transcript = reassembly_result.transcript
                     diagnostics.runtime["nemotron_reassembly"] = {
                         "enabled": True,
+                        "worker_duration_seconds": round(
+                            nemotron_worker_seconds, 3
+                        ),
+                        "duration_seconds": round(
+                            reassembly_result.duration_seconds, 3
+                        ),
                         "interruption_events_count": len(
                             reassembly_result.interruption_events
                         ),
                         "speaker_mapping": reassembly_result.speaker_mapping,
-                        "duration_seconds": round(
-                            reassembly_result.duration_seconds, 3
-                        ),
                         "events": [
                             e.to_dict()
                             for e in reassembly_result.interruption_events
@@ -1376,6 +1412,8 @@ class ServiceJobRunner:
                         LOGGER.exception(
                             "AED CUDA cache cleanup failed while preserving job error"
                         )
+            if "nemotron_executor" in locals() and nemotron_executor is not None:
+                nemotron_executor.shutdown(wait=False, cancel_futures=True)
             if sampler is not None and not profile_finished:
                 sampler.stop()
             self._active_overlap_pid = None

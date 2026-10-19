@@ -141,11 +141,14 @@ class DeepSeekCorrector:
             "temperature": self.config.temperature,
             "response_format": {"type": "json_object"},
         }
-        if (
-            not self.config.enable_thinking
-            and (self.config.provider == "deepseek" or "deepseek" in target_model.lower())
-        ):
-            payload["thinking"] = {"type": "disabled"}
+        if not self.config.enable_thinking:
+            is_mimo = self.config.provider == "mimo" or "mimo" in target_model.lower()
+            is_deepseek = self.config.provider == "deepseek" or "deepseek" in target_model.lower()
+            is_dashscope = self.config.provider in {"dashscope", "qwen"} or "qwen" in target_model.lower()
+            if is_deepseek or is_mimo:
+                payload["thinking"] = {"type": "disabled"}
+            elif is_dashscope:
+                payload["enable_thinking"] = False
 
         with httpx.Client(timeout=float(self.config.timeout_seconds)) as client:
             response = client.post(url, json=payload, headers=headers)

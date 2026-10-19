@@ -302,7 +302,7 @@ def test_corrector_mimo_config_and_mock_api_call():
         assert url == "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
         sent_json = call_kwargs["json"]
         assert sent_json["model"] == "mimo-v2.6-flash"
-        assert "thinking" not in sent_json
+        assert sent_json["thinking"] == {"type": "disabled"}
         assert "Authorization" in call_kwargs["headers"]
         assert call_kwargs["headers"]["Authorization"] == "Bearer mimo-test-key-999"
 
@@ -362,7 +362,7 @@ def test_corrector_dashscope_config_and_mock_api_call():
         assert url == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
         sent_json = call_kwargs["json"]
         assert sent_json["model"] == "qwen3.7-flash"
-        assert "thinking" not in sent_json
+        assert sent_json["enable_thinking"] is False
         assert "Authorization" in call_kwargs["headers"]
         assert call_kwargs["headers"]["Authorization"] == "Bearer dashscope-test-key-777"
 

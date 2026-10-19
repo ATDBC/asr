@@ -211,6 +211,7 @@ def run_normal_branches(
     asr_owner: Any,
     speaker_owner: Any,
     profile_enabled: bool = False,
+    nemotron_future: Any = None,
 ) -> NormalBranchResult:
     """Run diarization first, then transcribe each speaker segment as a VAD segment."""
 
@@ -237,6 +238,22 @@ def run_normal_branches(
     )
     if speaker_metrics:
         branch_metrics["diarization"]["memory"] = speaker_metrics
+
+    if nemotron_future is not None:
+        from .segment_refiner import refine_segments_with_nemotron
+        refine_start = perf_counter()
+        nemotron_segments, nem_seconds = nemotron_future.result()
+        refined_segments, refiner_stats = refine_segments_with_nemotron(
+            speaker_segments, nemotron_segments
+        )
+        speaker_segments = refined_segments
+        branch_metrics["nemotron_refinement"] = {
+            "refine_seconds": perf_counter() - refine_start,
+            "nemotron_worker_seconds": nem_seconds,
+            "splits": refiner_stats.get("splits", 0),
+            "inserted_count": refiner_stats.get("inserted_count", 0),
+        }
+
     asr_result: AsrResult = measure(
         "asr",
         asr_owner.transcribe,
@@ -1214,6 +1231,7 @@ class ServiceJobRunner:
                         speaker_owner,
                         profile_enabled=diagnostics_level
                         in {"resources", "deep"},
+                        nemotron_future=nemotron_future,
                     )
             for branch_name, branch in branches.branch_metrics.items():
                 seconds = branch.get("seconds")
@@ -1301,10 +1319,23 @@ class ServiceJobRunner:
 
             if request.nemotron_reassembly:
                 with diagnostics.stage("nemotron_reassembly"):
-                    nemotron_worker_seconds = 0.0
-                    if self.config.diarization.backend == "nemotron3":
-                        nemotron_segments = branches.speaker_segments
+                    refine_info = branches.branch_metrics.get("nemotron_refinement")
+                    if refine_info is not None:
+                        diagnostics.runtime["nemotron_reassembly"] = {
+                            "enabled": True,
+                            "refinement_enabled": True,
+                            "splits": refine_info.get("splits", 0),
+                            "inserted_count": refine_info.get("inserted_count", 0),
+                            "worker_duration_seconds": round(
+                                refine_info.get("nemotron_worker_seconds", 0.0), 3
+                            ),
+                            "duration_seconds": round(
+                                refine_info.get("refine_seconds", 0.0), 3
+                            ),
+                        }
                     else:
+                        # Fallback for offline tests or when refinement was not in normal branches
+                        nemotron_worker_seconds = 0.0
                         if nemotron_future is not None:
                             nemotron_segments, nemotron_worker_seconds = (
                                 nemotron_future.result()
@@ -1322,32 +1353,32 @@ class ServiceJobRunner:
                                     )
                                 finally:
                                     self._active_nemotron_pid = None
-                    from .clause_reassembler import reassemble_transcript_with_nemotron
+                        from .clause_reassembler import reassemble_transcript_with_nemotron
 
-                    reassembly_result = reassemble_transcript_with_nemotron(
-                        final_transcript,
-                        nemotron_segments,
-                        min_interruption_ratio=self.config.nemotron.min_interruption_ratio,
-                        min_clause_ms=self.config.nemotron.min_clause_ms,
-                    )
-                    final_transcript = reassembly_result.transcript
-                    diagnostics.runtime["nemotron_reassembly"] = {
-                        "enabled": True,
-                        "worker_duration_seconds": round(
-                            nemotron_worker_seconds, 3
-                        ),
-                        "duration_seconds": round(
-                            reassembly_result.duration_seconds, 3
-                        ),
-                        "interruption_events_count": len(
-                            reassembly_result.interruption_events
-                        ),
-                        "speaker_mapping": reassembly_result.speaker_mapping,
-                        "events": [
-                            e.to_dict()
-                            for e in reassembly_result.interruption_events
-                        ],
-                    }
+                        reassembly_result = reassemble_transcript_with_nemotron(
+                            final_transcript,
+                            nemotron_segments,
+                            min_interruption_ratio=self.config.nemotron.min_interruption_ratio,
+                            min_clause_ms=self.config.nemotron.min_clause_ms,
+                        )
+                        final_transcript = reassembly_result.transcript
+                        diagnostics.runtime["nemotron_reassembly"] = {
+                            "enabled": True,
+                            "worker_duration_seconds": round(
+                                nemotron_worker_seconds, 3
+                            ),
+                            "duration_seconds": round(
+                                reassembly_result.duration_seconds, 3
+                            ),
+                            "interruption_events_count": len(
+                                reassembly_result.interruption_events
+                            ),
+                            "speaker_mapping": reassembly_result.speaker_mapping,
+                            "events": [
+                                e.to_dict()
+                                for e in reassembly_result.interruption_events
+                            ],
+                        }
 
             cleanup_owner = self.hot_host.asr_owner
             cleanup = getattr(cleanup_owner, "cleanup_cuda_cache", None)

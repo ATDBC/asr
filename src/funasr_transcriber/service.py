@@ -90,6 +90,35 @@ def _shutdown_background_executor(executor: ThreadPoolExecutor) -> None:
     executor.shutdown(wait=True, cancel_futures=True)
 
 
+def _start_vad_prefetch(
+    asr_owner: Any,
+    normalized: Path,
+    duration_ms: int,
+    executor: ThreadPoolExecutor,
+) -> Future[tuple[list[list[int]], float]] | None:
+    """Submit one whole-recording FireRedVAD pass for long hybrid jobs."""
+
+    if duration_ms <= 10_000:
+        return None
+    worker0 = getattr(asr_owner, "worker0", None)
+    refine_vad = getattr(worker0, "refine_vad", None)
+    if not callable(refine_vad):
+        raise TranscriptionError(
+            "resident FireRed owner cannot prefetch global VAD"
+        )
+
+    def operation() -> tuple[list[list[int]], float]:
+        started = perf_counter()
+        segments = refine_vad(normalized, [[0, int(duration_ms)]])
+        if not isinstance(segments, list):
+            raise TranscriptionError(
+                "FireRedVAD prefetch returned invalid segments"
+            )
+        return segments, perf_counter() - started
+
+    return executor.submit(operation)
+
+
 class HotModelHost:
     """Own the hot FireRed AED owner and one 3D-Speaker diarizer."""
 
@@ -218,6 +247,7 @@ def run_normal_branches(
     speaker_owner: Any,
     profile_enabled: bool = False,
     nemotron_future: Any = None,
+    vad_prefetch_future: Any = None,
 ) -> NormalBranchResult:
     """Run diarization first, then transcribe each speaker segment as a VAD segment."""
 
@@ -258,6 +288,19 @@ def run_normal_branches(
             "nemotron_worker_seconds": nem_seconds,
             "splits": refiner_stats.get("splits", 0),
             "inserted_count": refiner_stats.get("inserted_count", 0),
+        }
+
+    if vad_prefetch_future is not None:
+        wait_started = perf_counter()
+        global_vad_segments, worker_seconds = vad_prefetch_future.result()
+        branch_metrics["vad_prefetch"] = {
+            "worker_seconds": float(worker_seconds),
+            "join_wait_seconds": perf_counter() - wait_started,
+            "global_segment_count": len(global_vad_segments),
+            "used_for_long_segments": any(
+                segment.end_ms - segment.start_ms > 10_000
+                for segment in speaker_segments
+            ),
         }
 
     asr_result: AsrResult = measure(
@@ -1210,6 +1253,8 @@ class ServiceJobRunner:
             crop_plan = None
             nemotron_future = None
             nemotron_executor = None
+            vad_prefetch_future = None
+            vad_prefetch_executor = None
             if (
                 request.nemotron_reassembly
                 and self.config.diarization.backend != "nemotron3"
@@ -1228,6 +1273,14 @@ class ServiceJobRunner:
 
                 nemotron_executor = ThreadPoolExecutor(max_workers=1)
                 nemotron_future = nemotron_executor.submit(_run_async_nemotron)
+                if input_info.duration_ms > 10_000:
+                    vad_prefetch_executor = ThreadPoolExecutor(max_workers=1)
+                    vad_prefetch_future = _start_vad_prefetch(
+                        asr_owner,
+                        normalized,
+                        input_info.duration_ms,
+                        vad_prefetch_executor,
+                    )
 
             with diagnostics.stage("normal_model_branches"):
                 if self.config.diarization.backend == "nemotron3":
@@ -1249,6 +1302,7 @@ class ServiceJobRunner:
                         profile_enabled=diagnostics_level
                         in {"resources", "deep"},
                         nemotron_future=nemotron_future,
+                        vad_prefetch_future=vad_prefetch_future,
                     )
             for branch_name, branch in branches.branch_metrics.items():
                 seconds = branch.get("seconds")
@@ -1280,6 +1334,16 @@ class ServiceJobRunner:
             parallel_metrics = branches.branch_metrics.get("asr", {}).get("parallel")
             if isinstance(parallel_metrics, dict):
                 diagnostics.scheduler["parallel"] = parallel_metrics
+            vad_prefetch_metrics = branches.branch_metrics.get("vad_prefetch")
+            if isinstance(vad_prefetch_metrics, dict):
+                diagnostics.runtime["vad_prefetch"] = dict(
+                    vad_prefetch_metrics
+                )
+                wait_seconds = vad_prefetch_metrics.get("join_wait_seconds")
+                if isinstance(wait_seconds, (int, float)):
+                    diagnostics.stage_seconds["normal.vad_prefetch_wait"] = float(
+                        wait_seconds
+                    )
             if crop_plan is not None:
                 diagnostics.runtime["nemotron"] = dict(
                     self.hot_host.inventories.get("speaker") or {}
@@ -1499,6 +1563,11 @@ class ServiceJobRunner:
                         )
             if "nemotron_executor" in locals() and nemotron_executor is not None:
                 _shutdown_background_executor(nemotron_executor)
+            if (
+                "vad_prefetch_executor" in locals()
+                and vad_prefetch_executor is not None
+            ):
+                _shutdown_background_executor(vad_prefetch_executor)
             if sampler is not None and not profile_finished:
                 sampler.stop()
             self._active_overlap_pid = None

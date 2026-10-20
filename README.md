@@ -213,6 +213,24 @@ NEMOTRON_BENCHMARK_OUTPUT_ROOT="$PWD/outputs/measurements/nemotron-direct-crop-u
 要回退，先用**当前配置**停止本项目服务，再改用原来的 `backend = "3d_speaker"`
 配置重新启动。不要关闭或管理其他项目进程。
 
+### 5.2 可选 Hybrid refinement
+
+Hybrid 路径保留 3D-Speaker 作为全局说话人 ID 空间，同时用 Nemotron 补充局部短插话。
+它不是 `backend = "nemotron3"` 的 direct-crop 路径；配置继续使用默认
+`backend = "3d_speaker"`，并显式执行：
+
+```bash
+.venv/bin/funasr-transcribe /data/recording.wav \
+  --config "$PWD/outputs/runtime/config.toml" \
+  --enable-nemotron-interruption
+```
+
+对超过 10 秒的输入，服务会在 3D-Speaker 和 Nemotron 推理期间并行预取一次全局
+FireRedVAD。Hybrid refinement 完成后，正常 `refine_vad` 请求复用 worker-0 中按音频路径
+缓存的全局结果，只执行 speaker 区间求交；三路全部完成后才冻结 AED 计划。该优化不改变
+VAD 区间、AED item 或 AED 计划。LLM 纠错本身可能在重复请求间返回不同 patch，因此最终文本
+不承诺逐字相同。短于或等于 10 秒的输入不启动预取。
+
 ## 6. 在新设备上初始化 AED 两个时间权重
 
 weighted-duration 调度只需要两个设备相关权重：

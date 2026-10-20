@@ -90,7 +90,8 @@ flowchart TD
    │
    ├───────► 3D-Speaker (权威全局聚类) ──┐
    │                                     ├──► 匈牙利算法空间映射
-   └───────► Nemotron-3 (高灵敏多标签) ──┘           │
+   ├───────► Nemotron-3 (高灵敏多标签) ──┘           │
+   └───────► FireRedVAD 全局预取 ────────────────────┤
                                                      ▼
                                       Pre-ASR 细分微调 (segment_refiner)
                                          ├─ 非重叠独立发言判定 (>=250ms, <=60%)
@@ -140,6 +141,10 @@ $$Start_k \ge End_{k-1}$$
    对未启用波形 splice 的 Nemotron direct-crop 路径，复用归一化母音频和绝对采样偏移，不再为每个 crop 写临时 WAV。启用 ClearVoice 波形 splice 时仍会写入 `spliced-crops/*.wav`。当前 pre-ASR refinement 路径只生成时间段，不创建 crop WAV。
 2. **同说话人平滑轮次合并（Turn Merger）**：
    `turns.py` 会合并间隔不超过 1.0 秒的同说话人连续 token；即使 token 带有 `overlap` 标记，只要时间不重叠且满足间隔条件也可以合并。现有两份 refined 输出分别包含 253 和 408 个最终话轮；是否符合人工话轮边界仍需带参考标注评估。
+3. **FireRedVAD 全局预取**：
+   对超过 10 秒的 Hybrid 输入，在 3D-Speaker 和 Nemotron 推理期间并行调用 worker-0 的整段
+   `refine_vad`。正式 speaker 区间求交复用 `GuardedVad` 路径缓存，所有 future join 后再冻结
+   AED 计划。该方式保留串行 VAD 的输出合同，同时将全局 VAD 推理从关键路径移出。
 
 ---
 
@@ -151,6 +156,21 @@ $$Start_k \ge End_{k-1}$$
 | :--- | :---: | :---: | :---: | :--- | :--- |
 | `outputs/runtime/results/dialogue1_refined` | 2 | 253 | 56.110 秒 | 59 个原区间发生切分，插入 83 段 | 关闭 |
 | `outputs/runtime/results/liuyangyang_refined` | 3 | 408 | 104.981 秒 | 52 个原区间发生切分，插入 61 段 | 关闭 |
+
+FireRedVAD 并行预取验证位于
+`outputs/measurements/20261020T-hybrid-deepseek-liuyangyang-postwarmup/prefetch-vad/`。在同一份
+3600.614 秒录音上，串行和并行两组的 811 个 VAD 区间及 LLM 前原始 ASR 完全一致；预热后
+端到端从 115.076 秒降至 88.999 秒。全局 VAD 实际运行 23.825 秒，join 等待为 0.000025 秒，
+缓存求交为 0.059 秒。该记录是单次 feature 验证，不替代多次重复验收。
+
+正式实现的单次 GPU0 验收位于
+`outputs/measurements/20261020T-hybrid-vad-prefetch-production-acceptance/`。同一录音的预热后
+端到端耗时为 92.292 秒，较串行基线 115.076 秒缩短 19.8%；全局 VAD 实际运行 23.742 秒，
+关键路径 join 等待为 0.000013 秒，缓存求交与协议往返为 0.056 秒。资源采样记录的本项目
+GPU 峰值为 6858 MiB，无 warning。串行与正式实现的 AED 计划逐字段一致，均为 811 个 item、
+27 个 batch；409 个最终话轮的起止时间和说话人序列也一致。两次结果有 8 个话轮文本不同，
+对应 DeepSeek 重复请求选择了不同纠错 patch（31 个与 32 个），不能归因于 VAD 预取。
+该验收仍是单次测量，性能结论需通过多次重复确认。
 
 一小时 LLM 对比记录位于 `outputs/llm_comparison_1h.json`，其请求耗时为 DeepSeek 10.55 秒、MiMo 32.84 秒、DashScope 52.32 秒。较早的 `outputs/measurements/20261019T-benchmark-postwarmup-llm-nemotron` 属于后置重组阶段，使用单 AED、`weighted_duration_single_worker`；该记录不能证明当前 pre-ASR refinement 或双 AED 的显存峰值。
 
@@ -167,3 +187,4 @@ $$Start_k \ge End_{k-1}$$
 | **大模型纠错阶段** | DeepSeek/Qwen/MiMo 接入、拼音编辑距离门控 | 纠正 ASR 谐音混淆 | 大模型容易脱离声学事实脑补 | 拼音门控守门，仅放行发音相似修正 |
 | **混合前置微调** | 并行推断、匈牙利对齐、Pre-ASR 局部切分、单调清洗 | 提高短插话进入 AED 的机会，同时保留 3D-Speaker 全局 ID 空间 | 边界处理不当可能导致起音或权威区间尾段丢失 | 前向所有权接管 + 权威尾段保留 + 严格单调契约 |
 | **工程平滑阶段** | In-memory Slicing、同说话人时限自然合并 | 普通 direct-crop 路径减少临时文件，缓解碎片化短句 | ClearVoice splice 仍会落盘；hybrid 默认关闭 | 当前 feature 分支的可选验证路径 (`23ba41a`) |
+| **VAD 并行阶段** | 全局 VAD 预取、路径缓存、future join | 保留 VAD 输出语义并隐藏长音频 VAD 墙钟时间 | 短音频或无长 speaker 区间时可能产生无效预取 | 超过 10 秒的 Hybrid 请求启用，计划仍在 join 后冻结 |

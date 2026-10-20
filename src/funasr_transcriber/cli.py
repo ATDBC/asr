@@ -259,12 +259,12 @@ def _parser() -> argparse.ArgumentParser:
     nemotron_group.add_argument(
         "--enable-nemotron-interruption",
         action="store_true",
-        help="enable Nemotron-3 clause interruption reassembly",
+        help="enable Nemotron-3 pre-ASR hybrid segment refinement",
     )
     nemotron_group.add_argument(
         "--disable-nemotron-interruption",
         action="store_true",
-        help="disable Nemotron-3 clause interruption reassembly",
+        help="disable Nemotron-3 pre-ASR hybrid segment refinement",
     )
     parser.add_argument("--profile-resources", action="store_true")
     parser.add_argument(

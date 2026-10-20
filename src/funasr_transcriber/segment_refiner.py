@@ -170,7 +170,10 @@ def refine_segments_with_nemotron(
                 if n.speaker_id == s.speaker_id
                 and n.end_ms > ins_end and n.start_ms < s.end_ms
             ]
-            next_start = min([n.start_ms for n in s_nem_after], default=s.end_ms)
+            next_start = min(
+                [n.start_ms for n in s_nem_after],
+                default=ins_end,
+            )
             if i + 1 < len(inserted):
                 next_start = min(next_start, inserted[i+1][1])
 
@@ -180,12 +183,7 @@ def refine_segments_with_nemotron(
             refined.append(SpeakerSegment(ins_spk, ins_start, ins_end))
             current_start = max(next_start, ins_end)
 
-        s_nem_tail = [
-            n for n in aligned_nemotron
-            if n.speaker_id == s.speaker_id
-            and n.end_ms > current_start and n.start_ms < s.end_ms
-        ]
-        if s_nem_tail and s.end_ms > current_start + 100:
+        if s.end_ms > current_start + 100:
             refined.append(SpeakerSegment(s.speaker_id, current_start, s.end_ms))
 
     refined.sort(key=lambda seg: (seg.start_ms, seg.end_ms))

@@ -217,10 +217,25 @@ class DeepSeekCorrector:
                     .get("content", "{}")
                 )
                 parsed = json.loads(content)
-                entities_discovered = parsed.get("entities", [])
+                if not isinstance(parsed, dict):
+                    raise ValueError(
+                        "invalid structured response: root must be an object"
+                    )
+                raw_entities = parsed.get("entities", [])
                 raw_patches = parsed.get("patches", [])
+                if not isinstance(raw_entities, list) or not all(
+                    isinstance(item, str) for item in raw_entities
+                ):
+                    raise ValueError(
+                        "invalid structured response: entities must be strings"
+                    )
+                if not isinstance(raw_patches, list):
+                    raise ValueError(
+                        "invalid structured response: patches must be a list"
+                    )
+                entities_discovered = raw_entities
             except Exception as exc:
-                err_msg = f"{self.config.provider} API call failed: {exc}"
+                err_msg = f"{self.config.provider} post-correction failed: {exc}"
                 logger.warning(err_msg)
                 warnings.append(err_msg)
                 if diagnostics is not None:

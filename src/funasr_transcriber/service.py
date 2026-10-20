@@ -84,6 +84,12 @@ def _close_owner(owner: Any) -> None:
         close()
 
 
+def _shutdown_background_executor(executor: ThreadPoolExecutor) -> None:
+    """Wait until a running project-owned background task has exited."""
+
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
 class HotModelHost:
     """Own the hot FireRed AED owner and one 3D-Speaker diarizer."""
 
@@ -729,14 +735,22 @@ class ServiceJobRunner:
             overrides["provider"] = request.llm_provider
         elif request.llm_model:
             m_lower = str(request.llm_model).lower()
-            if "mimo" in m_lower:
+            if "deepseek" in m_lower:
+                overrides["provider"] = "deepseek"
+            elif "mimo" in m_lower:
                 overrides["provider"] = "mimo"
             elif "qwen" in m_lower or "dashscope" in m_lower:
                 overrides["provider"] = "dashscope"
 
         provider = overrides.get("provider", self.config.llm.provider)
+        if provider == "openai_compatible" and not request.llm_base_url:
+            raise TranscriptionError(
+                "llm_base_url is required for openai_compatible"
+            )
         if request.llm_base_url:
             overrides["base_url"] = request.llm_base_url
+        elif provider == "deepseek" and "deepseek" not in self.config.llm.base_url:
+            overrides["base_url"] = "https://api.deepseek.com"
         elif provider == "mimo" and "mimo" not in self.config.llm.base_url:
             overrides["base_url"] = "https://token-plan-cn.xiaomimimo.com/v1"
         elif provider in {"dashscope", "qwen"} and "dashscope" not in self.config.llm.base_url:
@@ -744,10 +758,13 @@ class ServiceJobRunner:
 
         if request.llm_api_key:
             overrides["api_key"] = request.llm_api_key
-        elif provider == "mimo":
-            overrides["api_key_env"] = "MIMO_API_KEY"
-        elif provider in {"dashscope", "qwen"}:
-            overrides["api_key_env"] = "DASHSCOPE_API_KEY"
+        elif "provider" in overrides:
+            if provider == "deepseek":
+                overrides["api_key_env"] = "DEEPSEEK_API_KEY"
+            elif provider == "mimo":
+                overrides["api_key_env"] = "MIMO_API_KEY"
+            elif provider in {"dashscope", "qwen"}:
+                overrides["api_key_env"] = "DASHSCOPE_API_KEY"
 
         if overrides:
             from dataclasses import replace
@@ -1481,7 +1498,7 @@ class ServiceJobRunner:
                             "AED CUDA cache cleanup failed while preserving job error"
                         )
             if "nemotron_executor" in locals() and nemotron_executor is not None:
-                nemotron_executor.shutdown(wait=False, cancel_futures=True)
+                _shutdown_background_executor(nemotron_executor)
             if sampler is not None and not profile_finished:
                 sampler.stop()
             self._active_overlap_pid = None

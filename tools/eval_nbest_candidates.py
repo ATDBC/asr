@@ -12,14 +12,14 @@ from fireredasr2s.fireredvad import FireRedVadConfig
 def main():
     wav_path = "/mnt/hdd/jiajun/project/standalone_transcriber/outputs/runtime/audio/对话录音-1_1.wav"
     model_root = "/mnt/hdd/jiajun/project/standalone_transcriber/models/fireredasr2s"
-    
+
     print("Loading audio...")
     wav_np, sample_rate = sf.read(wav_path, dtype="int16")
     assert sample_rate == 16000
 
     print("Initializing FireRedAsr2System with beam_size=10, nbest=10...")
     torch.cuda.set_device(0)
-    
+
     config = FireRedAsr2SystemConfig(
         vad_model_dir=str(Path(model_root) / "FireRedVAD" / "VAD"),
         asr_type="aed",
@@ -45,7 +45,7 @@ def main():
     )
     system = FireRedAsr2System(config)
     asr = system.asr
-    
+
     test_segments = [
         ("Segment 1: 丹丹酒 vs 丹丹主任 (16.44s - 22.51s)", 16.44, 22.51),
         ("Segment 2: 丹丹酒局部聚焦 (19.0s - 22.0s)", 19.0, 22.0),
@@ -61,17 +61,17 @@ def main():
         e_idx = int(end_s * sample_rate)
         sub_wav = wav_np[s_idx:e_idx]
         dur = len(sub_wav) / sample_rate
-        
+
         batch_uttid = [f"test_s{int(start_s*1000)}_e{int(end_s*1000)}"]
         batch_wav = [(sample_rate, sub_wav)]
-        
+
         feats, lengths, durs, _, _ = asr.feat_extractor(batch_wav, batch_uttid)
         feats, lengths = feats.cuda(), lengths.cuda()
         if torch.cuda.is_bf16_supported():
             feats = feats.bfloat16()
         else:
             feats = feats.half()
-            
+
         with torch.no_grad():
             hyps = asr.model.transcribe(
                 feats, lengths,
@@ -85,7 +85,7 @@ def main():
                 elm=asr.elm,
                 elm_weight=0.0
             )
-            
+
         cand_list = hyps[0]
         print(f"Extracted {len(cand_list)} candidate hypotheses:")
         for rank, hyp in enumerate(cand_list, start=1):

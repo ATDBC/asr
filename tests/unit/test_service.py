@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -18,6 +19,7 @@ from funasr_transcriber.schemas import (
     TimedToken,
 )
 from funasr_transcriber.service import (
+    _shutdown_background_executor,
     build_hot_model_host,
     DaemonService,
     HotModelHost,
@@ -51,6 +53,69 @@ def _result() -> AsrResult:
         vad_segments_ms=((0, 500),),
         duration_ms=600,
     )
+
+
+def test_shutdown_background_executor_waits_for_running_task():
+    started = threading.Event()
+    release = threading.Event()
+
+    def operation():
+        started.set()
+        release.wait(timeout=1)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(operation)
+    assert started.wait(timeout=1)
+    threading.Timer(0.05, release.set).start()
+
+    _shutdown_background_executor(executor)
+
+    assert future.done()
+
+
+def test_deepseek_provider_override_uses_deepseek_endpoint(tmp_path: Path):
+    config = load_config(
+        cli_overrides={
+            "paths.work_dir": str(tmp_path / "work"),
+            "llm.provider": "mimo",
+            "llm.base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+        }
+    )
+    runner = ServiceJobRunner.__new__(ServiceJobRunner)
+    runner.config = config
+    runner._llm_corrector_factory = lambda: None
+
+    corrector = runner._create_llm_corrector(
+        ServiceRequest(
+            identifier="provider-override",
+            action="submit",
+            llm_enabled=True,
+            llm_provider="deepseek",
+        )
+    )
+
+    assert corrector.config.provider == "deepseek"
+    assert corrector.config.base_url == "https://api.deepseek.com"
+    assert corrector.config.api_key_env == "DEEPSEEK_API_KEY"
+
+
+def test_openai_compatible_provider_requires_explicit_endpoint(tmp_path: Path):
+    config = load_config(
+        cli_overrides={"paths.work_dir": str(tmp_path / "work")}
+    )
+    runner = ServiceJobRunner.__new__(ServiceJobRunner)
+    runner.config = config
+    runner._llm_corrector_factory = lambda: None
+
+    with pytest.raises(TranscriptionError, match="llm_base_url"):
+        runner._create_llm_corrector(
+            ServiceRequest(
+                identifier="openai-compatible-without-endpoint",
+                action="submit",
+                llm_enabled=True,
+                llm_provider="openai_compatible",
+            )
+        )
 
 
 def test_owned_pid_getters_name_all_resident_owners():

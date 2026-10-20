@@ -87,3 +87,51 @@ def test_refine_segments_does_not_split_brief_noise():
     refined, stats = refine_segments_with_nemotron(base, nem)
     assert stats["splits"] == 0
     assert len(refined) == 2
+
+
+def test_refine_segments_preserves_base_tail_when_nemotron_misses_it():
+    base = (
+        SpeakerSegment(1, 0, 10000),
+        SpeakerSegment(2, 10000, 15000),
+    )
+    nem = (
+        SpeakerSegment(1, 0, 4500),
+        SpeakerSegment(2, 4000, 6000),
+        SpeakerSegment(2, 10000, 15000),
+    )
+
+    refined, stats = refine_segments_with_nemotron(base, nem)
+
+    assert stats == {"splits": 1, "inserted_count": 1}
+    assert [
+        (segment.speaker_id, segment.start_ms, segment.end_ms)
+        for segment in refined
+    ] == [
+        (1, 0, 4000),
+        (2, 4000, 6000),
+        (1, 6000, 10000),
+        (2, 10000, 15000),
+    ]
+
+
+def test_refine_segments_keeps_forward_takeover_without_base_head_activity():
+    base = (
+        SpeakerSegment(1, 0, 10000),
+        SpeakerSegment(2, 10000, 15000),
+    )
+    nem = (
+        SpeakerSegment(2, 2000, 4000),
+        SpeakerSegment(1, 4200, 10000),
+        SpeakerSegment(2, 10000, 15000),
+    )
+
+    refined, _ = refine_segments_with_nemotron(base, nem)
+
+    assert [
+        (segment.speaker_id, segment.start_ms, segment.end_ms)
+        for segment in refined
+    ] == [
+        (2, 0, 4200),
+        (1, 4200, 10000),
+        (2, 10000, 15000),
+    ]

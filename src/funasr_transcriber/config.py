@@ -101,7 +101,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "temperature": 0.1,
         "timeout_seconds": 60,
         "pinyin_gate_threshold": 0.5,
-        "max_context_turns": 100,
+        # Compatibility-only: accepted from older TOML files but ignored.
+        "max_context_turns": None,
     },
 }
 
@@ -219,7 +220,6 @@ class LLMConfig:
     temperature: float
     timeout_seconds: int
     pinyin_gate_threshold: float
-    max_context_turns: int
 
     def resolve_api_key(self) -> str:
         """Resolve API key from direct config or environment variable."""
@@ -464,7 +464,6 @@ def _build(values: dict[str, dict[str, Any]]) -> AppConfig:
             temperature=float(values["llm"]["temperature"]),
             timeout_seconds=int(values["llm"]["timeout_seconds"]),
             pinyin_gate_threshold=float(values["llm"]["pinyin_gate_threshold"]),
-            max_context_turns=int(values["llm"]["max_context_turns"]),
         ),
     )
     return validate(config)
@@ -569,8 +568,6 @@ def validate(config: AppConfig) -> AppConfig:
         raise ValueError("llm timeout_seconds must be positive")
     if not (0.0 <= llm.pinyin_gate_threshold <= 1.0):
         raise ValueError("llm pinyin_gate_threshold must stay within 0..1")
-    if llm.max_context_turns <= 0:
-        raise ValueError("llm max_context_turns must be positive")
     return config
 
 

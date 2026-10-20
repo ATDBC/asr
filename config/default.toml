@@ -37,6 +37,7 @@ major_cluster_merge_threshold = 0.88
 worker_python = "/opt/funasr-transcriber/.venv-nemotron/bin/python"
 timeout_seconds = 1800
 activity_threshold = 0.5
+# Historical key name; enables pre-ASR hybrid segment refinement.
 clause_reassembly = false
 min_interruption_ratio = 0.50
 min_clause_ms = 400
@@ -89,4 +90,3 @@ enable_thinking = false
 temperature = 0.1
 timeout_seconds = 60
 pinyin_gate_threshold = 0.5
-max_context_turns = 100

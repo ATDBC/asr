@@ -57,7 +57,6 @@ def test_corrector_noop_when_key_missing_and_disabled():
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     corrector = DeepSeekCorrector(config)
     transcript = create_sample_transcript()
@@ -80,7 +79,6 @@ def test_corrector_warns_when_key_missing_and_enabled():
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     corrector = DeepSeekCorrector(config)
     transcript = create_sample_transcript()
@@ -102,7 +100,6 @@ def test_corrector_dry_run_patches_applied_and_rejected():
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     corrector = DeepSeekCorrector(config)
     transcript = create_sample_transcript()
@@ -176,7 +173,6 @@ def test_corrector_mock_api_call():
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     corrector = DeepSeekCorrector(config)
     transcript = create_sample_transcript()
@@ -236,7 +232,6 @@ def test_corrector_api_network_error_fallback():
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     corrector = DeepSeekCorrector(config)
     transcript = create_sample_transcript()
@@ -253,6 +248,44 @@ def test_corrector_api_network_error_fallback():
         assert any("Connection refused" in w for w in result.warnings)
 
 
+def test_corrector_malformed_structured_response_falls_back():
+    config = LLMConfig(
+        enabled=True,
+        provider="deepseek",
+        api_key="sk-test-key-12345",
+        api_key_env="DEEPSEEK_API_KEY",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4.1-flash",
+        enable_thinking=False,
+        temperature=0.1,
+        timeout_seconds=60,
+        pinyin_gate_threshold=0.5,
+    )
+    corrector = DeepSeekCorrector(config)
+    transcript = create_sample_transcript()
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({"entities": [], "patches": None}),
+                }
+            }
+        ]
+    }
+    mock_response.raise_for_status.return_value = None
+
+    with patch("httpx.Client.post", return_value=mock_response):
+        result = corrector.correct(transcript)
+
+    assert result.transcript == transcript
+    assert result.patches_applied == ()
+    assert any(
+        "invalid structured response" in warning
+        for warning in result.warnings
+    )
+
+
 def test_corrector_mimo_config_and_mock_api_call():
     config = LLMConfig(
         enabled=True,
@@ -265,7 +298,6 @@ def test_corrector_mimo_config_and_mock_api_call():
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     corrector = DeepSeekCorrector(config)
     transcript = create_sample_transcript()
@@ -324,7 +356,6 @@ def test_corrector_dashscope_config_and_mock_api_call():
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     corrector = DeepSeekCorrector(config)
     transcript = create_sample_transcript()
@@ -388,7 +419,6 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     assert cfg_mimo.resolve_api_key() == "env-mimo-key"
 
@@ -403,7 +433,6 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     assert cfg_mimo_fallback_empty.resolve_api_key() == "env-mimo-key"
 
@@ -418,7 +447,6 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     assert cfg_mimo_fallback_default.resolve_api_key() == "env-mimo-key"
 
@@ -433,7 +461,6 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     assert cfg_custom_missing.resolve_api_key() == ""
 
@@ -448,7 +475,6 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     assert cfg_deepseek.resolve_api_key() == "env-deepseek-key"
 
@@ -463,7 +489,6 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     assert cfg_dashscope.resolve_api_key() == "env-dashscope-key"
 
@@ -478,6 +503,5 @@ def test_llm_config_resolve_api_key_for_mimo_and_deepseek(monkeypatch):
         temperature=0.1,
         timeout_seconds=60,
         pinyin_gate_threshold=0.5,
-        max_context_turns=100,
     )
     assert cfg_qwen_fallback_default.resolve_api_key() == "env-dashscope-key"

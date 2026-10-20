@@ -315,7 +315,15 @@ def test_default_llm_configuration():
     assert config.llm.temperature == 0.1
     assert config.llm.timeout_seconds == 60
     assert config.llm.pinyin_gate_threshold == 0.5
-    assert config.llm.max_context_turns == 100
+
+
+def test_llm_configuration_ignores_removed_context_turn_limit(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("[llm]\nmax_context_turns = 100\n", encoding="utf-8")
+
+    config = load_config(path)
+
+    assert not hasattr(config.llm, "max_context_turns")
 
 
 def test_llm_configuration_can_be_customized(tmp_path: Path):
@@ -346,7 +354,6 @@ def test_llm_configuration_can_be_customized(tmp_path: Path):
         ("timeout_seconds = 0", "llm timeout_seconds"),
         ("pinyin_gate_threshold = -0.1", "llm pinyin_gate_threshold"),
         ("pinyin_gate_threshold = 1.5", "llm pinyin_gate_threshold"),
-        ("max_context_turns = 0", "llm max_context_turns"),
     ),
 )
 def test_llm_configuration_rejects_invalid_values(

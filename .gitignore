@@ -27,3 +27,4 @@ checkpoints/
 .env
 .env.*
 !.env.example
+data/

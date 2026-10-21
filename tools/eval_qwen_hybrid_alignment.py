@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from funasr_transcriber.config import load_config
-from funasr_transcriber.exporters import export_transcript
+from funasr_transcriber.exporters import export_transcript, format_timestamp
 from funasr_transcriber.qwen_client import QwenTranscriberClient, parse_qwen_transcription
 from funasr_transcriber.qwen_hybrid_aligner import align_qwen_with_diarization
 from funasr_transcriber.schemas import SpeakerSegment
@@ -116,10 +116,14 @@ def run_live_diarization(audio_path: Path, config_path: Path | None) -> list[Spe
 
 def main() -> int:
     args = parse_args()
+    load_config(args.config)
     audio_path = args.audio.resolve()
     if not audio_path.is_file():
         LOGGER.error("Audio file not found: %s", audio_path)
         return 1
+
+    out_dir = args.output_dir or Path("outputs/runtime/qwen_hybrid") / audio_path.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Obtain Qwen transcription result
     if args.qwen_cache and args.qwen_cache.is_file():
@@ -131,6 +135,9 @@ def main() -> int:
         LOGGER.info("Calling DashScope Qwen-Audio API for %s...", audio_path.name)
         client = QwenTranscriberClient()
         qwen_res = client.transcribe(audio_path)
+        raw_path = out_dir / "qwen_raw.json"
+        raw_path.write_text(json.dumps(qwen_res.raw_response, ensure_ascii=False, indent=2), encoding="utf-8")
+        LOGGER.info("Saved raw Qwen ASR response to %s", raw_path)
 
     LOGGER.info(
         "Qwen transcription: %d sentences, %d words",
@@ -162,23 +169,16 @@ def main() -> int:
     )
 
     # 4. Export results
-    out_dir = args.output_dir or Path("outputs/runtime/qwen_hybrid") / audio_path.stem
     txt_path, json_path = export_transcript(transcript, out_dir, overwrite=True)
     LOGGER.info("Exported transcript to:")
     LOGGER.info("  TXT : %s", txt_path)
     LOGGER.info("  JSON: %s", json_path)
 
     print("\n" + "=" * 70)
-    print("=== First 10 Conversational Turns ===")
+    print("=== Aligned Conversational Turns ===")
     print("=" * 70)
-    for t in transcript.turns[:10]:
-        print(f"[{t.start_ms//1000:02d}:{(t.start_ms%1000)//10:02d}] 说话人{t.speaker_id}：{t.text}")
-
-    print("\n" + "=" * 70)
-    print("=== Last 5 Conversational Turns ===")
-    print("=" * 70)
-    for t in transcript.turns[-5:]:
-        print(f"[{t.start_ms//1000:02d}:{(t.start_ms%1000)//10:02d}] 说话人{t.speaker_id}：{t.text}")
+    for t in transcript.turns:
+        print(f"[{format_timestamp(t.start_ms)}] 说话人{t.speaker_id}：{t.text}")
 
     return 0
 

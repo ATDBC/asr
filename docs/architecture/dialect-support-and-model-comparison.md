@@ -96,16 +96,21 @@ Qwen-Audio-3.1-ASR 是阿里云百炼推出的端到端语音大模型。其文�
 
 ### 温州话实测案例（温州市鹿城区民间故事《吃粥选女婿》前 45 秒）
 
+- **本地音频与真值资源**：
+  - 45秒评测切片：[`audio_test/wenzhou_story_45s.wav`](../../audio_test/wenzhou_story_45s.wav)
+  - 3.5分钟完整录音：[`audio_test/wenzhou_story.mp3`](../../audio_test/wenzhou_story.mp3)
+  - 官方方言字/意译真值：[`audio_test/wenzhou_story_groundtruth.json`](../../audio_test/wenzhou_story_groundtruth.json)
+
 - **真值对照（方言字 / 普通话意译）**：
   > 溫州民間故事，喫粥選女兒婿。早年能界（以前的時候），楠溪江有一個員外屋裏（家裏），有一個女兒生好顯生好（長得很好看）。渠想選女兒婿。消息一傳啊開，驚動爻多顯多個後生兒（年輕人）。渠徠全部走來託媒相親。講親。有徠屋裏極有鈔票（很有錢），有徠屋裏做官個，有徠屋裏讀書極有出息。該員外個眼珠吶就眙眙花啦爻（眼睛都看花了），決定弗落（決定不下來）。祇好女兒自出主意。
 
-- **云端 Qwen 混合版 (`qwen-audio-3.1-asr-flash-filetrans`)**：
+- **云端 Qwen 混合版 (`qwen-audio-3.1-asr-flash-filetrans`)** [转录文本](../../outputs/runtime/wenzhou_qwen_45s/transcript.txt) / [结构化JSON](../../outputs/runtime/wenzhou_qwen_45s/transcript.json)：
   ```text
   [00:00:03] 说话人1：温州民间故事，喝酒选女婿。早年的时候，楠溪江有一个员外家里，有一个女儿长得非常好看，他喜欢女儿玩，玩着玩着，惊动了许许多多的小孩子，他们全部过来偷看，说亲，有的家里很有钱，有的家里做官的，有的家里读书很有出息，这个员外的眼睛呢，都看花了。
   [00:00:39] 说话人1：激动不了，只好让女儿自己出主意。
   ```
 
-- **讯飞 IFASR (`autodialect` 免切方言大模型)**：
+- **讯飞 IFASR (`autodialect` 免切方言大模型)** [转录文本](../../outputs/runtime/wenzhou_iflytek_45s/transcript.txt) / [结构化JSON](../../outputs/runtime/wenzhou_iflytek_45s/transcript.json)：
   ```text
   [00:00:03] 说话人1：19门赶故事，此就许男。这你那个男子国有一个女娲屋里有一个男小息时候，给是许男生小谢一句去
   [00:00:18] 说话人1：江东我东西都要想给了一部走来偷卖西餐，国产有的屋里再有钞票，有的屋里做官的，有的屋里读书就要出世跟女娲的样子呢有支吃花了，
@@ -113,7 +118,7 @@ Qwen-Audio-3.1-ASR 是阿里云百炼推出的端到端语音大模型。其文�
   [00:00:44] 说话人1：那
   ```
 
-- **本地混合版 (FireRedASR2-AED + FireRedPunc)**：
+- **本地混合版 (FireRedASR2-AED + FireRedPunc)** [转录文本](../../outputs/runtime/wenzhou_local_45s/transcript.txt) / [结构化JSON](../../outputs/runtime/wenzhou_local_45s/transcript.json)：
   ```text
   [00:00:03] 说话人1：一九梦噶故事，此九虚囊塞。
   [00:00:08] 说话人1：昨日那个男主角要一个女娃娃嘞。有一个让学习结合。给嘘嘘那样噻。Thisisjackie.讲多我读书读妖仙。给了。你不咋嘞？偷卖西餐。国仓？要来屋里才有钞票，要来屋里做鬼，要来屋里到世界上去睡。这女娲这样子呢，又只吃胡萝。
@@ -124,6 +129,21 @@ Qwen-Audio-3.1-ASR 是阿里云百炼推出的端到端语音大模型。其文�
 1. **Qwen 大模型对温州话语义呈现压倒性优势**：成功克服了温州话“天书方言”的障碍，将地点（楠溪江）、人物（员外、长相好看的女儿）、核心情节（选女婿、大家托媒说亲、眼花看不过来、让女儿自己出主意）完整规范化转写为现代普通话。
 2. **讯飞虽然捕获部分方言词汇，但通篇句意严重断裂**：讯飞抓住了“有的屋里……有的屋里做官的，有的屋里读书……有支吃花了”，但因同音字混淆，大部分句子被识别为离奇内容（如“19门赶故事”、“偷卖西餐”、“女娲屋里”、“激动俘虏之后哈那尔失去之意”）。
 3. **本地 FireRed 完全无法理解温州话**：由于仅涵盖北部吴语，对纯正温州方言基本处于无声学泛化状态，产生大量乱码与英文幻觉。
+
+---
+
+## 6. 语料与转录产物路径索引
+
+| 资源类别 | 对应文件路径 | 说明 |
+| :--- | :--- | :--- |
+| **温州话评测切片** | [`audio_test/wenzhou_story_45s.wav`](../../audio_test/wenzhou_story_45s.wav) | 45 秒 16kHz 单声道 PCM，用于各模型横向对比评测 |
+| **温州话完整录音** | [`audio_test/wenzhou_story.mp3`](../../audio_test/wenzhou_story.mp3) | 3 分 35 秒完整音频（民间故事《吃粥选女婿》） |
+| **温州话官方真值** | [`audio_test/wenzhou_story_groundtruth.json`](../../audio_test/wenzhou_story_groundtruth.json) | 乡音苑官方标注（含方言字、普通话意译、IPA音标） |
+| **粤语评测音频** | [`audio_test/粤语 1.m4a`](../../audio_test/粤语%201.m4a) | 6.3 秒真实粤语对话测试音频 |
+| **Qwen 评测输出** | [`outputs/runtime/wenzhou_qwen_45s/`](../../outputs/runtime/wenzhou_qwen_45s/) | 包含 `transcript.txt`, `transcript.json`, `qwen_raw.json` |
+| **讯飞 评测输出** | [`outputs/runtime/wenzhou_iflytek_45s/`](../../outputs/runtime/wenzhou_iflytek_45s/) | 包含 `transcript.txt`, `transcript.json`, `ifasr_raw.json` |
+| **本地 评测输出** | [`outputs/runtime/wenzhou_local_45s/`](../../outputs/runtime/wenzhou_local_45s/) | 包含 `transcript.txt`, `transcript.json`, `diagnostics.json` |
+
 
 
 

@@ -67,6 +67,31 @@ funasr-transcribe service stop --config /etc/funasr-transcriber.toml
 启用资源采样，`--diagnostics deep` 额外写出完整调度和逐 batch trace；`--profile-resources` 是
 `resources` 的兼容别名。默认输出的 `resource_profile` 为 `{ "enabled": false }`。
 
+### Hybrid 长音频的 FireRedVAD 预取
+
+显式启用 `--enable-nemotron-interruption` 且输入超过 10 秒时，归一化完成后并行启动：
+
+```text
+                    ┌─ 3D-Speaker ───────────────┐
+normalized.wav ─────┼─ Nemotron ─────────────────┼─ Hybrid refinement ─┐
+                    └─ worker-0 全局 FireRedVAD ────────────────────────┤
+                                                                        ↓
+                                                         VAD × speaker 区间求交
+                                                                        ↓
+                                                         冻结 AED 计划并开始解码
+```
+
+预取通过现有 `refine_vad` 协议发送整段范围。worker-0 的 `GuardedVad` 按归一化音频路径缓存
+全局检测结果；Hybrid refinement 完成后，正式 `refine_vad` 调用命中缓存，只重新执行区间求交。
+服务必须等待 3D-Speaker、Nemotron 和 FireRedVAD future 全部完成后，才允许生成完整 AED 计划。
+短于或等于 10 秒的输入不预取。若最终没有超过 10 秒的 speaker 区间，预取结果不参与 AED，
+但仍记录 `used_for_long_segments=false`。
+
+`diagnostics.json.runtime.vad_prefetch` 记录 VAD worker 实际耗时、join 等待时间、全局区间数和
+是否被长 speaker 区间使用；`stage_seconds.normal.vad_prefetch_wait` 只记录关键路径上的等待时间。
+原有 `stage_seconds.normal.asr.vad` 在该模式下表示缓存结果的求交与协议往返，不代表全局 VAD
+神经推理耗时。
+
 ## FireRed worker 边界与功能归类
 
 本文中“FireRed worker”专指隔离常驻的 FireRed owner；生产部署为两个 AED worker 和一个唯一的
@@ -79,8 +104,9 @@ FireRedVAD 在功能上归属于说话人分离阶段：它只负责把超过 10
 支持 `warmup`、`cleanup_cuda_cache`、`refine_vad`、固定 `aed_plan`、`punctuate`、`transcribe`、`verify`、`status` 和 `shutdown`。ID 不匹配、重复响应、非法 JSON、
 超时或 worker 提前退出都会成为转录错误，不会切换旧 ASR。
 
-生产流程先由 worker-0 对 `vad_segments_ms`（diarization 段落原样发送）执行一次全局 VAD；
-主进程按预测耗时将完整 batch 计划分到两个 AED worker。worker 进程中的
+未启用 Hybrid 预取时，生产流程由 worker-0 对 `vad_segments_ms`（diarization 段落原样发送）
+串行执行一次全局 VAD；启用 Hybrid 预取时，同一检测在 3D-Speaker/Nemotron 期间提前完成。
+主进程随后按预测耗时生成完整 batch 计划。worker 进程中的
 说话人分离 VAD helper 用脚本化 VAD 重放这些段落，其中超过 10 秒的长 turn 触发一次全局
 神经 FireRedVAD，随后
 只保留落在各 speaker 段内部的交集（无交集时退化为 10 秒硬切分）。官方 AED/Punc 批处理与 uttid

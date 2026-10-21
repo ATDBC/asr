@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 
@@ -19,6 +19,7 @@ from funasr_transcriber.schemas import (
     TimedToken,
 )
 from funasr_transcriber.service import (
+    _start_vad_prefetch,
     _shutdown_background_executor,
     build_hot_model_host,
     DaemonService,
@@ -71,6 +72,32 @@ def test_shutdown_background_executor_waits_for_running_task():
     _shutdown_background_executor(executor)
 
     assert future.done()
+
+
+def test_start_vad_prefetch_submits_only_for_audio_over_ten_seconds(
+    tmp_path: Path,
+):
+    calls = []
+
+    class Worker:
+        def refine_vad(self, path, ranges):
+            calls.append((path, ranges))
+            return [[100, 900], [1200, 1800]]
+
+    owner = type("Owner", (), {"worker0": Worker()})()
+    audio = (tmp_path / "normalized.wav").resolve()
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        assert _start_vad_prefetch(owner, audio, 10_000, executor) is None
+        future = _start_vad_prefetch(owner, audio, 20_000, executor)
+        assert future is not None
+        segments, worker_seconds = future.result(timeout=1)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    assert segments == [[100, 900], [1200, 1800]]
+    assert worker_seconds >= 0
+    assert calls == [(audio, [[0, 20_000]])]
 
 
 def test_deepseek_provider_override_uses_deepseek_endpoint(tmp_path: Path):
@@ -476,6 +503,37 @@ def test_normal_job_runs_diarization_before_asr_with_segments(tmp_path: Path):
         SpeakerSegment(1, 0, 600),
         SpeakerSegment(2, 700, 1200),
     )
+
+
+def test_normal_job_joins_vad_prefetch_before_asr(tmp_path: Path):
+    future: Future = Future()
+
+    class LongDiarizer:
+        def diarize(self, path):
+            threading.Timer(
+                0.05,
+                lambda: future.set_result(([[0, 9000], [9100, 12000]], 2.5)),
+            ).start()
+            return (SpeakerSegment(1, 0, 12000),)
+
+    class PrefetchAwareAsr(RecordingAsr):
+        def transcribe(self, path, vad_segments_ms=None):
+            assert future.done()
+            return super().transcribe(path, vad_segments_ms)
+
+    asr = PrefetchAwareAsr()
+    result = run_normal_branches(
+        tmp_path / "normalized.wav",
+        asr,
+        LongDiarizer(),
+        vad_prefetch_future=future,
+    )
+
+    metrics = result.branch_metrics["vad_prefetch"]
+    assert metrics["worker_seconds"] == 2.5
+    assert metrics["join_wait_seconds"] > 0
+    assert metrics["global_segment_count"] == 2
+    assert metrics["used_for_long_segments"] is True
 
 
 class FailingDiarizer:

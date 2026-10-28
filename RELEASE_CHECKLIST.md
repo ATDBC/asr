@@ -6,8 +6,9 @@
 - [ ] FireRedVAD / FireRedASR2-AED / FireRedPunc assets verified
 - [ ] funasr-transcribe models download completed
 - [ ] funasr-transcribe models verify passed
-- [ ] GPU 0 reports at least 23 GiB total and 13,312 MiB free before the service hot-load
-- [ ] Historical serial-stage evidence records the former 12 GiB free threshold separately from the service budget
+- [ ] GPU 0 reports at least 23 GiB total; under current single-AED architecture, FireRed peak VRAM is ~5.5 GiB and strictly under 6 GiB (at least 13,312 MiB free before the service hot-load when co-resident with optional Nemotron)
+- [ ] Historical serial-stage evidence records the former 12 GiB free threshold and 9.04 GiB peak separately from the current single-worker service budget (~5.5 GiB, strictly bounded under 6 GiB)
+- [ ] Default production service runs with single AED worker (`aed_worker_count = 1`) and independent Punc owner in BF16
 - [ ] funasr-transcribe doctor full model smoke passed without `--skip-cuda`
 - [ ] GPU release evidence is present for FireRed, Speaker, and overlap doctor phases
 - [ ] Unit and integration tests passed
@@ -21,7 +22,7 @@
 - [ ] `segment_batch_size` GPU 0 calibration report records output equivalence, timing, and per-process memory peak
 - [ ] No-overlap run loads FireRed once; overlap run loads FireRed at most twice
 - [ ] Two sequential default jobs reuse one hot FireRed/3D-Speaker service owner
-- [ ] Profile-enabled job has `diagnostics.json.resource_profile.enabled == true` and contains only named project owners
+- [ ] Profile-enabled job has `diagnostics.json.resource_profile.enabled == true`, verifying FireRed resident peak VRAM is ~5.5 GiB (strictly bounded under 6 GiB) and contains only named project owners
 - [ ] `funasr-transcribe service status` reports ready before validation shutdown
 - [ ] `funasr-transcribe service stop` drains accepted work, removes this project's socket/state, and releases its FireRed PID
 - [ ] Main FireRed failure has no legacy ASR fallback; overlap failures degrade per window

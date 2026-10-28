@@ -4,14 +4,13 @@ Linux 上的独立普通话录音转录工具。输入音频，输出带毫秒�
 TXT、结构化 JSON 与诊断文件。
 
 默认流程为：3D-Speaker 说话人分离 → 对超过 10 秒的说话人区间使用 FireRedVAD
-细分 → FireRed AED → FireRedPunc。AED 可配置一个或两个常驻 worker，并由一个独立 Punc
-owner 处理标点；使用物理 GPU 0（`cuda:0`）与 BF16。Nemotron 3 是显式选择的可选说话人后端，
+细分 → FireRed AED → FireRedPunc。AED 默认采用单个常驻 worker（`aed_worker_count = 1`，亦可按需配置双 worker），并由一个独立 Punc
+owner 处理标点；使用物理 GPU 0（`cuda:0`）与 BF16。在当前单 worker 架构下，核心 FireRed 阶段实际显存占用约 5.5 GiB，严格控制在不会超过 6 GiB。Nemotron 3 是显式选择的可选说话人后端，
 不会取代默认 3D-Speaker。
 
 ## 1. 使用前确认
 
-- Linux、Python 3.11、Git、FFmpeg、NVIDIA GPU。启动前要求 GPU0 总显存至少 23 GiB；
-  Nemotron 与常驻 FireRed 共驻时，还要求当前空闲显存至少 13,312 MiB。
+- Linux、Python 3.11、Git、FFmpeg、NVIDIA GPU。启动前要求 GPU0 总显存至少 23 GiB（针对 RTX 3090/4090 等专业/消费级旗舰卡）。在当前单 AED worker 架构下，核心 FireRed 阶段显存峰值约 5.5 GiB，严格控制在不会超过 6 GiB；Nemotron 与常驻 FireRed 共驻时，还要求当前空闲显存至少 13,312 MiB。
 - 只支持物理 GPU 0，不要用 `CUDA_VISIBLE_DEVICES` 把其他 GPU 重映射成
   `cuda:0`。
 - 支持 WAV、MP3、M4A、FLAC、AAC、OGG，单个输入最长两小时。
@@ -91,7 +90,7 @@ work_dir = "/absolute/path/to/standalone_transcriber/outputs/runtime/work"
 [asr]
 worker_python = "/absolute/path/to/standalone_transcriber/.venv-asr/bin/python"
 use_half = true
-aed_worker_count = 2
+aed_worker_count = 1  # 生产推荐单 worker（显存约 5.5 GiB，不会超过 6 GiB；亦可配置为 2）
 aed_scheduler = "weighted_duration"
 aed_weight_artifact = ""
 
@@ -239,7 +238,7 @@ weighted-duration 调度只需要两个设备相关权重：
 预计耗时 = 最长片段秒数 × (longest_weight + padded_weight × 片段数)
 ```
 
-初始化命令只计算这两个权重。它不估计显存上限、双 worker 争用、VAD 或 Punc
+初始化命令只计算这两个权重。它不估计显存上限、worker 争用、VAD 或 Punc
 耗时，也不会自动修改配置或启动转录服务。
 
 ### 6.1 准备已切分片段清单
@@ -373,7 +372,7 @@ Torch 版本变化只记录 warning。权重在运行期间不会在线更新。
 ```
 
 首次请求会自动启动本项目后台服务。首次模型加载不计入作业耗时，但首次代表性预热
-计入第一个作业；每个作业结束前的两个 AED worker cache 清理也计入端到端耗时。
+计入第一个作业；每个作业结束前 AED worker 的 CUDA cache 清理（单 worker 或配置的双 worker 并行清理）也计入端到端耗时。
 
 查看或停止本项目服务：
 
@@ -450,8 +449,8 @@ nvidia-smi --id=0 --query-gpu=index,memory.total,memory.used,memory.free,utiliza
 ```
 
 等待 GPU 0 自然释放后重试。不要检查、暂停、终止或迁移其他项目进程。
-旧串行实现的准入门槛为 12 GiB，FireRed 四模块的历史净增峰值为 9.04 GiB；它们
-不是当前两个 AED worker 常驻架构的准入依据，不要据此降低当前门槛。
+
+当前生产环境已全面采用 **BF16 精度** 与 **单 AED worker 常驻**（`aed_worker_count = 1`），核心 FireRed 阶段（AED worker + Punc owner）实际显存占用稳定在**约 5.5 GiB，严格控制在不会超过 6 GiB**（早期 FP32 串行实现的准入门槛为 12 GiB，四模块历史净增峰值为 9.04 GiB，该旧指标已成为历史，不再作为当前单 worker 架构的依据）。前序 3D-Speaker 阶段独立运行，显存约 1.5 GiB，且阶段间显存不累加。若当前 GPU 0 可用显存低于运行预算，服务会报错退出以保证运行安全。
 
 ### 没有生成权重 artifact
 
